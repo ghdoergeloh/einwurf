@@ -166,6 +166,17 @@ describe("marks", () => {
     expect(await t.query(api.marks.inCell, { slug: SLUG, cell: CELL })).toEqual([]);
   });
 
+  test("auch Häuser mit „nicht möglich“ zählen zur Höchstzahl", async () => {
+    const t = await setup();
+    await t.run(async (ctx) => {
+      const c = await ctx.db.query("campaigns").first();
+      await ctx.db.patch(c!._id, { markCount: 0, blockedCount: MAX_MARKS_PER_CAMPAIGN });
+    });
+    await expect(
+      t.mutation(api.marks.set, { slug: SLUG, osmId: "way/2", status: "done", center: HOUSE }),
+    ).rejects.toThrow(/zu viele Markierungen/);
+  });
+
   test("ungültige Zelle oder unbekannte Aktion", async () => {
     const t = await setup();
     await expect(t.query(api.marks.inCell, { slug: SLUG, cell: "x" })).rejects.toThrow();

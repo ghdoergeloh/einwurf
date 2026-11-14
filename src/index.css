@@ -9,6 +9,8 @@
   --color-paper: #f6f5f1;
   --color-sun: #ffd60a;
   --color-sun-deep: #e8b500;
+  /* Einwerfen nicht möglich: dunkles, gräuliches Gelb (auch in BuildingMap.tsx) */
+  --color-blocked: #938443;
   --color-muted: #6b6f78;
 }
 

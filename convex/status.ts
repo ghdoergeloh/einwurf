@@ -1,6 +1,6 @@
 /**
  * Zustand eines Hauses. Antippen schaltet der Reihe nach weiter:
- * offen (schwarz) → Flyer drin (gelb) → nicht möglich (dunkelgelb) → offen.
+ * offen (grau) → Flyer drin (gelb) → nicht möglich (dunkelgelb) → offen.
  * Wird von Backend und Frontend genutzt.
  */
 export type HouseStatus = "none" | "done" | "blocked";

@@ -26,6 +26,10 @@ export function CampaignPage({ slug, isNew }: Props) {
       [cells, slug],
     ),
   );
+  const loadedMarkCells = useMemo(
+    () => new Set(Object.entries(cellResults).filter(([, r]) => Array.isArray(r)).map(([cell]) => cell)),
+    [cellResults],
+  );
   const marks = useMemo<Mark[]>(
     () => Object.values(cellResults).flatMap((r) => (Array.isArray(r) ? (r as Mark[]) : [])),
     [cellResults],
@@ -128,6 +132,7 @@ export function CampaignPage({ slug, isNew }: Props) {
           onToggle={onToggle}
           onLoadState={setLoadState}
           loadBuildings={loadBuildings}
+          loadedMarkCells={loadedMarkCells}
           controlsRef={controls}
         />
       )}
@@ -157,8 +162,9 @@ export function CampaignPage({ slug, isNew }: Props) {
           </div>
           {blocked > 0 && (
             <div
-              className="-ml-1.5 flex shrink-0 items-center gap-1 rounded-xl bg-[#8c7d3f] px-2 py-1.5 text-white"
+              className="-ml-1.5 flex shrink-0 items-center gap-1 rounded-xl bg-blocked px-2 py-1.5 text-ink"
               title="Einwerfen nicht möglich"
+              aria-live="polite"
             >
               <svg viewBox="0 0 24 24" className="size-3.5" fill="none" stroke="currentColor" strokeWidth="2.5" aria-hidden="true">
                 <circle cx="12" cy="12" r="8" />
@@ -264,11 +270,13 @@ function StatusPill({
     <div className={`${base} bg-ink/90 text-white backdrop-blur`}>
       <span className="flex shrink-0 flex-col gap-1" aria-hidden="true">
         <span className="size-3 rounded-[3px] bg-sun" />
-        <span className="size-3 rounded-[3px] bg-[#8c7d3f]" />
+        <span className="size-3 rounded-[3px] bg-blocked" />
       </span>
       <span>
         Haus antippen, wenn der Flyer drin ist.
-        <span className="block text-white/60">Nochmal: nicht möglich (z. B. „Keine Werbung“). Nochmal: zurück.</span>
+        <span className="block text-white/60">
+          Kurz danach nochmal: nicht möglich (z. B. „Keine Werbung“). Nochmal: wieder offen.
+        </span>
       </span>
     </div>
   );

@@ -15,7 +15,7 @@ import {
   type BuildingFeature,
 } from "../lib/overpass";
 import { DOUBLE_TAP_MS, dragZoomDelta, onPress, type Press } from "../lib/taps";
-import { markCellsIn } from "../../convex/cells";
+import { markCellOf, markCellsIn } from "../../convex/cells";
 import { nextStatus, statusOf, type HouseStatus, type MarkStatus } from "../../convex/status";
 
 // Ab MapLibre 6 braucht jeder Bundler den Pfad zum Worker.
@@ -39,8 +39,8 @@ const COLOR_HOUSE = "#24262c";
 const COLOR_HOUSE_LINE = "#0d0e11";
 const COLOR_MARKED = "#ffd60a";
 const COLOR_MARKED_LINE = "#c99a00";
-/** Einwerfen nicht möglich: dunkles, gräuliches Gelb. */
-export const COLOR_BLOCKED = "#8c7d3f";
+/** Einwerfen nicht möglich: dunkles, gräuliches Gelb (gleich --color-blocked in index.css). */
+const COLOR_BLOCKED = "#938443";
 const COLOR_BLOCKED_LINE = "#5e5326";
 
 export interface Mark {
@@ -61,6 +61,8 @@ interface Props {
   bbox: number[] | null;
   /** Markierungen der zuletzt gemeldeten Zellen. */
   marks: Mark[];
+  /** Markierungs-Zellen, deren Daten schon da sind. */
+  loadedMarkCells: Set<string>;
   /** Sichtbare Markierungs-Zellen; null = zu weit herausgezoomt. */
   onCellsChange: (cells: string[] | null) => void;
   /** Neuer Zustand nach einem Tipp (offen → Flyer drin → nicht möglich → offen). */
@@ -81,6 +83,7 @@ export function BuildingMap({
   onToggle,
   onLoadState,
   loadBuildings,
+  loadedMarkCells,
   controlsRef,
 }: Props) {
   const container = useRef<HTMLDivElement>(null);
@@ -93,6 +96,8 @@ export function BuildingMap({
   const onLoadStateRef = useRef(onLoadState);
   const onCellsChangeRef = useRef(onCellsChange);
   const loadBuildingsRef = useRef(loadBuildings);
+  const loadedMarkCellsRef = useRef(loadedMarkCells);
+  loadedMarkCellsRef.current = loadedMarkCells;
   loadBuildingsRef.current = loadBuildings;
   onToggleRef.current = onToggle;
   onLoadStateRef.current = onLoadState;
@@ -357,6 +362,9 @@ export function BuildingMap({
       const next = nextStatus(statusOf(mark));
       const center = mark?.center ?? (buildings.has(osmId) ? centerOf(buildings.get(osmId)!) : null);
       if (!center) return;
+      // Erst weiterschalten, wenn wir den Zustand des Hauses kennen; sonst könnte ein
+      // Tipp ein dunkelgelbes Haus, dessen Markierung noch lädt, auf gelb zurücksetzen.
+      if (!loadedMarkCellsRef.current.has(markCellOf(center[0], center[1]))) return;
       onToggleRef.current(osmId, next, center);
       navigator.vibrate?.(12);
     }
