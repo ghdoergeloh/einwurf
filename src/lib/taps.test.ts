@@ -1,5 +1,5 @@
 import { describe, expect, test } from "vitest";
-import { DOUBLE_TAP_MS, DOUBLE_TAP_PX, isSecondTap, onPress } from "./taps";
+import { DOUBLE_TAP_MS, DOUBLE_TAP_PX, DRAG_ZOOM_PX_PER_LEVEL, dragZoomDelta, isSecondTap, onPress } from "./taps";
 
 const p = (x: number, y: number, t: number) => ({ x, y, t });
 
@@ -19,4 +19,12 @@ describe("onPress", () => {
     expect(onPress(pending, p(105, 98, 1200))).toEqual({ kind: "double" }));
   test("schnell ein anderes Haus: erster sofort ausführen", () =>
     expect(onPress(pending, p(200, 100, 1100))).toEqual({ kind: "flush", previous: "way/1" }));
+});
+
+describe("dragZoomDelta", () => {
+  test("kleines Zittern zoomt nicht", () => expect(dragZoomDelta(3)).toBe(0));
+  test("nach unten hinein, nach oben hinaus", () => {
+    expect(dragZoomDelta(DRAG_ZOOM_PX_PER_LEVEL)).toBe(1);
+    expect(dragZoomDelta(-DRAG_ZOOM_PX_PER_LEVEL / 2)).toBe(-0.5);
+  });
 });

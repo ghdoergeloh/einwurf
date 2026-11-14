@@ -15,7 +15,7 @@ import {
   type BBox,
   type BuildingFeature,
 } from "../lib/overpass";
-import { DOUBLE_TAP_MS, onPress, type Press } from "../lib/taps";
+import { DOUBLE_TAP_MS, dragZoomDelta, onPress, type Press } from "../lib/taps";
 import { markCellsIn } from "../../convex/cells";
 
 // Ab MapLibre 6 braucht jeder Bundler den Pfad zum Worker.
@@ -161,9 +161,17 @@ export function BuildingMap({ center, bbox, marks, onCellsChange, onToggle, onLo
     }
     syncMarksRef.current = syncMarks;
 
-    function reportCells() {
+    /** Sichtbarer Ausschnitt plus Vorrat am Rand (gleich für Häuser und Markierungen). */
+    function paddedView(): BBox {
       const b = map.getBounds();
-      const cells = markCellsIn([b.getWest(), b.getSouth(), b.getEast(), b.getNorth()]);
+      const pad = map.getZoom() >= 16 ? 0.35 : 0.1;
+      const dx = (b.getEast() - b.getWest()) * pad;
+      const dy = (b.getNorth() - b.getSouth()) * pad;
+      return [b.getWest() - dx, b.getSouth() - dy, b.getEast() + dx, b.getNorth() + dy];
+    }
+
+    function reportCells() {
+      const cells = markCellsIn(paddedView());
       const next = cells.length > MAX_MARK_CELLS ? null : cells;
       const key = next ? next.join(",") : "-";
       if (key === lastCells) return;
@@ -186,12 +194,8 @@ export function BuildingMap({ center, bbox, marks, onCellsChange, onToggle, onLo
       if (inflight) return;
       // Nach einem Fehler nicht bei jedem Verschieben neu fragen (Overpass drosselt sonst noch mehr).
       if (!force && Date.now() < blockedUntil) return updateLoadState();
-      const b = map.getBounds();
       // Etwas über den Rand hinaus laden, damit beim Schieben keine leeren Flächen auftauchen.
-      const pad = map.getZoom() >= 16 ? 0.35 : 0;
-      const dx = (b.getEast() - b.getWest()) * pad;
-      const dy = (b.getNorth() - b.getSouth()) * pad;
-      const view: BBox = [b.getWest() - dx, b.getSouth() - dy, b.getEast() + dx, b.getNorth() + dy];
+      const view = paddedView();
       const missing = cellsFor(view).filter((c) => !loadedCells.has(cellKey(c.x, c.y)));
       if (missing.length === 0) return updateLoadState();
       // Mitte zuerst, falls der Ausschnitt größer ist als ein Abruf.
@@ -317,10 +321,13 @@ export function BuildingMap({ center, bbox, marks, onCellsChange, onToggle, onLo
       )[0];
     }
 
-    function toggleAt(point: maplibregl.Point) {
-      if (disposed || map.getZoom() < BUILDING_MIN_ZOOM - 0.5) return;
-      const osmId = pick(point)?.properties?.osmId as string | undefined;
-      if (!osmId) return;
+    function osmIdAt(point: maplibregl.Point): string | null {
+      if (map.getZoom() < BUILDING_MIN_ZOOM - 0.5) return null;
+      return (pick(point)?.properties?.osmId as string | undefined) ?? null;
+    }
+
+    function toggle(osmId: string | null) {
+      if (disposed || !osmId) return;
       const mark = marksRef.current.get(osmId);
       if (mark) {
         onToggleRef.current(osmId, false, mark.center);
@@ -332,15 +339,26 @@ export function BuildingMap({ center, bbox, marks, onCellsChange, onToggle, onLo
       navigator.vibrate?.(12);
     }
 
-    // Ein Tipp wartet kurz, ob ein zweiter folgt (Doppeltipp = Zoom, wie bei Google Maps).
-    // Die Regel steht in lib/taps.ts. Pointer-Events zählen jeden Druck genau einmal,
-    // egal ob Finger oder Maus.
-    let pending: { press: Press; payload: maplibregl.Point; timer: ReturnType<typeof setTimeout> } | null = null;
+    // Ein Tipp wartet kurz, ob ein zweiter folgt, wie bei Google Maps:
+    //   Doppeltipp = eine Stufe hinein, Doppeltipp und ziehen = mit einem Finger zoomen.
+    // Beides entscheidet die App selbst nach der Regel in lib/taps.ts; MapLibres eigene
+    // Erkennung ist dafür aus, damit es nur eine Regel gibt. Pointer-Events zählen jeden
+    // Druck genau einmal, egal ob Finger oder Maus.
+    map.touchZoomRotate._tapDragZoom.disable();
+    let pending: { press: Press; payload: string | null; timer: ReturnType<typeof setTimeout> } | null = null;
     let lastPress: Press | null = null;
     let doubleArmed = false;
+    let dragZoom: { pointerId: number; startY: number; startZoom: number; around: maplibregl.LngLat; moved: boolean } | null =
+      null;
     const clearPending = () => {
       if (pending) clearTimeout(pending.timer);
       pending = null;
+    };
+    const endDragZoom = () => {
+      if (!dragZoom) return;
+      if (dragZoom.moved) doubleArmed = false; // kein zusätzlicher Stufen-Zoom
+      dragZoom = null;
+      map.dragPan.enable();
     };
     const canvas = map.getCanvasContainer();
     const onPointerDown = (e: PointerEvent) => {
@@ -348,6 +366,7 @@ export function BuildingMap({ center, bbox, marks, onCellsChange, onToggle, onLo
         // Zweiter Finger (Pinch): kein Tipp.
         clearPending();
         doubleArmed = false;
+        endDragZoom();
         return;
       }
       const r = canvas.getBoundingClientRect();
@@ -358,12 +377,32 @@ export function BuildingMap({ center, bbox, marks, onCellsChange, onToggle, onLo
       if (action.kind === "double") {
         clearPending();
         doubleArmed = true;
+        // Zieht der Finger jetzt, wird gezoomt statt geschoben.
+        map.dragPan.disable();
+        dragZoom = {
+          pointerId: e.pointerId,
+          startY: e.clientY,
+          startZoom: map.getZoom(),
+          around: map.unproject([press.x, press.y]),
+          moved: false,
+        };
       } else if (action.kind === "flush") {
         clearPending();
-        toggleAt(action.previous);
+        toggle(action.previous);
       }
     };
+    const onPointerMove = (e: PointerEvent) => {
+      if (!dragZoom || e.pointerId !== dragZoom.pointerId) return;
+      const delta = dragZoomDelta(e.clientY - dragZoom.startY);
+      if (delta === 0 && !dragZoom.moved) return;
+      dragZoom.moved = true;
+      const zoom = Math.max(map.getMinZoom(), Math.min(map.getMaxZoom(), dragZoom.startZoom + delta));
+      map.easeTo({ zoom, around: dragZoom.around, duration: 0 });
+    };
     canvas.addEventListener("pointerdown", onPointerDown);
+    window.addEventListener("pointermove", onPointerMove);
+    window.addEventListener("pointerup", endDragZoom);
+    window.addEventListener("pointercancel", endDragZoom);
 
     map.on("click", (e) => {
       if (doubleArmed) {
@@ -374,13 +413,15 @@ export function BuildingMap({ center, bbox, marks, onCellsChange, onToggle, onLo
       }
       const press = lastPress ?? { x: e.point.x, y: e.point.y, t: performance.now() };
       clearPending();
-      const point = e.point;
+      // Das Haus jetzt bestimmen, nicht erst nach der Wartezeit: Bis dahin kann die Karte
+      // weitergerückt sein (Standortverfolgung, laufender Zoom).
+      const osmId = osmIdAt(e.point);
       pending = {
         press,
-        payload: point,
+        payload: osmId,
         timer: setTimeout(() => {
           pending = null;
-          toggleAt(point);
+          toggle(osmId);
         }, DOUBLE_TAP_MS),
       };
     });
@@ -394,6 +435,9 @@ export function BuildingMap({ center, bbox, marks, onCellsChange, onToggle, onLo
       disposed = true;
       clearPending();
       canvas.removeEventListener("pointerdown", onPointerDown);
+      window.removeEventListener("pointermove", onPointerMove);
+      window.removeEventListener("pointerup", endDragZoom);
+      window.removeEventListener("pointercancel", endDragZoom);
       inflight?.abort();
       if (controlsRef) controlsRef.current = null;
       syncMarksRef.current = null;

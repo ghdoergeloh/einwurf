@@ -142,6 +142,28 @@ try {
   assert.ok(Math.abs((await zoom(p)) - (z0 + 1)) < 0.01, "Doppeltipp zoomt eine Stufe");
   await shot(p, "4-after-dblclick");
 
+  // Doppeltipp und ziehen: mit einem Finger zoomen (nach unten = hinein), nichts markieren
+  const z1 = await zoom(p);
+  await p.mouse.click(cx + 120, cy + 120);
+  await p.mouse.move(cx + 120, cy + 120);
+  await p.mouse.down();
+  await p.mouse.move(cx + 120, cy + 270, { steps: 8 });
+  await p.mouse.up();
+  await p.waitForTimeout(800);
+  assert.equal(await count(p), "1", "Doppeltipp-und-ziehen darf nicht markieren");
+  assert.ok(Math.abs((await zoom(p)) - (z1 + 1)) < 0.05, "150 px ziehen = eine Zoomstufe");
+
+  // Rückt die Karte in der Wartezeit weiter (Standortverfolgung), zählt das angetippte Haus
+  const before = await markedAt(p, cx, cy);
+  await p.mouse.click(cx, cy);
+  await p.evaluate(() => window.__einwurfMap.panBy([200, 0], { duration: 0 }));
+  await p.waitForTimeout(800);
+  await p.evaluate(() => window.__einwurfMap.panBy([-200, 0], { duration: 0 }));
+  await p.waitForTimeout(500);
+  assert.equal(await markedAt(p, cx, cy), !before, "das angetippte Haus wurde umgeschaltet");
+  await p.mouse.click(cx, cy); // zurücksetzen
+  await p.waitForTimeout(800);
+
   // Funkloch: Die Verbindung zu Convex reißt ab → Hinweis, dass später gespeichert wird
   const off = await browser.newContext(phone);
   await mockOsm(off);

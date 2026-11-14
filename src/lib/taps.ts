@@ -32,3 +32,14 @@ export function onPress<T>(pending: { press: Press; payload: T } | null, next: P
   if (isSecondTap(pending.press, next)) return { kind: "double" };
   return { kind: "flush", previous: pending.payload };
 }
+
+/** Ab dieser Bewegung (px) wird aus einem Doppeltipp ein Ein-Finger-Zoom. */
+export const DRAG_ZOOM_THRESHOLD_PX = 6;
+/** Pixel senkrecht ziehen für eine Zoomstufe. */
+export const DRAG_ZOOM_PX_PER_LEVEL = 150;
+
+/** Doppeltipp und ziehen wie bei Google Maps: nach unten = hinein, nach oben = hinaus. */
+export function dragZoomDelta(dy: number): number {
+  if (Math.abs(dy) < DRAG_ZOOM_THRESHOLD_PX) return 0;
+  return dy / DRAG_ZOOM_PX_PER_LEVEL;
+}

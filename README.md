@@ -17,11 +17,11 @@ Eine Karte für Verteilaktionen: Alle Häuser sind dunkelgrau. Wer einen Flyer e
 | Ziehen, Pinch, Mausrad, +/− | schieben und zoomen |
 | Standort-Knopf | eigene Position verfolgen |
 
-Ein Tipp wartet kurz, ob ein zweiter folgt. Nur so lassen sich Doppeltipp-Zoom und Markieren unterscheiden. Ein Doppeltipp sind zwei Tipps innerhalb von 300 ms und 30 px, die Regel steht in `src/lib/taps.ts`. Tippt man schnell ein *anderes* Haus an, wird das erste sofort übernommen.
+Ein Tipp wartet kurz, ob ein zweiter folgt. Nur so lassen sich Doppeltipp-Zoom und Markieren unterscheiden. Ein Doppeltipp sind zwei Tipps innerhalb von 300 ms und 30 px. Zieht der Finger nach dem zweiten Tipp, zoomt die Karte stufenlos: 150 px nach unten sind eine Stufe hinein. Die Regel steht in `src/lib/taps.ts`. Tippt man schnell ein *anderes* Haus an, wird das erste sofort übernommen.
 
 Häuser werden erst ab Zoomstufe 15 geladen, kachelweise und mit etwas Vorrat über den Rand hinaus. Nach einem Fehler wartet die Karte zunehmend länger (5 s bis 60 s), bevor sie Overpass erneut fragt.
 
-Convex speichert je markiertem Haus nur die OSM-ID und den Mittelpunkt, einsortiert in Zellen von 0,01° (`convex/cells.ts`). Jedes Handy abonniert nur die sichtbaren Zellen. Ein Tipp schickt deshalb nur die Zelle mit dem Haus an die Helfer, die sie gerade sehen, nicht die ganze Aktion. Gelb eingefärbt wird der Umriss, den das Handy ohnehin von Overpass hat. Rausgezoomt, oder solange der Umriss fehlt, zeigt die Karte gelbe Punkte. Ohne Netz zeigt die Karte „Offline“, Convex holt das Speichern nach.
+Convex speichert je markiertem Haus nur die OSM-ID und den Mittelpunkt, einsortiert in Zellen von 0,01° (`convex/cells.ts`). Jedes Handy abonniert nur die sichtbaren Zellen. Ein Tipp schickt deshalb nur die Zelle mit dem Haus an die Helfer, die sie gerade sehen, nicht die ganze Aktion. Gelb eingefärbt wird der Umriss, den das Handy ohnehin von Overpass hat. Rausgezoomt, oder solange der Umriss fehlt, zeigt die Karte gelbe Punkte. Ab einem Ausschnitt von mehr als 100 Zellen (etwa ab Zoomstufe 12) zeigt sie keine Markierungen mehr. Ohne Netz zeigt die Karte „Offline“, Convex holt das Speichern nach.
 
 ## Entwickeln
 
@@ -30,6 +30,8 @@ pnpm install
 npx convex dev          # beim ersten Mal: anmelden oder lokal ohne Konto; schreibt .env.local
 pnpm dev                # http://localhost:5173
 ```
+
+Lehnt `npx convex dev` das Schema wegen alter Testdaten ab, die Tabelle leeren: `npx convex import --table marks --replace -y leer.jsonl` (leere Datei).
 
 Prüfungen:
 
