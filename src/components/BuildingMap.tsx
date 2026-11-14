@@ -47,6 +47,9 @@ const COLOR_MARKED = "#ffd60a";
 const COLOR_MARKED_LINE = "#c99a00";
 /** Einwerfen nicht möglich: dunkles, gräuliches Gelb (gleich --color-blocked in index.css). */
 const COLOR_BLOCKED = "#938443";
+/** Häuser der Grundkarte, solange unsere noch laden (nicht antippbar). */
+const COLOR_PLACEHOLDER = "#cfcdc6";
+const COLOR_PLACEHOLDER_LINE = "#b9b7af";
 /** Kurzes Aufblitzen beim Tipp auf „Flyer drin“. */
 const COLOR_FLASH = "#fff6c2";
 const FLASH_MS = 140;
@@ -362,7 +365,12 @@ export function BuildingMap({
       loaded = true;
       // Die Häuser der Grundkarte ausblenden, wir zeichnen unsere eigenen.
       for (const layer of map.getStyle().layers ?? []) {
-        if ("source-layer" in layer && layer["source-layer"] === "building") {
+        // Häuser der Grundkarte als hellgraue Platzhalter: sofort zu sehen, während unsere
+        // eigenen (antippbaren) Häuser noch von Overpass kommen. Unsere liegen darüber.
+        if ("source-layer" in layer && layer["source-layer"] === "building" && layer.type === "fill") {
+          map.setPaintProperty(layer.id, "fill-color", COLOR_PLACEHOLDER);
+          map.setPaintProperty(layer.id, "fill-outline-color", COLOR_PLACEHOLDER_LINE);
+        } else if ("source-layer" in layer && layer["source-layer"] === "building") {
           map.setLayoutProperty(layer.id, "visibility", "none");
         }
         // Autobahnschilder brauchen wir nicht; sie erzeugen zudem Warnungen in der Konsole.
