@@ -123,7 +123,8 @@ export const reserve = internalMutation({
       if (await locked(cell)) waitFor.push(cell);
       else toFetch.push(cell);
     }
-    if (toFetch.length === 0) return { toFetch, waitFor, lockIds: [] };
+    const until = now + lockMs();
+    if (toFetch.length === 0) return { toFetch, waitFor, lockIds: [], until };
     for (const cell of extra) if (!cells.includes(cell) && !(await locked(cell))) toFetch.push(cell);
 
     const minuteAgo = now - 60_000;
@@ -149,9 +150,9 @@ export const reserve = internalMutation({
     for (const cell of toFetch) {
       const old = await ctx.db.query("cellLocks").withIndex("by_cell", (q) => q.eq("cell", cell)).unique();
       if (old) await ctx.db.delete(old._id);
-      lockIds.push(await ctx.db.insert("cellLocks", { cell, until: now + lockMs() }));
+      lockIds.push(await ctx.db.insert("cellLocks", { cell, until }));
     }
-    return { toFetch, waitFor, lockIds };
+    return { toFetch, waitFor, lockIds, until };
   },
 });
 
@@ -209,7 +210,10 @@ async function askOverpass(url: string, query: string, signal: AbortSignal): Pro
  * anderen Abfragen werden abgebrochen. Ohne `hedge` (Vorladen, Auffrischen: keine Eile) kommt
  * der nächste Server nur nach einem Fehler dran.
  */
-function fetchOverpass(bbox: [number, number, number, number], { hedge = true }: { hedge?: boolean } = {}): Promise<BuildingFeature[]> {
+function fetchOverpass(
+  bbox: [number, number, number, number],
+  { hedge = true, lockedUntil }: { hedge?: boolean; lockedUntil: number },
+): Promise<BuildingFeature[]> {
   const urls = endpoints();
   const query = buildQuery(bbox);
   const problems: string[] = [];
@@ -219,8 +223,9 @@ function fetchOverpass(bbox: [number, number, number, number], { hedge = true }:
   return new Promise((resolve, reject) => {
     let next = 0;
     let done = false;
-    // Gesamtfrist innerhalb der Sperre (lockMs), auch wenn die Server nacheinander gefragt werden.
-    const deadline = Date.now() + lockMs() - 15_000;
+    // Gesamtfrist innerhalb der Sperre, auch wenn die Server nacheinander gefragt werden;
+    // 15 s bleiben fürs Speichern.
+    const deadline = lockedUntil - 15_000;
     const finish = () => {
       done = true;
       timers.forEach(clearTimeout);
@@ -297,10 +302,10 @@ async function fetchAndStore(
   ctx: ActionCtx,
   toFetch: string[],
   lockIds: Id<"cellLocks">[],
-  { hedge }: { hedge: boolean },
+  { hedge, lockedUntil }: { hedge: boolean; lockedUntil: number },
 ): Promise<Map<string, string>> {
   try {
-    const features = await fetchOverpass(cellsBBox(toFetch.map((c) => parseCellKey(c)!)), { hedge });
+    const features = await fetchOverpass(cellsBBox(toFetch.map((c) => parseCellKey(c)!)), { hedge, lockedUntil });
     // Jedes Haus gehört genau zu der Kachel seines Mittelpunkts.
     const byCell = new Map<string, BuildingFeature[]>(toFetch.map((c) => [c, []]));
     for (const f of features) byCell.get(cellKeyOf(centerOf(f)))?.push(f);
@@ -357,7 +362,7 @@ async function loadCells(
     }
     if (r?.toFetch.length) {
       try {
-        await ctx.scheduler.runAfter(0, internal.buildings.refresh, { slug: rateKey, cells: r.toFetch, lockIds: r.lockIds });
+        await ctx.scheduler.runAfter(0, internal.buildings.refresh, { slug: rateKey, cells: r.toFetch, lockIds: r.lockIds, lockedUntil: r.until });
       } catch (e) {
         await ctx.runMutation(internal.buildings.release, { lockIds: r.lockIds });
         throw e;
@@ -377,10 +382,10 @@ async function loadCells(
     );
     extra = candidates.filter((c) => !fresh.has(c)).slice(0, MAX_FETCH_CELLS - missing.length);
   }
-  const { toFetch, waitFor, lockIds } = await ctx.runMutation(internal.buildings.reserve, { slug: rateKey, cells: missing, kind, extra });
+  const { toFetch, waitFor, lockIds, until } = await ctx.runMutation(internal.buildings.reserve, { slug: rateKey, cells: missing, kind, extra });
 
   if (toFetch.length > 0) {
-    for (const [cell, data] of await fetchAndStore(ctx, toFetch, lockIds, { hedge: kind === "map" })) have.set(cell, data);
+    for (const [cell, data] of await fetchAndStore(ctx, toFetch, lockIds, { hedge: kind === "map", lockedUntil: until })) have.set(cell, data);
   }
 
   // Kacheln, die gerade ein anderer Helfer lädt: auf seinen Cache-Eintrag warten.
@@ -426,11 +431,17 @@ export const load = action({
 
 /** Frischt veraltete Kacheln im Hintergrund auf (siehe loadCells), im Kontingent des Vorladens. */
 export const refresh = internalAction({
-  args: { slug: v.string(), cells: v.array(v.string()), lockIds: v.optional(v.array(v.id("cellLocks"))) },
-  handler: async (ctx, { slug, cells, lockIds }) => {
+  args: {
+    slug: v.string(),
+    cells: v.array(v.string()),
+    lockIds: v.optional(v.array(v.id("cellLocks"))),
+    /** Ablauf der Sperren aus dem Einplanen; die Frist des Abrufs richtet sich danach. */
+    lockedUntil: v.optional(v.number()),
+  },
+  handler: async (ctx, { slug, cells, lockIds, lockedUntil }) => {
     try {
       // Schon reserviert (siehe loadCells): direkt laden. Sonst wie beim Vorladen, ohne zu warten.
-      if (lockIds) await fetchAndStore(ctx, cells, lockIds, { hedge: false });
+      if (lockIds) await fetchAndStore(ctx, cells, lockIds, { hedge: false, lockedUntil: lockedUntil ?? Date.now() + lockMs() });
       else await loadCells(ctx, prefetchRateKey(slug), cells, "prefetch", { wait: false });
     } catch (e) {
       // Nicht schlimm: Beim nächsten Ansehen wird es wieder versucht.

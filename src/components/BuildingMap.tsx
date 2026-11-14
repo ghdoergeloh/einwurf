@@ -321,6 +321,8 @@ export function BuildingMap({
       inflight++;
       keys.forEach((k) => fetching.add(k));
       updateLoadState();
+      // Fehlt noch mehr, gleich den zweiten Abruf starten, statt 30 s auf den ersten zu warten.
+      if (missing.length > batch.length) void loadVisible();
       try {
         const features = await loadBuildingsRef.current(keys);
         if (disposed) return;

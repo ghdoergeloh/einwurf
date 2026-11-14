@@ -442,6 +442,29 @@ describe("buildings.load", () => {
     }
   });
 
+  test("Auffrischen startet verspätet: Frist zählt ab der Sperre, nicht ab dem Start", async () => {
+    vi.useFakeTimers({ toFake: ["setTimeout", "clearTimeout", "Date"] });
+    try {
+      const t = await setup();
+      vi.stubEnv("OVERPASS_URLS", "https://eins.example/api,https://zwei.example/api,https://drei.example/api");
+      const hang = vi.fn((_url: string, init?: RequestInit) =>
+        new Promise<Response>((_, reject) => init!.signal!.addEventListener("abort", () => reject(new Error("aborted")))),
+      );
+      vi.stubGlobal("fetch", hang);
+      const r = await t.mutation(internal.buildings.reserve, { slug: `${SLUG}:vorladen`, cells: [CELL_A], kind: "prefetch" });
+      vi.setSystemTime(Date.now() + 40_000); // Warteschlange des Schedulers
+      let endedAt = 0;
+      const pending = t
+        .action(internal.buildings.refresh, { slug: SLUG, cells: r.toFetch, lockIds: r.lockIds, lockedUntil: r.until })
+        .then(() => (endedAt = Date.now()));
+      await vi.advanceTimersByTimeAsync(200_000);
+      await pending;
+      expect(endedAt).toBeLessThanOrEqual(r.until - 15_000);
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
   test("mehrere Helfer öffnen ein veraltetes Gebiet: nur ein Auffrischen", async () => {
     const t = await setup();
     await t.run((ctx) => ctx.db.insert("buildingCells", { cell: CELL_A, fetchedAt: Date.now(), data: '[["way/77",[]]]' }));
