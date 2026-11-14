@@ -363,7 +363,6 @@ export function BuildingMap({
 
     map.on("load", () => {
       loaded = true;
-      // Die Häuser der Grundkarte ausblenden, wir zeichnen unsere eigenen.
       for (const layer of map.getStyle().layers ?? []) {
         // Häuser der Grundkarte als hellgraue Platzhalter: sofort zu sehen, während unsere
         // eigenen (antippbaren) Häuser noch von Overpass kommen. Unsere liegen darüber.

@@ -73,6 +73,7 @@ async function mockOsm(ctx, { styleFails = false } = {}) {
               layers: [
                 { id: "bg", type: "background", paint: { "background-color": "#ebe8e1" } },
                 { id: "ortsnamen", type: "symbol", source: "leer", layout: { "text-field": "x", "text-font": ["Noto Sans Regular"] } },
+                { id: "building", type: "fill", source: "leer", "source-layer": "building", paint: { "fill-color": "#eee" } },
               ],
             },
           }),
@@ -155,6 +156,12 @@ try {
   assert.equal(await count(p2), "2", "live beim zweiten Helfer");
   assert.equal(await statusAt(p2, cx, cy), "done", "beim zweiten Helfer gelb");
   await shot(p2, "3-live");
+
+  // Häuser der Grundkarte bleiben als hellgraue Platzhalter sichtbar
+  assert.deepEqual(
+    await p2.evaluate(() => [window.__einwurfMap.getPaintProperty("building", "fill-color"), window.__einwurfMap.getLayoutProperty("building", "visibility") ?? "visible"]),
+    ["#cfcdc6", "visible"],
+  );
 
   // Hausnummern ab Zoomstufe 17 auf den Häusern
   const zStart = await zoom(p2);
