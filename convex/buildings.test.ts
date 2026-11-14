@@ -421,6 +421,27 @@ describe("buildings.load", () => {
     }
   });
 
+  test("alle Server hängen: der Abruf endet innerhalb der Sperrfrist, kein doppelter Abruf", async () => {
+    vi.useFakeTimers({ toFake: ["setTimeout", "clearTimeout", "Date"] });
+    try {
+      const t = await setup();
+      vi.stubEnv("OVERPASS_URLS", "https://eins.example/api,https://zwei.example/api,https://drei.example/api");
+      const hang = vi.fn((_url: string, init?: RequestInit) =>
+        new Promise<Response>((_, reject) => init!.signal!.addEventListener("abort", () => reject(new Error("aborted")))),
+      );
+      vi.stubGlobal("fetch", hang);
+      const started = Date.now();
+      let endedAt = 0;
+      const pending = t.action(internal.buildings.refresh, { slug: SLUG, cells: [CELL_A] }).then(() => (endedAt = Date.now()));
+      await vi.advanceTimersByTimeAsync(200_000);
+      await pending;
+      // Sperre (145 s bei drei Servern) noch nicht abgelaufen, als der Abruf aufgab
+      expect(endedAt - started).toBeLessThanOrEqual(130_000);
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
   test("mehrere Helfer öffnen ein veraltetes Gebiet: nur ein Auffrischen", async () => {
     const t = await setup();
     await t.run((ctx) => ctx.db.insert("buildingCells", { cell: CELL_A, fetchedAt: Date.now(), data: '[["way/77",[]]]' }));

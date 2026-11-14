@@ -40,6 +40,8 @@ const OVERPASS_TIMEOUT_MS = 60_000;
  * gewinnt. Länger als eine übliche Antwort (20–30 s), damit nicht jeder Abruf alle Server belastet.
  */
 const OVERPASS_HEDGE_MS = 35_000;
+/** Ein weiterer Server lohnt nur, wenn bis zur Gesamtfrist noch so viel Zeit bleibt. */
+const MIN_ATTEMPT_MS = 15_000;
 /** Öffentliche Overpass-Server, der Reihe nach. Überschreibbar mit der Convex-Umgebungsvariable OVERPASS_URLS. */
 const DEFAULT_ENDPOINTS = [
   "https://overpass-api.de/api/interpreter",
@@ -217,6 +219,8 @@ function fetchOverpass(bbox: [number, number, number, number], { hedge = true }:
   return new Promise((resolve, reject) => {
     let next = 0;
     let done = false;
+    // Gesamtfrist innerhalb der Sperre (lockMs), auch wenn die Server nacheinander gefragt werden.
+    const deadline = Date.now() + lockMs() - 15_000;
     const finish = () => {
       done = true;
       timers.forEach(clearTimeout);
@@ -224,11 +228,12 @@ function fetchOverpass(bbox: [number, number, number, number], { hedge = true }:
       running.clear();
     };
     const launch = () => {
-      if (done || next >= urls.length) return;
+      const left = deadline - Date.now();
+      if (done || next >= urls.length || left < MIN_ATTEMPT_MS) return false;
       const url = urls[next++];
       const ctrl = new AbortController();
       running.add(ctrl);
-      const timeout = setTimeout(() => running.has(ctrl) && ctrl.abort(), OVERPASS_TIMEOUT_MS);
+      const timeout = setTimeout(() => running.has(ctrl) && ctrl.abort(), Math.min(OVERPASS_TIMEOUT_MS, left));
       timers.push(timeout);
       const settle = () => {
         running.delete(ctrl);
@@ -247,15 +252,15 @@ function fetchOverpass(bbox: [number, number, number, number], { hedge = true }:
           settle();
           if (done) return;
           problems.push(`${url}: ${e instanceof Error ? e.message : String(e)}`);
-          clearTimeout(hedgeTimer);
-          if (next < urls.length) launch();
-          else if (running.size === 0) {
+          if (hedgeTimer) clearTimeout(hedgeTimer);
+          if (!launch() && running.size === 0) {
             finish();
             console.warn("Overpass nicht erreichbar", problems);
             reject(new ConvexError("Die Gebäudedaten (OpenStreetMap) sind gerade nicht erreichbar. Bitte gleich noch einmal versuchen."));
           }
         },
       );
+      return true;
     };
     launch();
   });
@@ -344,11 +349,19 @@ async function loadCells(
   if (kind === "map" && missing.every((c) => stale.has(c))) {
     // Schon jetzt reservieren: Wer dasselbe Gebiet gleich danach öffnet, sieht die Sperre
     // und plant kein zweites Auffrischen ein. Im Kontingent des Vorladens.
+    let r;
     try {
-      const r = await ctx.runMutation(internal.buildings.reserve, { slug: prefetchRateKey(rateKey), cells: missing, kind: "prefetch" });
-      if (r.toFetch.length) await ctx.scheduler.runAfter(0, internal.buildings.refresh, { slug: rateKey, cells: r.toFetch, lockIds: r.lockIds });
+      r = await ctx.runMutation(internal.buildings.reserve, { slug: prefetchRateKey(rateKey), cells: missing, kind: "prefetch" });
     } catch {
       // Kontingent erschöpft: beim nächsten Ansehen wieder.
+    }
+    if (r?.toFetch.length) {
+      try {
+        await ctx.scheduler.runAfter(0, internal.buildings.refresh, { slug: rateKey, cells: r.toFetch, lockIds: r.lockIds });
+      } catch (e) {
+        await ctx.runMutation(internal.buildings.release, { lockIds: r.lockIds });
+        throw e;
+      }
     }
     return { data: cells.map((c) => have.get(c) ?? stale.get(c)!), fetched: false };
   }
