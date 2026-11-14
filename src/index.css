@@ -1,0 +1,31 @@
+@import "tailwindcss";
+@import "@fontsource-variable/geist";
+
+@theme {
+  --font-sans: "Geist Variable", ui-sans-serif, system-ui, sans-serif;
+  --color-ink: #15171c;
+  --color-ink-2: #23262d;
+  --color-ink-3: #3a3e47;
+  --color-paper: #f6f5f1;
+  --color-sun: #ffd60a;
+  --color-sun-deep: #e8b500;
+  --color-muted: #6b6f78;
+}
+
+html,
+body,
+#root {
+  height: 100%;
+}
+body {
+  @apply bg-paper text-ink font-sans antialiased;
+  -webkit-tap-highlight-color: transparent;
+}
+
+.maplibregl-ctrl-attrib {
+  font-size: 10px;
+}
+.maplibregl-ctrl-group {
+  border-radius: 14px !important;
+  box-shadow: 0 8px 24px rgb(0 0 0 / 0.12) !important;
+}
