@@ -1,6 +1,7 @@
 import { useEffect, useRef, useState } from "react";
 import * as maplibregl from "maplibre-gl";
 import "maplibre-gl/dist/maplibre-gl.css";
+import workerUrl from "maplibre-gl/dist/maplibre-gl-worker.mjs?worker&url";
 import type { GeoJSONSource, MapGeoJSONFeature } from "maplibre-gl";
 import type { FeatureCollection, MultiPolygon, Point } from "geojson";
 import {
@@ -13,11 +14,20 @@ import {
   type BuildingFeature,
 } from "../lib/overpass";
 
+// Ab MapLibre 6 braucht jeder Bundler den Pfad zum Worker.
+maplibregl.setWorkerUrl(workerUrl);
+
 export const MAP_STYLE_URL = "https://tiles.openfreemap.org/styles/positron";
 
 /** Ab dieser Zoomstufe werden Häuser geladen und angezeigt. */
 export const BUILDING_MIN_ZOOM = 15;
 /** Mehr Kacheln auf einmal laden wir nicht (schont den öffentlichen Overpass-Server). */
+/** Mindest-Zoom beim Öffnen einer Aktion. */
+const START_MIN_ZOOM = 16;
+/** So lange wartet ein Tipp, ob ein zweiter (Zoom) folgt. */
+export const DOUBLE_TAP_MS = 260;
+/** Ein zweiter Tipp in diesem Umkreis (px) gilt als Doppeltipp. */
+const DOUBLE_TAP_RADIUS = 40;
 const MAX_CELLS_PER_REQUEST = 24;
 
 export interface Mark {
@@ -99,20 +109,24 @@ export function BuildingMap({ center, bbox, marks, onToggle, onLoadState, contro
       container: container.current,
       style: MAP_STYLE_URL,
       center: [center.lng, center.lat],
-      zoom: 16,
+      zoom: START_MIN_ZOOM,
       maxZoom: 20,
       attributionControl: { compact: true },
       dragRotate: false,
       pitchWithRotate: false,
+      // Gesten wie bei Google Maps: schieben, Pinch, Doppeltipp, Doppeltipp-und-ziehen, Mausrad.
+      cooperativeGestures: false,
     });
     map.touchZoomRotate.disableRotation();
+    map.keyboard.disableRotation();
     mapRef.current = map;
 
     if (bbox && bbox.length === 4) {
+      // Kleiner Ort (Straße, Ortsteil): ganz zeigen, aber nie weiter weg als Straßenansicht,
+      // sonst sieht man keine Häuser.
       const [w, s, e, n] = bbox;
-      // Ganze Städte wären zu weit weg; dann lieber die Mitte in Straßenansicht.
-      const small = e - w < 0.03 && n - s < 0.02;
-      if (small) map.fitBounds([w, s, e, n], { padding: 40, maxZoom: 17.5, animate: false });
+      const cam = map.cameraForBounds([w, s, e, n], { padding: 40, maxZoom: 17.5 });
+      if (cam?.zoom && cam.zoom >= START_MIN_ZOOM) map.jumpTo(cam);
     }
 
     const geolocate = new maplibregl.GeolocateControl({
@@ -120,6 +134,7 @@ export function BuildingMap({ center, bbox, marks, onToggle, onLoadState, contro
       trackUserLocation: true,
       showAccuracyCircle: false,
     });
+    map.addControl(new maplibregl.NavigationControl({ showCompass: false }), "bottom-right");
     map.addControl(geolocate, "bottom-right");
 
     function updateLoadState() {
@@ -133,7 +148,11 @@ export function BuildingMap({ center, bbox, marks, onToggle, onLoadState, contro
       if (map.getZoom() < BUILDING_MIN_ZOOM) return updateLoadState();
       if (inflight) return;
       const b = map.getBounds();
-      const view: BBox = [b.getWest(), b.getSouth(), b.getEast(), b.getNorth()];
+      // Etwas über den Rand hinaus laden, damit beim Schieben keine leeren Flächen auftauchen.
+      const pad = map.getZoom() >= 16 ? 0.35 : 0;
+      const dx = (b.getEast() - b.getWest()) * pad;
+      const dy = (b.getNorth() - b.getSouth()) * pad;
+      const view: BBox = [b.getWest() - dx, b.getSouth() - dy, b.getEast() + dx, b.getNorth() + dy];
       const missing = cellsFor(view).filter((c) => !loadedCells.has(cellKey(c.x, c.y)));
       if (missing.length === 0) return updateLoadState();
       // Mitte zuerst, falls der Ausschnitt größer ist als ein Abruf.
@@ -154,7 +173,8 @@ export function BuildingMap({ center, bbox, marks, onToggle, onLoadState, contro
         (map.getSource("buildings") as GeoJSONSource | undefined)?.setData(toCollection(buildings.values()));
         inflight = null;
         updateLoadState();
-        if (missing.length > batch.length) void loadVisible();
+        // Weitere Kacheln, oder der Nutzer hat während des Ladens weitergeschoben.
+        void loadVisible();
       } catch {
         if (disposed) return;
         inflight = null;
@@ -235,21 +255,67 @@ export function BuildingMap({ center, bbox, marks, onToggle, onLoadState, contro
       return near[0];
     }
 
+    // Ein Tipp markiert, ein Doppeltipp zoomt. Deshalb wartet ein Tipp kurz, ob ein
+    // zweiter folgt (wie bei Google Maps); dann zoomt nur die Karte, das Haus bleibt.
+    let pending: { timer: ReturnType<typeof setTimeout>; run: () => void; x: number; y: number } | null = null;
+    // Der zweite Tipp eines Doppeltipps löst auch ein click aus; das ignorieren wir.
+    let swallowNextClick = false;
+    const cancelTap = () => {
+      if (pending) clearTimeout(pending.timer);
+      pending = null;
+    };
+    const canvas = map.getCanvasContainer();
+    const onDown = (clientX: number, clientY: number) => {
+      swallowNextClick = false;
+      if (!pending) return;
+      const r = canvas.getBoundingClientRect();
+      const near = Math.hypot(clientX - r.left - pending.x, clientY - r.top - pending.y) < DOUBLE_TAP_RADIUS;
+      if (near) {
+        cancelTap(); // Doppeltipp: die Karte zoomt.
+        swallowNextClick = true;
+      } else {
+        const { run } = pending; // Schnell ein anderes Haus: das erste sofort übernehmen.
+        cancelTap();
+        run();
+      }
+    };
+    const onTouchStart = (e: TouchEvent) => e.touches[0] && onDown(e.touches[0].clientX, e.touches[0].clientY);
+    const onMouseDown = (e: MouseEvent) => onDown(e.clientX, e.clientY);
+    canvas.addEventListener("touchstart", onTouchStart, { passive: true });
+    canvas.addEventListener("mousedown", onMouseDown);
+
     map.on("click", (e) => {
+      if (swallowNextClick) {
+        swallowNextClick = false;
+        return;
+      }
       if (map.getZoom() < BUILDING_MIN_ZOOM - 0.5) return;
       const f = pick(e.point);
       const osmId = f?.properties?.osmId as string | undefined;
       if (!osmId) return;
-      const isMarked = marksRef.current.some((m) => m.osmId === osmId);
-      if (isMarked) {
-        onToggleRef.current(osmId, false);
-      } else {
-        // Geometrie aus dem Cache, nicht aus der gerenderten Kachel (die ist beschnitten).
-        const building = buildings.get(osmId);
-        if (!building) return;
-        onToggleRef.current(osmId, true, building.geometry.coordinates);
-      }
-      navigator.vibrate?.(12);
+      const run = () => {
+        if (disposed) return;
+        const isMarked = marksRef.current.some((m) => m.osmId === osmId);
+        if (isMarked) {
+          onToggleRef.current(osmId, false);
+        } else {
+          // Geometrie aus dem Cache, nicht aus der gerenderten Kachel (die ist beschnitten).
+          const building = buildings.get(osmId);
+          if (!building) return;
+          onToggleRef.current(osmId, true, building.geometry.coordinates);
+        }
+        navigator.vibrate?.(12);
+      };
+      cancelTap();
+      pending = {
+        timer: setTimeout(() => {
+          pending = null;
+          run();
+        }, DOUBLE_TAP_MS),
+        run,
+        x: e.point.x,
+        y: e.point.y,
+      };
     });
 
     map.on("mousemove", (e) => {
@@ -259,6 +325,9 @@ export function BuildingMap({ center, bbox, marks, onToggle, onLoadState, contro
 
     return () => {
       disposed = true;
+      cancelTap();
+      canvas.removeEventListener("touchstart", onTouchStart);
+      canvas.removeEventListener("mousedown", onMouseDown);
       inflight?.abort();
       if (controlsRef) controlsRef.current = null;
       map.remove();
@@ -277,5 +346,10 @@ export function BuildingMap({ center, bbox, marks, onToggle, onLoadState, contro
     (map.getSource("mark-points") as GeoJSONSource).setData(marksToPoints(list));
   }, [marks, ready]);
 
-  return <div ref={container} className="absolute inset-0" data-testid="map" />;
+  // MapLibre setzt am Container position: relative; deshalb ein eigener Rahmen außen.
+  return (
+    <div className="absolute inset-0">
+      <div ref={container} className="h-full w-full" data-testid="map" />
+    </div>
+  );
 }

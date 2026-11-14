@@ -57,7 +57,7 @@ export function ShareSheet({ url, title, isNew, onClose }: Props) {
         aria-modal="true"
         aria-labelledby="share-title"
         tabIndex={-1}
-        className="relative max-h-[92vh] w-full max-w-md overflow-y-auto rounded-t-3xl bg-white p-6 pb-[max(1.5rem,env(safe-area-inset-bottom))] shadow-2xl outline-none sm:rounded-3xl"
+        className="relative max-h-[92dvh] w-full touch-pan-y overscroll-contain select-text max-w-md overflow-y-auto rounded-t-3xl bg-white p-6 pb-[max(1.5rem,env(safe-area-inset-bottom))] shadow-2xl outline-none sm:rounded-3xl"
       >
         <div className="mx-auto mb-4 h-1.5 w-10 rounded-full bg-black/10 sm:hidden" />
         <div className="flex items-start justify-between gap-4">
@@ -107,7 +107,7 @@ export function ShareSheet({ url, title, isNew, onClose }: Props) {
           </button>
         </div>
 
-        <div className="mt-3 grid grid-cols-2 gap-2">
+        <div className={`mt-3 grid gap-2 ${canShare ? "grid-cols-2" : "grid-cols-1"}`}>
           <a
             href={`https://wa.me/?text=${encodeURIComponent(`${shareText} ${url}`)}`}
             target="_blank"
@@ -119,17 +119,18 @@ export function ShareSheet({ url, title, isNew, onClose }: Props) {
             </svg>
             WhatsApp
           </a>
+          {canShare && (
           <button
             type="button"
-            disabled={!canShare}
             onClick={() => navigator.share?.({ title, text: shareText, url }).catch(() => {})}
-            className="flex items-center justify-center gap-2 rounded-2xl bg-sun px-4 py-3 text-sm font-semibold text-ink transition hover:bg-sun-deep disabled:opacity-40"
+            className="flex items-center justify-center gap-2 rounded-2xl bg-sun px-4 py-3 text-sm font-semibold text-ink transition hover:bg-sun-deep"
           >
             <svg viewBox="0 0 24 24" className="size-5" fill="none" stroke="currentColor" strokeWidth="2" aria-hidden="true">
               <path d="M12 3v12M7 8l5-5 5 5M5 14v5a2 2 0 0 0 2 2h10a2 2 0 0 0 2-2v-5" strokeLinecap="round" strokeLinejoin="round" />
             </svg>
             Teilen …
           </button>
+          )}
         </div>
         {isNew && (
           <button

@@ -62,12 +62,12 @@ export function HomePage() {
           <Logo />
         </header>
 
-        <main className="mt-10 grid items-start gap-10 lg:mt-16 lg:grid-cols-[1.1fr_1fr] lg:gap-14">
-          <section>
+        <main className="mt-7 grid grid-cols-[minmax(0,1fr)] items-start gap-8 lg:mt-16 lg:grid-cols-[minmax(0,1.1fr)_minmax(0,1fr)] lg:grid-rows-[auto_1fr] lg:gap-x-14 lg:gap-y-8">
+          <section className="lg:col-start-1 lg:row-start-1">
             <p className="inline-flex items-center gap-2 rounded-full bg-ink px-3 py-1 text-xs font-medium text-sun">
               <span className="size-1.5 rounded-full bg-sun" /> Live für alle Helfer
             </p>
-            <h1 className="mt-5 text-4xl font-semibold leading-[1.05] tracking-tight text-balance sm:text-5xl">
+            <h1 className="mt-4 text-[2.4rem] font-semibold sm:mt-5 sm:text-5xl leading-[1.05] tracking-tight text-balance">
               Jeder Briefkasten zählt.
               <br />
               <span className="relative inline-block">
@@ -75,29 +75,13 @@ export function HomePage() {
                 <span className="absolute inset-x-0 bottom-1 z-0 h-3 rounded bg-sun sm:h-4" />
               </span>
             </h1>
-            <p className="mt-5 max-w-md text-lg text-muted text-pretty">
+            <p className="mt-4 max-w-md text-base text-muted text-pretty sm:mt-5 sm:text-lg">
               Startet eine Verteilaktion, teilt den Link mit eurem Team und tippt auf jedes Haus, das
               einen Flyer bekommen hat. Die Karte zeigt allen sofort, wo ihr schon wart.
             </p>
-            <ol className="mt-8 grid max-w-md gap-3 text-sm">
-              {[
-                ["Ort wählen", "Stadt, Ortsteil oder Straße suchen."],
-                ["Link teilen", "Per WhatsApp, Signal oder QR-Code. Nur wer ihn hat, sieht die Aktion."],
-                ["Häuser antippen", "Gelb heißt: Flyer ist drin. Noch mal tippen macht es rückgängig."],
-              ].map(([t, d], i) => (
-                <li key={t} className="flex gap-3">
-                  <span className="grid size-7 shrink-0 place-items-center rounded-full bg-ink text-xs font-semibold text-sun">
-                    {i + 1}
-                  </span>
-                  <span>
-                    <span className="font-medium">{t}.</span> <span className="text-muted">{d}</span>
-                  </span>
-                </li>
-              ))}
-            </ol>
           </section>
 
-          <section className="rounded-3xl bg-white p-5 shadow-[0_1px_0_rgba(0,0,0,0.04),0_20px_50px_-20px_rgba(21,23,28,0.25)] ring-1 ring-black/5 sm:p-7">
+          <section className="rounded-3xl bg-white lg:col-start-2 lg:row-span-2 lg:row-start-1 p-5 shadow-[0_1px_0_rgba(0,0,0,0.04),0_20px_50px_-20px_rgba(21,23,28,0.25)] ring-1 ring-black/5 sm:p-7">
             <h2 className="text-xl font-semibold tracking-tight">Neue Verteilaktion</h2>
             <p className="mt-1 text-sm text-muted">Wo wollt ihr verteilen?</p>
 
@@ -194,6 +178,22 @@ export function HomePage() {
               nötig.
             </p>
           </section>
+          <ol className="grid max-w-md gap-3 text-sm lg:col-start-1 lg:row-start-2">
+            {[
+              ["Ort wählen", "Stadt, Ortsteil oder Straße suchen."],
+              ["Link teilen", "Per WhatsApp, Signal oder QR-Code. Nur wer ihn hat, sieht die Aktion."],
+              ["Häuser antippen", "Gelb heißt: Flyer ist drin. Noch mal tippen macht es rückgängig."],
+            ].map(([t, d], i) => (
+              <li key={t} className="flex gap-3">
+                <span className="grid size-7 shrink-0 place-items-center rounded-full bg-ink text-xs font-semibold text-sun">
+                  {i + 1}
+                </span>
+                <span>
+                  <span className="font-medium">{t}.</span> <span className="text-muted">{d}</span>
+                </span>
+              </li>
+            ))}
+          </ol>
         </main>
       </div>
     </div>

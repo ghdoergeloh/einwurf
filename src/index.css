@@ -29,3 +29,24 @@ body {
   border-radius: 14px !important;
   box-shadow: 0 8px 24px rgb(0 0 0 / 0.12) !important;
 }
+
+/* Kartenseite: Die Seite selbst scrollt und zoomt nie, alle Gesten gehören der Karte. */
+html.map-mode,
+html.map-mode body {
+  overflow: hidden;
+  overscroll-behavior: none;
+  touch-action: none;
+  -webkit-user-select: none;
+  user-select: none;
+  -webkit-touch-callout: none;
+}
+
+/* Fingerfreundliche Kartenknöpfe */
+.maplibregl-ctrl-group button {
+  width: 44px !important;
+  height: 44px !important;
+}
+.maplibregl-ctrl-bottom-right {
+  bottom: max(0.75rem, env(safe-area-inset-bottom)) !important;
+  right: 2px;
+}

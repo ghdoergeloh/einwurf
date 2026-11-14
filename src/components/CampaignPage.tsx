@@ -43,6 +43,18 @@ export function CampaignPage({ slug, isNew }: Props) {
   }, [isNew, slug]);
 
   useEffect(() => {
+    const root = document.documentElement;
+    root.classList.add("map-mode");
+    // iOS Safari: Pinch auf Kopfleiste oder Hinweis soll nicht die ganze Seite zoomen.
+    const block = (e: Event) => e.preventDefault();
+    document.addEventListener("gesturestart", block);
+    return () => {
+      root.classList.remove("map-mode");
+      document.removeEventListener("gesturestart", block);
+    };
+  }, []);
+
+  useEffect(() => {
     if (campaign) document.title = `${campaign.name} · Einwurf`;
   }, [campaign]);
 
@@ -62,7 +74,7 @@ export function CampaignPage({ slug, isNew }: Props) {
   const count = campaign?.markCount ?? 0;
 
   return (
-    <div className="fixed inset-0 overflow-hidden bg-[#e9e7e1]">
+    <div className="fixed inset-0 touch-none overflow-hidden overscroll-none bg-[#e9e7e1] select-none">
       {campaign && (
         <BuildingMap
           center={campaign.center}
@@ -114,7 +126,8 @@ export function CampaignPage({ slug, isNew }: Props) {
       </div>
 
       {/* Hinweis unten */}
-      <div className="pointer-events-none absolute inset-x-0 bottom-0 z-10 flex justify-center p-3 pb-[max(1.75rem,env(safe-area-inset-bottom))]">
+      {/* Rechts unten bleibt Platz für Zoom- und Standort-Knöpfe. */}
+      <div className="pointer-events-none absolute bottom-0 left-0 right-16 z-10 flex justify-start p-3 pb-[max(0.75rem,env(safe-area-inset-bottom))] sm:justify-center">
         <StatusPill state={loadState} toast={toast} onRetry={() => controls.current?.retry()} />
       </div>
 
@@ -127,11 +140,11 @@ export function CampaignPage({ slug, isNew }: Props) {
 
 function StatusPill({ state, toast, onRetry }: { state: LoadState; toast: string | null; onRetry: () => void }) {
   const base =
-    "pointer-events-auto flex max-w-[calc(100%-4.5rem)] items-center gap-2.5 rounded-full px-4 py-2.5 text-sm font-medium shadow-[0_10px_30px_-10px_rgba(0,0,0,0.45)]";
+    "flex max-w-full items-center gap-2.5 rounded-full px-4 py-2.5 text-[13px] font-medium sm:text-sm shadow-[0_10px_30px_-10px_rgba(0,0,0,0.45)]";
   if (toast) return <div role="alert" className={`${base} bg-red-600 text-white`}>{toast}</div>;
   if (state === "error")
     return (
-      <div role="alert" className={`${base} bg-white text-ink`}>
+      <div role="alert" className={`${base} pointer-events-auto bg-white text-ink`}>
         Häuser konnten nicht geladen werden.
         <button type="button" onClick={onRetry} className="rounded-full bg-ink px-3 py-1 text-xs text-white">
           Erneut
@@ -145,7 +158,7 @@ function StatusPill({ state, toast, onRetry }: { state: LoadState; toast: string
           <circle cx="11" cy="11" r="7" />
           <path d="m20 20-3.5-3.5M11 8v6M8 11h6" strokeLinecap="round" />
         </svg>
-        Näher heranzoomen, um Häuser zu sehen
+        Heranzoomen, um Häuser zu sehen
       </div>
     );
   if (state === "loading")
@@ -158,7 +171,7 @@ function StatusPill({ state, toast, onRetry }: { state: LoadState; toast: string
   return (
     <div className={`${base} bg-ink/90 text-white backdrop-blur`}>
       <span className="size-3 shrink-0 rounded-[3px] bg-sun" />
-      Haus antippen = Flyer drin · nochmal = rückgängig
+      Tippen: Flyer drin · erneut: zurück
     </div>
   );
 }

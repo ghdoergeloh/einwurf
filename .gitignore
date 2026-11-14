@@ -6,3 +6,4 @@ dist
 .convex
 coverage
 .pnpm-store
+.convex-tmp
