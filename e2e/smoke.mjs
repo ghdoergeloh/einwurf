@@ -15,7 +15,9 @@ const GLYPHS = readFileSync(new URL("./fixtures/noto-sans-bold-0-255.pbf", impor
 const BASE = process.argv[2] ?? "http://localhost:5173";
 const SHOTS = process.argv[3];
 // Jeder Lauf in einem eigenen Gebiet, damit der gemeinsame Gebäude-Cache den Overpass-Weg nicht überdeckt.
-const CENTER = { lat: 50.76, lng: Math.round((6 + (Date.now() % 997) * 0.01) * 1000) / 1000 };
+// Länge weit gestreut (0,001°-Raster über 14°): Ein Lauf trifft praktisch nie den Cache früherer
+// Läufe samt Nachbarschaft. Die Breite bleibt fest, die Bildschirm-Abstände unten passen zu ihr.
+const CENTER = { lat: 50.76, lng: Math.round((2 + Math.random() * 14) * 1000) / 1000 };
 
 function fakeBuildings(body) {
   const q = new URLSearchParams(body).get("data");
