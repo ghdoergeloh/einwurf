@@ -7,3 +7,4 @@ dist
 coverage
 .pnpm-store
 .convex-tmp
+*.tsbuildinfo
