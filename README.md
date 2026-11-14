@@ -11,15 +11,17 @@ Eine Karte für Verteilaktionen: Alle Häuser sind dunkelgrau. Wer einen Flyer e
 
 | Geste | Wirkung |
 | --- | --- |
-| Tippen auf ein Haus | markieren oder Markierung zurücknehmen (nach ca. 0,25 s, siehe unten) |
+| Tippen auf ein Haus | markieren oder Markierung zurücknehmen (nach 0,3 s, siehe unten) |
 | Doppeltipp | hineinzoomen (markiert nichts) |
 | Doppeltipp und ziehen | mit einem Finger zoomen |
 | Ziehen, Pinch, Mausrad, +/− | schieben und zoomen |
 | Standort-Knopf | eigene Position verfolgen |
 
-Ein Tipp wartet kurz, ob ein zweiter folgt. Nur so lassen sich Doppeltipp-Zoom und Markieren unterscheiden. Tippt man schnell ein *anderes* Haus an, wird das erste sofort übernommen.
+Ein Tipp wartet kurz, ob ein zweiter folgt. Nur so lassen sich Doppeltipp-Zoom und Markieren unterscheiden. Ein Doppeltipp sind zwei Tipps innerhalb von 300 ms und 30 px, die Regel steht in `src/lib/taps.ts`. Tippt man schnell ein *anderes* Haus an, wird das erste sofort übernommen.
 
-Häuser werden erst ab Zoomstufe 15 geladen, kachelweise und mit etwas Vorrat über den Rand hinaus. Markierte Häuser speichert Convex samt Umriss, deshalb erscheinen sie sofort, auch rausgezoomt (dann als gelbe Punkte).
+Häuser werden erst ab Zoomstufe 15 geladen, kachelweise und mit etwas Vorrat über den Rand hinaus. Nach einem Fehler wartet die Karte zunehmend länger (5 s bis 60 s), bevor sie Overpass erneut fragt.
+
+Convex speichert je markiertem Haus nur die OSM-ID und den Mittelpunkt, einsortiert in Zellen von 0,01° (`convex/cells.ts`). Jedes Handy abonniert nur die sichtbaren Zellen. Ein Tipp schickt deshalb nur die Zelle mit dem Haus an die Helfer, die sie gerade sehen, nicht die ganze Aktion. Gelb eingefärbt wird der Umriss, den das Handy ohnehin von Overpass hat. Rausgezoomt, oder solange der Umriss fehlt, zeigt die Karte gelbe Punkte. Ohne Netz zeigt die Karte „Offline“, Convex holt das Speichern nach.
 
 ## Entwickeln
 
@@ -89,4 +91,4 @@ Auch Convex lässt sich selbst betreiben (Docker-Image `ghcr.io/get-convex/conve
 ## Grenzen
 
 - Overpass, Nominatim und OpenFreeMap sind kostenlose öffentliche Dienste mit fairen Nutzungsregeln. Für eine Gemeinde-Aktion reicht das. Bei vielen gleichzeitigen Nutzern kann Overpass kurz drosseln; dann zeigt die Karte „Erneut“.
-- Wer einen Link kennt, kann alles in dieser Aktion ändern (so gewollt). Neue Aktionen kann jeder anlegen. Eine Aktion hat höchstens 20.000 Markierungen.
+- Wer einen Link kennt, kann alles in dieser Aktion ändern (so gewollt). Neue Aktionen kann jeder anlegen. Eine Aktion hat höchstens 20.000 Markierungen. Neue Aktionen sind auf 20 pro Minute begrenzt, über alle Nutzer.

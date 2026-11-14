@@ -2,17 +2,21 @@ import { useEffect, useRef, useState } from "react";
 import * as maplibregl from "maplibre-gl";
 import "maplibre-gl/dist/maplibre-gl.css";
 import workerUrl from "maplibre-gl/dist/maplibre-gl-worker.mjs?worker&url";
-import type { GeoJSONSource, MapGeoJSONFeature } from "maplibre-gl";
-import type { FeatureCollection, MultiPolygon, Point } from "geojson";
+import type { CircleLayerSpecification, ExpressionSpecification, GeoJSONSource, MapGeoJSONFeature } from "maplibre-gl";
+import type { FeatureCollection, Point } from "geojson";
 import {
+  CELL_SIZE,
   cellKey,
   cellsBBox,
   cellsFor,
+  centerOf,
   fetchBuildings,
   toCollection,
   type BBox,
   type BuildingFeature,
 } from "../lib/overpass";
+import { DOUBLE_TAP_MS, onPress, type Press } from "../lib/taps";
+import { markCellsIn } from "../../convex/cells";
 
 // Ab MapLibre 6 braucht jeder Bundler den Pfad zum Worker.
 maplibregl.setWorkerUrl(workerUrl);
@@ -21,89 +25,73 @@ export const MAP_STYLE_URL = "https://tiles.openfreemap.org/styles/positron";
 
 /** Ab dieser Zoomstufe werden Häuser geladen und angezeigt. */
 export const BUILDING_MIN_ZOOM = 15;
-/** Mehr Kacheln auf einmal laden wir nicht (schont den öffentlichen Overpass-Server). */
 /** Mindest-Zoom beim Öffnen einer Aktion. */
 const START_MIN_ZOOM = 16;
-/** So lange wartet ein Tipp, ob ein zweiter (Zoom) folgt. */
-export const DOUBLE_TAP_MS = 260;
-/** Ein zweiter Tipp in diesem Umkreis (px) gilt als Doppeltipp. */
-const DOUBLE_TAP_RADIUS = 40;
+/** Mehr Kacheln auf einmal laden wir nicht (schont den öffentlichen Overpass-Server). */
 const MAX_CELLS_PER_REQUEST = 24;
+/** Mehr Markierungs-Zellen abonnieren wir nicht; weiter rausgezoomt gibt es keine Punkte. */
+const MAX_MARK_CELLS = 100;
+/** Wartezeit nach einem Overpass-Fehler, verdoppelt sich bis zum Maximum. */
+const BACKOFF_START_MS = 5_000;
+const BACKOFF_MAX_MS = 60_000;
+
+const COLOR_HOUSE = "#24262c";
+const COLOR_HOUSE_LINE = "#0d0e11";
+const COLOR_MARKED = "#ffd60a";
+const COLOR_MARKED_LINE = "#c99a00";
 
 export interface Mark {
   osmId: string;
-  geometry: number[][][][];
+  /** [lng, lat] */
+  center: number[];
 }
 
 export interface MapControls {
-  locate: () => void;
   retry: () => void;
 }
 
-export type LoadState = "idle" | "zoom" | "loading" | "error";
+export type LoadState = "idle" | "zoom" | "loading" | "error" | "mapError";
 
 interface Props {
   center: { lat: number; lng: number };
   bbox: number[] | null;
-  marks: Mark[] | undefined;
-  onToggle: (osmId: string, marked: boolean, geometry?: number[][][][]) => void;
+  /** Markierungen der zuletzt gemeldeten Zellen. */
+  marks: Mark[];
+  /** Sichtbare Markierungs-Zellen; null = zu weit herausgezoomt. */
+  onCellsChange: (cells: string[] | null) => void;
+  onToggle: (osmId: string, marked: boolean, center: number[]) => void;
   onLoadState: (s: LoadState) => void;
   controlsRef?: React.MutableRefObject<MapControls | null>;
 }
 
 const EMPTY: FeatureCollection = { type: "FeatureCollection", features: [] };
 
-function marksToPolygons(marks: Mark[]): FeatureCollection<MultiPolygon> {
-  return {
-    type: "FeatureCollection",
-    features: marks.map((m) => ({
-      type: "Feature",
-      properties: { osmId: m.osmId },
-      geometry: { type: "MultiPolygon", coordinates: m.geometry },
-    })),
-  };
-}
-
-/** Grobe Mitte eines Hauses für die Punkte bei kleiner Zoomstufe. */
-function marksToPoints(marks: Mark[]): FeatureCollection<Point> {
-  return {
-    type: "FeatureCollection",
-    features: marks.map((m) => {
-      const ring = m.geometry[0][0];
-      let x = 0;
-      let y = 0;
-      const n = ring.length - 1 || 1;
-      for (let i = 0; i < n; i++) {
-        x += ring[i][0];
-        y += ring[i][1];
-      }
-      return {
-        type: "Feature",
-        properties: { osmId: m.osmId },
-        geometry: { type: "Point", coordinates: [x / n, y / n] },
-      };
-    }),
-  };
-}
-
-export function BuildingMap({ center, bbox, marks, onToggle, onLoadState, controlsRef }: Props) {
+export function BuildingMap({ center, bbox, marks, onCellsChange, onToggle, onLoadState, controlsRef }: Props) {
   const container = useRef<HTMLDivElement>(null);
   const mapRef = useRef<maplibregl.Map | null>(null);
+  const syncMarksRef = useRef<(() => void) | null>(null);
   const [ready, setReady] = useState(false);
   // In Refs, damit die Karten-Callbacks immer den aktuellen Stand sehen.
-  const marksRef = useRef<Mark[]>([]);
+  const marksRef = useRef<Map<string, Mark>>(new Map());
   const onToggleRef = useRef(onToggle);
   const onLoadStateRef = useRef(onLoadState);
+  const onCellsChangeRef = useRef(onCellsChange);
   onToggleRef.current = onToggle;
   onLoadStateRef.current = onLoadState;
-  marksRef.current = marks ?? [];
+  onCellsChangeRef.current = onCellsChange;
 
   useEffect(() => {
     if (!container.current) return;
     const buildings = new Map<string, BuildingFeature>();
     const loadedCells = new Set<string>();
+    /** osmIds, die gerade als markiert eingefärbt sind (feature-state). */
+    const painted = new Set<string>();
     let inflight: AbortController | null = null;
     let disposed = false;
+    let loaded = false;
+    let backoffMs = 0;
+    let blockedUntil = 0;
+    let lastCells = "";
 
     const map = new maplibregl.Map({
       container: container.current,
@@ -114,12 +102,16 @@ export function BuildingMap({ center, bbox, marks, onToggle, onLoadState, contro
       attributionControl: { compact: true },
       dragRotate: false,
       pitchWithRotate: false,
-      // Gesten wie bei Google Maps: schieben, Pinch, Doppeltipp, Doppeltipp-und-ziehen, Mausrad.
+      // Gesten wie bei Google Maps: schieben, Pinch, Doppeltipp-und-ziehen, Mausrad.
+      // Den Doppeltipp-Zoom macht die App selbst (siehe unten), damit Markieren und
+      // Zoomen nach derselben Regel entschieden werden.
+      doubleClickZoom: false,
       cooperativeGestures: false,
     });
     map.touchZoomRotate.disableRotation();
     map.keyboard.disableRotation();
     mapRef.current = map;
+    if (import.meta.env.DEV) (window as unknown as { __einwurfMap?: maplibregl.Map }).__einwurfMap = map;
 
     if (bbox && bbox.length === 4) {
       // Kleiner Ort (Straße, Ortsteil): ganz zeigen, aber nie weiter weg als Straßenansicht,
@@ -129,24 +121,71 @@ export function BuildingMap({ center, bbox, marks, onToggle, onLoadState, contro
       if (cam?.zoom && cam.zoom >= START_MIN_ZOOM) map.jumpTo(cam);
     }
 
-    const geolocate = new maplibregl.GeolocateControl({
-      positionOptions: { enableHighAccuracy: true },
-      trackUserLocation: true,
-      showAccuracyCircle: false,
-    });
     map.addControl(new maplibregl.NavigationControl({ showCompass: false }), "bottom-right");
-    map.addControl(geolocate, "bottom-right");
+    map.addControl(
+      new maplibregl.GeolocateControl({
+        positionOptions: { enableHighAccuracy: true },
+        trackUserLocation: true,
+        showAccuracyCircle: false,
+      }),
+      "bottom-right",
+    );
+
+    // ---------- Markierungen darstellen ----------
+
+    /** Färbt markierte Häuser per feature-state und setzt Punkte für Häuser ohne Umriss. */
+    function syncMarks() {
+      if (!loaded) return;
+      const current = marksRef.current;
+      for (const id of painted) {
+        if (!current.has(id)) {
+          map.setFeatureState({ source: "buildings", id }, { marked: false });
+          painted.delete(id);
+        }
+      }
+      for (const id of current.keys()) {
+        if (!painted.has(id)) {
+          map.setFeatureState({ source: "buildings", id }, { marked: true });
+          painted.add(id);
+        }
+      }
+      const points: FeatureCollection<Point> = {
+        type: "FeatureCollection",
+        features: [...current.values()].map((m) => ({
+          type: "Feature",
+          properties: { osmId: m.osmId, shape: buildings.has(m.osmId) },
+          geometry: { type: "Point", coordinates: m.center },
+        })),
+      };
+      (map.getSource("mark-points") as GeoJSONSource | undefined)?.setData(points);
+    }
+    syncMarksRef.current = syncMarks;
+
+    function reportCells() {
+      const b = map.getBounds();
+      const cells = markCellsIn([b.getWest(), b.getSouth(), b.getEast(), b.getNorth()]);
+      const next = cells.length > MAX_MARK_CELLS ? null : cells;
+      const key = next ? next.join(",") : "-";
+      if (key === lastCells) return;
+      lastCells = key;
+      onCellsChangeRef.current(next);
+    }
+
+    // ---------- Häuser von Overpass laden ----------
 
     function updateLoadState() {
       if (map.getZoom() < BUILDING_MIN_ZOOM) onLoadStateRef.current("zoom");
       else if (inflight) onLoadStateRef.current("loading");
+      else if (Date.now() < blockedUntil) onLoadStateRef.current("error");
       else onLoadStateRef.current("idle");
     }
 
-    async function loadVisible() {
-      if (disposed) return;
+    async function loadVisible(force = false) {
+      if (disposed || !loaded) return;
       if (map.getZoom() < BUILDING_MIN_ZOOM) return updateLoadState();
       if (inflight) return;
+      // Nach einem Fehler nicht bei jedem Verschieben neu fragen (Overpass drosselt sonst noch mehr).
+      if (!force && Date.now() < blockedUntil) return updateLoadState();
       const b = map.getBounds();
       // Etwas über den Rand hinaus laden, damit beim Schieben keine leeren Flächen auftauchen.
       const pad = map.getZoom() >= 16 ? 0.35 : 0;
@@ -158,9 +197,9 @@ export function BuildingMap({ center, bbox, marks, onToggle, onLoadState, contro
       // Mitte zuerst, falls der Ausschnitt größer ist als ein Abruf.
       const cx = (view[0] + view[2]) / 2;
       const cy = (view[1] + view[3]) / 2;
-      missing.sort(
-        (a, b2) => Math.hypot(a.x * 0.005 - cx, a.y * 0.005 - cy) - Math.hypot(b2.x * 0.005 - cx, b2.y * 0.005 - cy),
-      );
+      const dist = (c: { x: number; y: number }) =>
+        Math.hypot((c.x + 0.5) * CELL_SIZE - cx, (c.y + 0.5) * CELL_SIZE - cy);
+      missing.sort((a, b2) => dist(a) - dist(b2));
       const batch = missing.slice(0, MAX_CELLS_PER_REQUEST);
       const ctrl = new AbortController();
       inflight = ctrl;
@@ -170,21 +209,33 @@ export function BuildingMap({ center, bbox, marks, onToggle, onLoadState, contro
         if (disposed) return;
         for (const f of features) buildings.set(f.properties.osmId, f);
         for (const c of batch) loadedCells.add(cellKey(c.x, c.y));
-        (map.getSource("buildings") as GeoJSONSource | undefined)?.setData(toCollection(buildings.values()));
+        (map.getSource("buildings") as GeoJSONSource).setData(toCollection(buildings.values()));
+        syncMarks();
         inflight = null;
+        backoffMs = 0;
+        blockedUntil = 0;
         updateLoadState();
         // Weitere Kacheln, oder der Nutzer hat während des Ladens weitergeschoben.
         void loadVisible();
       } catch {
         if (disposed) return;
         inflight = null;
-        onLoadStateRef.current("error");
+        backoffMs = Math.min(BACKOFF_MAX_MS, backoffMs ? backoffMs * 2 : BACKOFF_START_MS);
+        blockedUntil = Date.now() + backoffMs;
+        updateLoadState();
+        setTimeout(() => void loadVisible(), backoffMs + 50);
       }
     }
 
-    if (controlsRef) controlsRef.current = { locate: () => geolocate.trigger(), retry: () => void loadVisible() };
+    if (controlsRef) controlsRef.current = { retry: () => void loadVisible(true) };
+
+    map.on("error", () => {
+      // Ohne Grundkarte (Stil) kommt nie ein „load“; das soll man sehen.
+      if (!loaded) onLoadStateRef.current("mapError");
+    });
 
     map.on("load", () => {
+      loaded = true;
       // Die Häuser der Grundkarte ausblenden, wir zeichnen unsere eigenen.
       for (const layer of map.getStyle().layers ?? []) {
         if ("source-layer" in layer && layer["source-layer"] === "building") {
@@ -192,129 +243,145 @@ export function BuildingMap({ center, bbox, marks, onToggle, onLoadState, contro
         }
       }
       map.addSource("buildings", { type: "geojson", data: EMPTY, promoteId: "osmId" });
-      map.addSource("marks", { type: "geojson", data: EMPTY, promoteId: "osmId" });
       map.addSource("mark-points", { type: "geojson", data: EMPTY });
 
+      const isMarked: ExpressionSpecification = ["boolean", ["feature-state", "marked"], false];
       map.addLayer({
         id: "buildings-fill",
         type: "fill",
         source: "buildings",
         minzoom: BUILDING_MIN_ZOOM - 0.5,
-        paint: { "fill-color": "#24262c", "fill-opacity": 0.9 },
+        paint: {
+          "fill-color": ["case", isMarked, COLOR_MARKED, COLOR_HOUSE],
+          "fill-opacity": ["case", isMarked, 1, 0.9],
+        },
       });
       map.addLayer({
         id: "buildings-line",
         type: "line",
         source: "buildings",
         minzoom: BUILDING_MIN_ZOOM - 0.5,
-        paint: { "line-color": "#0d0e11", "line-width": 0.8 },
+        paint: {
+          "line-color": ["case", isMarked, COLOR_MARKED_LINE, COLOR_HOUSE_LINE],
+          "line-width": ["interpolate", ["linear"], ["zoom"], 15, 0.6, 18, ["case", isMarked, 2, 0.8]],
+        },
       });
-      map.addLayer({
-        id: "marks-fill",
-        type: "fill",
-        source: "marks",
-        paint: { "fill-color": "#ffd60a", "fill-opacity": 1 },
-      });
-      map.addLayer({
-        id: "marks-line",
-        type: "line",
-        source: "marks",
-        paint: { "line-color": "#c99a00", "line-width": ["interpolate", ["linear"], ["zoom"], 14, 0.5, 18, 2] },
-      });
+      const pointPaint: CircleLayerSpecification["paint"] = {
+        "circle-color": COLOR_MARKED,
+        "circle-radius": ["interpolate", ["linear"], ["zoom"], 10, 2, 14, 4.5, 18, 7],
+        "circle-stroke-color": "#15171c",
+        "circle-stroke-width": 1,
+      };
+      // Rausgezoomt: alle Markierungen als Punkte.
       map.addLayer({
         id: "mark-points",
         type: "circle",
         source: "mark-points",
         maxzoom: BUILDING_MIN_ZOOM - 0.5,
-        paint: {
-          "circle-color": "#ffd60a",
-          "circle-radius": ["interpolate", ["linear"], ["zoom"], 10, 2, 14, 4.5],
-          "circle-stroke-color": "#15171c",
-          "circle-stroke-width": 1,
-        },
+        paint: pointPaint,
+      });
+      // Nah dran: Punkte nur für Häuser, deren Umriss (noch) nicht geladen ist.
+      map.addLayer({
+        id: "mark-points-noshape",
+        type: "circle",
+        source: "mark-points",
+        minzoom: BUILDING_MIN_ZOOM - 0.5,
+        filter: ["==", ["get", "shape"], false],
+        paint: pointPaint,
       });
       setReady(true);
+      syncMarks();
+      reportCells();
       void loadVisible();
     });
 
-    map.on("moveend", () => void loadVisible());
+    map.on("moveend", () => {
+      reportCells();
+      void loadVisible();
+    });
+
+    // ---------- Antippen ----------
 
     function pick(point: maplibregl.Point): MapGeoJSONFeature | undefined {
-      const layers = ["marks-fill", "buildings-fill"];
+      const layers = ["buildings-fill", "mark-points-noshape"];
       const exact = map.queryRenderedFeatures(point, { layers });
       if (exact.length) return exact[0];
       // Etwas Toleranz für Finger: nächstes Haus im Umkreis von 8 px.
       const r = 8;
-      const near = map.queryRenderedFeatures(
+      return map.queryRenderedFeatures(
         [
           [point.x - r, point.y - r],
           [point.x + r, point.y + r],
         ],
         { layers },
-      );
-      return near[0];
+      )[0];
     }
 
-    // Ein Tipp markiert, ein Doppeltipp zoomt. Deshalb wartet ein Tipp kurz, ob ein
-    // zweiter folgt (wie bei Google Maps); dann zoomt nur die Karte, das Haus bleibt.
-    let pending: { timer: ReturnType<typeof setTimeout>; run: () => void; x: number; y: number } | null = null;
-    // Der zweite Tipp eines Doppeltipps löst auch ein click aus; das ignorieren wir.
-    let swallowNextClick = false;
-    const cancelTap = () => {
+    function toggleAt(point: maplibregl.Point) {
+      if (disposed || map.getZoom() < BUILDING_MIN_ZOOM - 0.5) return;
+      const osmId = pick(point)?.properties?.osmId as string | undefined;
+      if (!osmId) return;
+      const mark = marksRef.current.get(osmId);
+      if (mark) {
+        onToggleRef.current(osmId, false, mark.center);
+      } else {
+        const building = buildings.get(osmId);
+        if (!building) return;
+        onToggleRef.current(osmId, true, centerOf(building));
+      }
+      navigator.vibrate?.(12);
+    }
+
+    // Ein Tipp wartet kurz, ob ein zweiter folgt (Doppeltipp = Zoom, wie bei Google Maps).
+    // Die Regel steht in lib/taps.ts. Pointer-Events zählen jeden Druck genau einmal,
+    // egal ob Finger oder Maus.
+    let pending: { press: Press; payload: maplibregl.Point; timer: ReturnType<typeof setTimeout> } | null = null;
+    let lastPress: Press | null = null;
+    let doubleArmed = false;
+    const clearPending = () => {
       if (pending) clearTimeout(pending.timer);
       pending = null;
     };
     const canvas = map.getCanvasContainer();
-    const onDown = (clientX: number, clientY: number) => {
-      swallowNextClick = false;
-      if (!pending) return;
-      const r = canvas.getBoundingClientRect();
-      const near = Math.hypot(clientX - r.left - pending.x, clientY - r.top - pending.y) < DOUBLE_TAP_RADIUS;
-      if (near) {
-        cancelTap(); // Doppeltipp: die Karte zoomt.
-        swallowNextClick = true;
-      } else {
-        const { run } = pending; // Schnell ein anderes Haus: das erste sofort übernehmen.
-        cancelTap();
-        run();
-      }
-    };
-    const onTouchStart = (e: TouchEvent) => e.touches[0] && onDown(e.touches[0].clientX, e.touches[0].clientY);
-    const onMouseDown = (e: MouseEvent) => onDown(e.clientX, e.clientY);
-    canvas.addEventListener("touchstart", onTouchStart, { passive: true });
-    canvas.addEventListener("mousedown", onMouseDown);
-
-    map.on("click", (e) => {
-      if (swallowNextClick) {
-        swallowNextClick = false;
+    const onPointerDown = (e: PointerEvent) => {
+      if (!e.isPrimary) {
+        // Zweiter Finger (Pinch): kein Tipp.
+        clearPending();
+        doubleArmed = false;
         return;
       }
-      if (map.getZoom() < BUILDING_MIN_ZOOM - 0.5) return;
-      const f = pick(e.point);
-      const osmId = f?.properties?.osmId as string | undefined;
-      if (!osmId) return;
-      const run = () => {
-        if (disposed) return;
-        const isMarked = marksRef.current.some((m) => m.osmId === osmId);
-        if (isMarked) {
-          onToggleRef.current(osmId, false);
-        } else {
-          // Geometrie aus dem Cache, nicht aus der gerenderten Kachel (die ist beschnitten).
-          const building = buildings.get(osmId);
-          if (!building) return;
-          onToggleRef.current(osmId, true, building.geometry.coordinates);
-        }
-        navigator.vibrate?.(12);
-      };
-      cancelTap();
+      const r = canvas.getBoundingClientRect();
+      const press = { x: e.clientX - r.left, y: e.clientY - r.top, t: performance.now() };
+      lastPress = press;
+      doubleArmed = false;
+      const action = onPress(pending, press);
+      if (action.kind === "double") {
+        clearPending();
+        doubleArmed = true;
+      } else if (action.kind === "flush") {
+        clearPending();
+        toggleAt(action.previous);
+      }
+    };
+    canvas.addEventListener("pointerdown", onPointerDown);
+
+    map.on("click", (e) => {
+      if (doubleArmed) {
+        // Zweiter Tipp eines Doppeltipps: hineinzoomen, nichts markieren.
+        doubleArmed = false;
+        map.easeTo({ zoom: Math.min(map.getMaxZoom(), map.getZoom() + 1), around: e.lngLat, duration: 250 });
+        return;
+      }
+      const press = lastPress ?? { x: e.point.x, y: e.point.y, t: performance.now() };
+      clearPending();
+      const point = e.point;
       pending = {
+        press,
+        payload: point,
         timer: setTimeout(() => {
           pending = null;
-          run();
+          toggleAt(point);
         }, DOUBLE_TAP_MS),
-        run,
-        x: e.point.x,
-        y: e.point.y,
       };
     });
 
@@ -325,11 +392,11 @@ export function BuildingMap({ center, bbox, marks, onToggle, onLoadState, contro
 
     return () => {
       disposed = true;
-      cancelTap();
-      canvas.removeEventListener("touchstart", onTouchStart);
-      canvas.removeEventListener("mousedown", onMouseDown);
+      clearPending();
+      canvas.removeEventListener("pointerdown", onPointerDown);
       inflight?.abort();
       if (controlsRef) controlsRef.current = null;
+      syncMarksRef.current = null;
       map.remove();
       mapRef.current = null;
       setReady(false);
@@ -339,11 +406,8 @@ export function BuildingMap({ center, bbox, marks, onToggle, onLoadState, contro
   }, []);
 
   useEffect(() => {
-    const map = mapRef.current;
-    if (!ready || !map) return;
-    const list = marks ?? [];
-    (map.getSource("marks") as GeoJSONSource).setData(marksToPolygons(list));
-    (map.getSource("mark-points") as GeoJSONSource).setData(marksToPoints(list));
+    marksRef.current = new Map(marks.map((m) => [m.osmId, m]));
+    if (ready) syncMarksRef.current?.();
   }, [marks, ready]);
 
   // MapLibre setzt am Container position: relative; deshalb ein eigener Rahmen außen.

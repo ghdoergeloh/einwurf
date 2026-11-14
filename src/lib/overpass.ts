@@ -135,3 +135,16 @@ export async function fetchBuildings(bbox: BBox, signal?: AbortSignal): Promise<
 export function toCollection(features: Iterable<BuildingFeature>): FeatureCollection<MultiPolygon, BuildingProps> {
   return { type: "FeatureCollection", features: [...features] };
 }
+
+/** Mittelpunkt eines Hauses (Schwerpunkt der Eckpunkte des ersten Außenrings), [lng, lat]. */
+export function centerOf(f: BuildingFeature): [number, number] {
+  const ring = f.geometry.coordinates[0][0];
+  const n = Math.max(1, ring.length - 1); // letzter Punkt = erster Punkt
+  let x = 0;
+  let y = 0;
+  for (let i = 0; i < n; i++) {
+    x += ring[i][0];
+    y += ring[i][1];
+  }
+  return [Math.round((x / n) * 1e7) / 1e7, Math.round((y / n) * 1e7) / 1e7];
+}

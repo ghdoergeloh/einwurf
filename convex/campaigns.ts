@@ -1,6 +1,7 @@
 import { mutation, query } from "./_generated/server";
 import { ConvexError, v } from "convex/values";
 import {
+  MAX_CAMPAIGNS_PER_MINUTE,
   MAX_NAME_LENGTH,
   MAX_PLACE_LENGTH,
   SLUG_PATTERN,
@@ -35,6 +36,13 @@ export const create = mutation({
       .withIndex("by_slug", (q) => q.eq("slug", args.slug))
       .unique();
     if (existing) throw new ConvexError("Link existiert bereits");
+
+    // Einfache Bremse gegen Skripte, die massenhaft Aktionen anlegen.
+    const recent = await ctx.db.query("campaigns").order("desc").take(MAX_CAMPAIGNS_PER_MINUTE);
+    const oldest = recent[MAX_CAMPAIGNS_PER_MINUTE - 1];
+    if (oldest && Date.now() - oldest._creationTime < 60_000) {
+      throw new ConvexError("Gerade werden sehr viele Aktionen angelegt. Bitte in einer Minute noch einmal versuchen.");
+    }
 
     await ctx.db.insert("campaigns", {
       slug: args.slug,

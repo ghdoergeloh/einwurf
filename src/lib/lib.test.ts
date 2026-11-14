@@ -1,6 +1,6 @@
 import { describe, expect, test } from "vitest";
 import { generateSlug } from "./slug";
-import { buildQuery, cellsBBox, cellsFor, joinRings, parseOverpass } from "./overpass";
+import { buildQuery, cellsBBox, cellsFor, centerOf, joinRings, parseOverpass } from "./overpass";
 import { parseNominatim } from "./geocode";
 
 describe("generateSlug", () => {
@@ -48,6 +48,13 @@ describe("overpass", () => {
     expect(f[0].id).toBe("relation/9");
     expect(f[0].geometry.coordinates).toHaveLength(1);
     expect(f[0].geometry.coordinates[0][0]).toHaveLength(5);
+  });
+
+  test("Mittelpunkt eines Hauses", () => {
+    const [f] = parseOverpass({
+      elements: [{ type: "way", id: 1, geometry: [{ lat: 0, lon: 0 }, { lat: 0, lon: 2 }, { lat: 2, lon: 2 }, { lat: 2, lon: 0 }, { lat: 0, lon: 0 }] }],
+    });
+    expect(centerOf(f)).toEqual([1, 1]);
   });
 
   test("joinRings verwirft Stücke, die sich nicht schließen", () => {

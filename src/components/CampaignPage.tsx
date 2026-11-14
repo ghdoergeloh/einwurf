@@ -1,7 +1,9 @@
-import { useCallback, useEffect, useRef, useState } from "react";
-import { useMutation, useQuery } from "convex/react";
+import { useCallback, useEffect, useMemo, useRef, useState } from "react";
+import { useConvexConnectionState, useMutation, useQueries, useQuery } from "convex/react";
+import { ConvexError } from "convex/values";
 import { api } from "../../convex/_generated/api";
-import { BuildingMap, type LoadState, type MapControls } from "./BuildingMap";
+import { markCellOf } from "../../convex/cells";
+import { BuildingMap, type LoadState, type MapControls, type Mark } from "./BuildingMap";
 import { ShareSheet } from "./ShareSheet";
 import { LogoMark } from "./Logo";
 import { campaignPath, navigate } from "../lib/router";
@@ -13,27 +15,44 @@ interface Props {
 
 export function CampaignPage({ slug, isNew }: Props) {
   const campaign = useQuery(api.campaigns.get, { slug });
-  const marks = useQuery(api.marks.list, { slug });
+  // Nur die sichtbaren Zellen abonnieren: Ein Tipp schickt allen nur seine Zelle neu.
+  const [cells, setCells] = useState<string[] | null>([]);
+  const cellResults = useQueries(
+    useMemo(
+      () =>
+        Object.fromEntries((cells ?? []).map((cell) => [cell, { query: api.marks.inCell, args: { slug, cell } }])),
+      [cells, slug],
+    ),
+  );
+  const marks = useMemo<Mark[]>(
+    () => Object.values(cellResults).flatMap((r) => (Array.isArray(r) ? (r as Mark[]) : [])),
+    [cellResults],
+  );
+  const connection = useConvexConnectionState();
+  const offline = connection.hasEverConnected && !connection.isWebSocketConnected;
+
   // Beim Wechsel auf die saubere Adresse ändert sich isNew; die Begrüßung soll bleiben.
   const [welcome] = useState(isNew);
   const [shareOpen, setShareOpen] = useState(isNew);
   const [loadState, setLoadState] = useState<LoadState>("idle");
   const [toast, setToast] = useState<string | null>(null);
+  const toastTimer = useRef<ReturnType<typeof setTimeout> | null>(null);
   const controls = useRef<MapControls | null>(null);
 
   const setMark = useMutation(api.marks.set).withOptimisticUpdate((store, args) => {
-    const list = store.getQuery(api.marks.list, { slug: args.slug });
-    if (list !== undefined) {
-      const without = list.filter((m) => m.osmId !== args.osmId);
-      const next = args.marked && args.geometry ? [...without, { osmId: args.osmId, geometry: args.geometry }] : without;
-      store.setQuery(api.marks.list, { slug: args.slug }, next);
-    }
+    const cell = markCellOf(args.center[0], args.center[1]);
+    const list = store.getQuery(api.marks.inCell, { slug: args.slug, cell });
+    if (list === undefined) return;
+    const was = list.some((m) => m.osmId === args.osmId);
+    const without = list.filter((m) => m.osmId !== args.osmId);
+    store.setQuery(
+      api.marks.inCell,
+      { slug: args.slug, cell },
+      args.marked ? [...without, { osmId: args.osmId, center: args.center }] : without,
+    );
     const c = store.getQuery(api.campaigns.get, { slug: args.slug });
-    if (c && list !== undefined) {
-      const was = list.some((m) => m.osmId === args.osmId);
-      const delta = args.marked === was ? 0 : args.marked ? 1 : -1;
-      store.setQuery(api.campaigns.get, { slug: args.slug }, { ...c, markCount: Math.max(0, c.markCount + delta) });
-    }
+    const delta = args.marked === was ? 0 : args.marked ? 1 : -1;
+    if (c) store.setQuery(api.campaigns.get, { slug: args.slug }, { ...c, markCount: Math.max(0, c.markCount + delta) });
   });
 
   useEffect(() => {
@@ -51,6 +70,7 @@ export function CampaignPage({ slug, isNew }: Props) {
     return () => {
       root.classList.remove("map-mode");
       document.removeEventListener("gesturestart", block);
+      if (toastTimer.current) clearTimeout(toastTimer.current);
     };
   }, []);
 
@@ -58,14 +78,23 @@ export function CampaignPage({ slug, isNew }: Props) {
     if (campaign) document.title = `${campaign.name} · Einwurf`;
   }, [campaign]);
 
+  const showToast = useCallback((text: string) => {
+    if (toastTimer.current) clearTimeout(toastTimer.current);
+    setToast(text);
+    toastTimer.current = setTimeout(() => setToast(null), 4000);
+  }, []);
+
   const onToggle = useCallback(
-    (osmId: string, marked: boolean, geometry?: number[][][][]) => {
-      setMark({ slug, osmId, marked, geometry }).catch(() => {
-        setToast("Konnte nicht gespeichert werden. Bist du online?");
-        setTimeout(() => setToast(null), 3500);
+    (osmId: string, marked: boolean, center: number[]) => {
+      setMark({ slug, osmId, marked, center }).catch((err: unknown) => {
+        showToast(
+          err instanceof ConvexError && typeof err.data === "string"
+            ? err.data
+            : "Konnte nicht gespeichert werden. Bitte noch einmal tippen.",
+        );
       });
     },
-    [setMark, slug],
+    [setMark, slug, showToast],
   );
 
   if (campaign === null) return <NotFound />;
@@ -80,6 +109,7 @@ export function CampaignPage({ slug, isNew }: Props) {
           center={campaign.center}
           bbox={campaign.bbox}
           marks={marks}
+          onCellsChange={setCells}
           onToggle={onToggle}
           onLoadState={setLoadState}
           controlsRef={controls}
@@ -128,7 +158,7 @@ export function CampaignPage({ slug, isNew }: Props) {
       {/* Hinweis unten */}
       {/* Rechts unten bleibt Platz für Zoom- und Standort-Knöpfe. */}
       <div className="pointer-events-none absolute bottom-0 left-0 right-16 z-10 flex justify-start p-3 pb-[max(0.75rem,env(safe-area-inset-bottom))] sm:justify-center">
-        <StatusPill state={loadState} toast={toast} onRetry={() => controls.current?.retry()} />
+        <StatusPill state={loadState} toast={toast} offline={offline} onRetry={() => controls.current?.retry()} />
       </div>
 
       {shareOpen && campaign && (
@@ -138,15 +168,46 @@ export function CampaignPage({ slug, isNew }: Props) {
   );
 }
 
-function StatusPill({ state, toast, onRetry }: { state: LoadState; toast: string | null; onRetry: () => void }) {
+function StatusPill({
+  state,
+  toast,
+  offline,
+  onRetry,
+}: {
+  state: LoadState;
+  toast: string | null;
+  offline: boolean;
+  onRetry: () => void;
+}) {
   const base =
-    "flex max-w-full items-center gap-2.5 rounded-full px-4 py-2.5 text-[13px] font-medium sm:text-sm shadow-[0_10px_30px_-10px_rgba(0,0,0,0.45)]";
-  if (toast) return <div role="alert" className={`${base} bg-red-600 text-white`}>{toast}</div>;
+    "flex max-w-full items-center gap-2.5 rounded-2xl px-4 py-2.5 text-[13px] font-medium leading-snug shadow-[0_10px_30px_-10px_rgba(0,0,0,0.45)] sm:text-sm";
+  if (toast)
+    return (
+      <div role="alert" className={`${base} bg-red-600 text-white`}>
+        {toast}
+      </div>
+    );
+  if (offline)
+    return (
+      <div role="status" className={`${base} bg-orange-100 text-orange-950`}>
+        <span className="size-2.5 shrink-0 animate-pulse rounded-full bg-orange-500" />
+        Offline. Deine Häuser werden gespeichert, sobald wieder Netz da ist.
+      </div>
+    );
+  if (state === "mapError")
+    return (
+      <div role="alert" className={`${base} pointer-events-auto bg-white text-ink`}>
+        Die Karte konnte nicht geladen werden.
+        <button type="button" onClick={() => location.reload()} className="shrink-0 rounded-full bg-ink px-3 py-1 text-xs text-white">
+          Neu laden
+        </button>
+      </div>
+    );
   if (state === "error")
     return (
       <div role="alert" className={`${base} pointer-events-auto bg-white text-ink`}>
         Häuser konnten nicht geladen werden.
-        <button type="button" onClick={onRetry} className="rounded-full bg-ink px-3 py-1 text-xs text-white">
+        <button type="button" onClick={onRetry} className="shrink-0 rounded-full bg-ink px-3 py-1 text-xs text-white">
           Erneut
         </button>
       </div>
@@ -164,14 +225,17 @@ function StatusPill({ state, toast, onRetry }: { state: LoadState; toast: string
   if (state === "loading")
     return (
       <div className={`${base} bg-white text-ink`}>
-        <span className="size-3.5 animate-spin rounded-full border-2 border-ink/20 border-t-ink" />
+        <span className="size-3.5 shrink-0 animate-spin rounded-full border-2 border-ink/20 border-t-ink" />
         Häuser werden geladen …
       </div>
     );
   return (
     <div className={`${base} bg-ink/90 text-white backdrop-blur`}>
       <span className="size-3 shrink-0 rounded-[3px] bg-sun" />
-      Tippen: Flyer drin · erneut: zurück
+      <span>
+        Haus antippen, wenn der Flyer drin ist.
+        <span className="block text-white/60">Nochmal tippen macht es rückgängig.</span>
+      </span>
     </div>
   );
 }

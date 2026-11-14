@@ -1,11 +1,6 @@
 import { defineSchema, defineTable } from "convex/server";
 import { v } from "convex/values";
 
-/** [lng, lat] */
-export const position = v.array(v.number());
-/** MultiPolygon-Koordinaten im GeoJSON-Format: Polygone → Ringe → Punkte. */
-export const multiPolygon = v.array(v.array(v.array(position)));
-
 export default defineSchema({
   campaigns: defineTable({
     /** Geheimer, zufälliger Schlüssel im Link. Wer ihn kennt, darf alles. */
@@ -17,12 +12,18 @@ export default defineSchema({
     bbox: v.optional(v.array(v.number())),
     /** Anzahl markierter Häuser, wird bei jeder Änderung mitgeführt. */
     markCount: v.optional(v.number()),
-  }).index("by_slug", ["slug"]),
+  })
+    .index("by_slug", ["slug"]),
 
   marks: defineTable({
     campaignId: v.id("campaigns"),
     /** OSM-Objekt, z. B. "way/123456" oder "relation/987". */
     osmId: v.string(),
-    geometry: multiPolygon,
-  }).index("by_campaign_osm", ["campaignId", "osmId"]),
+    /** Mittelpunkt des Hauses [lng, lat]; der Umriss kommt im Browser von Overpass. */
+    center: v.array(v.number()),
+    /** Rasterzelle des Mittelpunkts, siehe cells.ts. */
+    cell: v.string(),
+  })
+    .index("by_campaign_osm", ["campaignId", "osmId"])
+    .index("by_campaign_cell", ["campaignId", "cell"]),
 });

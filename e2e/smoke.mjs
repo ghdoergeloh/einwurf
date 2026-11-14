@@ -24,7 +24,7 @@ function fakeBuildings(body) {
   return { elements };
 }
 
-async function mockOsm(ctx) {
+async function mockOsm(ctx, { styleFails = false } = {}) {
   await ctx.route("https://nominatim.openstreetmap.org/**", (r) =>
     r.fulfill({
       json: [
@@ -34,7 +34,7 @@ async function mockOsm(ctx) {
     }),
   );
   await ctx.route("https://tiles.openfreemap.org/**", (r) =>
-    r.fulfill({ json: { version: 8, sources: {}, layers: [{ id: "bg", type: "background", paint: { "background-color": "#ebe8e1" } }] } }),
+    styleFails ? r.fulfill({ status: 500, body: "kaputt" }) : r.fulfill({ json: { version: 8, sources: {}, layers: [{ id: "bg", type: "background", paint: { "background-color": "#ebe8e1" } }] } }),
   );
   await ctx.route("https://overpass-api.de/**", (r) => r.fulfill({ json: fakeBuildings(r.request().postData()) }));
 }
@@ -85,6 +85,15 @@ try {
   const cx = box.x + box.width / 2;
   const cy = box.y + box.height / 2;
   const count = (page) => page.getByTestId("count").textContent();
+  const zoom = (page) => page.evaluate(() => window.__einwurfMap.getZoom());
+  /** Ist das Haus an diesem Bildschirmpunkt gelb eingefärbt (feature-state)? */
+  const markedAt = (page, x, y) =>
+    page.evaluate(([x, y]) => {
+      const map = window.__einwurfMap;
+      const r = map.getCanvasContainer().getBoundingClientRect();
+      const [f] = map.queryRenderedFeatures([x - r.left, y - r.top], { layers: ["buildings-fill"] });
+      return f ? Boolean(map.getFeatureState({ source: "buildings", id: f.properties.osmId }).marked) : null;
+    }, [x, y]);
 
   // Zwei schnelle Tipps auf verschiedene Häuser: beide markiert
   await p.mouse.click(cx, cy);
@@ -92,32 +101,88 @@ try {
   await p.waitForTimeout(1200);
   assert.equal(await count(p), "2");
   assert.equal(await count(p2), "2", "live beim zweiten Helfer");
+  assert.equal(await markedAt(p2, cx, cy), true, "beim zweiten Helfer gelb");
   await shot(p2, "3-live");
+
+  // Wer später dazukommt, sieht die Häuser gelb (Markierung vor oder nach den Umrissen geladen)
+  const c3 = await browser.newContext(phone);
+  await mockOsm(c3);
+  const p3 = await c3.newPage();
+  track(p3);
+  await p3.goto(url);
+  await p3.waitForTimeout(2500);
+  assert.equal(await markedAt(p3, cx, cy), true, "nach Neuladen gelb");
+  assert.equal(await markedAt(p3, cx - 120, cy - 120), false, "Nachbarhaus bleibt grau");
+  // Rausgezoomt: Markierungen als gelbe Punkte, Hinweis zum Heranzoomen
+  await p3.evaluate(() => window.__einwurfMap.jumpTo({ zoom: 13.5 }));
+  await p3.waitForTimeout(1500);
+  const dots = await p3.evaluate(() => window.__einwurfMap.queryRenderedFeatures({ layers: ["mark-points"] }).length);
+  assert.ok(dots >= 1, "Punkte rausgezoomt");
+  await p3.getByText("Heranzoomen, um Häuser zu sehen").waitFor();
+  await shot(p3, "3b-zoomed-out");
 
   // Der zweite Helfer nimmt eine Markierung zurück
   await p2.mouse.click(cx, cy);
   await p2.waitForTimeout(1200);
   assert.equal(await count(p), "1");
 
-  // Doppeltipp zoomt nur, markiert nichts
+  // Zwei Tipps mit 350 ms Pause sind zwei einzelne Tipps: markieren und zurücknehmen, kein Zoom
+  const z0 = await zoom(p);
+  await p.mouse.click(cx - 120, cy - 120);
+  await p.waitForTimeout(350);
+  await p.mouse.click(cx - 120, cy - 120);
+  await p.waitForTimeout(1200);
+  assert.equal(await count(p), "1", "langsamer Doppeltipp: an und wieder aus");
+  assert.equal(await zoom(p), z0, "langsamer Doppeltipp zoomt nicht");
+
+  // Doppeltipp zoomt genau eine Stufe und markiert nichts
   await p.mouse.dblclick(cx - 120, cy - 120);
   await p.waitForTimeout(1200);
   assert.equal(await count(p), "1", "Doppeltipp darf nicht markieren");
+  assert.ok(Math.abs((await zoom(p)) - (z0 + 1)) < 0.01, "Doppeltipp zoomt eine Stufe");
   await shot(p, "4-after-dblclick");
+
+  // Funkloch: Die Verbindung zu Convex reißt ab → Hinweis, dass später gespeichert wird
+  const off = await browser.newContext(phone);
+  await mockOsm(off);
+  let online = true;
+  const sockets = [];
+  await off.routeWebSocket(/\/api\/.*sync/, (ws) => {
+    if (!online) return ws.close();
+    ws.connectToServer();
+    sockets.push(ws);
+  });
+  const po = await off.newPage();
+  await po.goto(url);
+  await po.waitForTimeout(2500);
+  online = false;
+  for (const ws of sockets) ws.close();
+  await po.getByText("Offline.").waitFor({ timeout: 15_000 });
+  await shot(po, "5-offline");
+  online = true;
+  await po.getByText("Offline.").waitFor({ state: "hidden", timeout: 30_000 });
+  await off.close();
 
   // Unbekannter Link
   await p.goto(`${BASE}/v/AAAAAAAAAAAAAAAAAAAAAA`);
   await p.getByText("Diese Verteilaktion gibt es nicht").waitFor();
+
+  // Grundkarte lädt nicht
+  const broken = await browser.newContext(phone);
+  await mockOsm(broken, { styleFails: true });
+  const pb = await broken.newPage();
+  await pb.goto(url);
+  await pb.getByText("Die Karte konnte nicht geladen werden").waitFor({ timeout: 10_000 });
 
   // Desktop
   const d = await (await browser.newContext({ viewport: { width: 1280, height: 800 } })).newPage();
   await mockOsm(d.context());
   track(d);
   await d.goto(BASE);
-  await shot(d, "5-home-desktop");
+  await shot(d, "6-home-desktop");
   await d.goto(url);
   await d.waitForTimeout(2500);
-  await shot(d, "6-map-desktop");
+  await shot(d, "7-map-desktop");
 
   assert.deepEqual(errors, [], "keine Fehler in der Konsole");
   console.log("OK");
