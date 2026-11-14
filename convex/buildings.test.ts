@@ -178,6 +178,49 @@ describe("buildings.load", () => {
     expect(fetchMock).toHaveBeenCalledTimes(1);
   });
 
+  test("beendete Anfragen werden nie nachträglich abgebrochen (Convex stürzt sonst ab)", async () => {
+    const t = await setup();
+    vi.stubEnv("OVERPASS_URLS", "https://eins.example/api,https://zwei.example/api");
+    const signals: AbortSignal[] = [];
+    const bodyRead: boolean[] = [];
+    vi.stubGlobal("fetch", vi.fn(async (_url: string, init?: RequestInit) => {
+      signals.push(init!.signal!);
+      const i = bodyRead.push(false) - 1;
+      const res = new Response("busy", { status: 502 });
+      const text = res.text.bind(res);
+      res.text = async () => ((bodyRead[i] = true), text());
+      return res;
+    }));
+    await expect(t.action(api.buildings.load, { slug: SLUG, cells: [CELL_A] })).rejects.toThrow(/nicht erreichbar/);
+    expect(signals.map((s) => s.aborted)).toEqual([false, false]);
+    // Fehlerantworten werden gelesen, damit nichts offen bleibt
+    expect(bodyRead).toEqual([true, true]);
+    // Sperre wieder frei: der nächste Versuch fragt sofort
+    vi.stubGlobal("fetch", vi.fn(async () => overpassOk()));
+    expect(ids(await t.action(api.buildings.load, { slug: SLUG, cells: [CELL_A] }))).toEqual(["way/1"]);
+  });
+
+  test("Gewinner gefunden: nur noch laufende Anfragen werden abgebrochen", async () => {
+    vi.useFakeTimers({ toFake: ["setTimeout", "clearTimeout", "Date"] });
+    try {
+      const t = await setup();
+      vi.stubEnv("OVERPASS_URLS", "https://eins.example/api,https://zwei.example/api");
+      const signals: AbortSignal[] = [];
+      vi.stubGlobal("fetch", vi.fn((url: string, init?: RequestInit) => {
+        signals.push(init!.signal!);
+        return url.startsWith("https://eins")
+          ? new Promise<Response>((_, reject) => init!.signal!.addEventListener("abort", () => reject(new Error("aborted"))))
+          : Promise.resolve(overpassOk());
+      }));
+      const pending = t.action(api.buildings.load, { slug: SLUG, cells: [CELL_A] });
+      await vi.advanceTimersByTimeAsync(36_000);
+      await pending;
+      expect(signals.map((s) => s.aborted)).toEqual([true, false]);
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
   test("Laufzeitfehler von Overpass (200 mit remark) zählt als Fehler", async () => {
     const t = await setup();
     vi.stubEnv("OVERPASS_URLS", "https://eins.example/api");

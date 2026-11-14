@@ -190,7 +190,11 @@ async function askOverpass(url: string, query: string, signal: AbortSignal): Pro
     body: new URLSearchParams({ data: query }).toString(),
     signal,
   });
-  if (!res.ok) throw new Error(`HTTP ${res.status}`);
+  if (!res.ok) {
+    // Antwort lesen, damit der Datenstrom sauber endet.
+    await res.text().catch(() => "");
+    throw new Error(`HTTP ${res.status}`);
+  }
   const json = (await res.json()) as { elements?: unknown[]; remark?: string };
   // Bei Zeitüberschreitung antwortet Overpass mit 200 und einem „remark“.
   if (json.remark && /error|timed out/i.test(json.remark)) throw new Error(json.remark);
@@ -207,39 +211,45 @@ function fetchOverpass(bbox: [number, number, number, number], { hedge = true }:
   const urls = endpoints();
   const query = buildQuery(bbox);
   const problems: string[] = [];
-  const ctrls: AbortController[] = [];
+  /** Noch laufende Anfragen. Beendete nie abbrechen: Das bringt die Convex-Laufzeit zum Absturz. */
+  const running = new Set<AbortController>();
   const timers: ReturnType<typeof setTimeout>[] = [];
   return new Promise((resolve, reject) => {
     let next = 0;
-    let running = 0;
     let done = false;
     const finish = () => {
       done = true;
       timers.forEach(clearTimeout);
-      ctrls.forEach((c) => c.abort());
+      for (const c of running) c.abort();
+      running.clear();
     };
     const launch = () => {
       if (done || next >= urls.length) return;
       const url = urls[next++];
       const ctrl = new AbortController();
-      ctrls.push(ctrl);
-      running++;
-      timers.push(setTimeout(() => ctrl.abort(), OVERPASS_TIMEOUT_MS));
+      running.add(ctrl);
+      const timeout = setTimeout(() => running.has(ctrl) && ctrl.abort(), OVERPASS_TIMEOUT_MS);
+      timers.push(timeout);
+      const settle = () => {
+        running.delete(ctrl);
+        clearTimeout(timeout);
+      };
       const hedgeTimer = hedge ? setTimeout(launch, OVERPASS_HEDGE_MS) : undefined;
       if (hedgeTimer) timers.push(hedgeTimer);
       askOverpass(url, query, ctrl.signal).then(
         (features) => {
+          settle();
           if (done) return;
           finish();
           resolve(features);
         },
         (e: unknown) => {
-          running--;
+          settle();
           if (done) return;
           problems.push(`${url}: ${e instanceof Error ? e.message : String(e)}`);
           clearTimeout(hedgeTimer);
           if (next < urls.length) launch();
-          else if (running === 0) {
+          else if (running.size === 0) {
             finish();
             console.warn("Overpass nicht erreichbar", problems);
             reject(new ConvexError("Die Gebäudedaten (OpenStreetMap) sind gerade nicht erreichbar. Bitte gleich noch einmal versuchen."));
