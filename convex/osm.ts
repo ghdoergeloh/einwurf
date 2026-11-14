@@ -171,6 +171,11 @@ function assignAddressPoints(features: BuildingFeature[], elements: OverpassElem
   }
 }
 
+/** Liegt der Punkt [lng, lat] im Haus (in einem seiner Außenringe)? */
+export function containsPoint(f: BuildingFeature, pt: Position): boolean {
+  return f.geometry.coordinates.some((poly) => inRing(pt, poly[0]));
+}
+
 /** Punkt im Ring (Strahl-Methode). */
 function inRing([x, y]: Position, ring: Position[]): boolean {
   let inside = false;

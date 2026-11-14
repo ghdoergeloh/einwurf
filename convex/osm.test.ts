@@ -1,5 +1,5 @@
 import { describe, expect, test } from "vitest";
-import { CELL_SIZE, MAX_CELL_SPAN, buildQuery, decodeBuildings, encodeBuildings, parseCellKey, parseOverpass, planPrefetch, prefetchArea } from "./osm";
+import { CELL_SIZE, containsPoint, MAX_CELL_SPAN, buildQuery, decodeBuildings, encodeBuildings, parseCellKey, parseOverpass, planPrefetch, prefetchArea } from "./osm";
 
 const ROISDORF: [number, number, number, number] = [6.97, 50.745, 7.0, 50.765];
 const EFB: [number, number] = [6.985, 50.755];
@@ -133,4 +133,14 @@ test("riesiges Gebäude: Adresspunkt wird trotzdem gefunden, ohne Speicher zu sp
     elements: [{ type: "way", id: 1, geometry: ring }, { type: "node", id: 2, lon: 7, lat: 50.5, tags: { "addr:housenumber": "1" } }],
   });
   expect(fs[0].properties.hn).toBe("1");
+});
+
+test("Haus an einem Punkt", () => {
+  const fs = parseOverpass({
+    elements: [
+      { type: "way", id: 1, geometry: [[7, 50], [7.001, 50], [7.001, 50.001], [7, 50.001], [7, 50]].map(([lon, lat]) => ({ lon, lat })) },
+    ],
+  });
+  expect(containsPoint(fs[0], [7.0005, 50.0005])).toBe(true);
+  expect(containsPoint(fs[0], [7.002, 50.0005])).toBe(false);
 });

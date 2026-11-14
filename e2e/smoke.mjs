@@ -19,33 +19,48 @@ const SHOTS = process.argv[3];
 // Läufe samt Nachbarschaft. Die Breite bleibt fest, die Bildschirm-Abstände unten passen zu ihr.
 const CENTER = { lat: 50.76, lng: Math.round((2 + Math.random() * 14) * 1000) / 1000 };
 
+// Häuser im Raster um CENTER: 0,0004° × 0,0003° Abstand.
+const GX = 0.0004, GY = 0.0003;
+function houseRing(i, j) {
+  const x = CENTER.lng + i * GX;
+  const y = CENTER.lat + j * GY;
+  const dx = 0.00013, dy = 0.0001;
+  return [[x - dx, y - dy], [x + dx, y - dy], [x + dx, y + dy], [x - dx, y + dy], [x - dx, y - dy]];
+}
+// Ein zweites Gebiet weiter östlich, ohne Cache: dort testen wir Tipps auf Platzhalter.
+const FAR_I = 150;
+const FAR = { lat: CENTER.lat, lng: CENTER.lng + FAR_I * GX };
+
 function fakeBuildings(body) {
   const q = new URLSearchParams(body).get("data");
   const [s, w, n, e] = q.match(/\(([-\d.]+),([-\d.]+),([-\d.]+),([-\d.]+)\)/).slice(1).map(Number);
   const elements = [];
-  for (let i = -80; i <= 80; i++)
-    for (let j = -80; j <= 80; j++) {
-      const x = CENTER.lng + i * 0.0004;
-      const y = CENTER.lat + j * 0.0003;
-      if (x < w || x > e || y < s || y > n) continue;
-      const dx = 0.00013, dy = 0.0001;
-      const ring = [[x - dx, y - dy], [x + dx, y - dy], [x + dx, y + dy], [x - dx, y + dy], [x - dx, y - dy]];
+  for (let i = Math.ceil((w - CENTER.lng) / GX); i <= Math.floor((e - CENTER.lng) / GX); i++)
+    for (let j = Math.ceil((s - CENTER.lat) / GY); j <= Math.floor((n - CENTER.lat) / GY); j++) {
+      const x = CENTER.lng + i * GX;
+      const y = CENTER.lat + j * GY;
+      const ring = houseRing(i, j);
       // Jedes zweite Haus hat eine Hausnummer am Gebäude, jedes vierte einen Adresspunkt darin.
       const tags = (i + j) % 2 === 0 ? { building: "yes", "addr:housenumber": String(80 + i) } : { building: "yes" };
-      elements.push({ type: "way", id: 100000 + (i + 80) * 1000 + (j + 80), tags, geometry: ring.map(([lon, lat]) => ({ lat, lon })) });
-      if ((i + j) % 4 === 0) elements.push({ type: "node", id: 900000 + (i + 80) * 1000 + (j + 80), lat: y, lon: x, tags: { "addr:housenumber": `${80 + i}a` } });
+      const id = (i + 5000) * 10000 + (j + 5000);
+      elements.push({ type: "way", id, tags, geometry: ring.map(([lon, lat]) => ({ lat, lon })) });
+      if ((i + j) % 4 === 0) elements.push({ type: "node", id, lat: y, lon: x, tags: { "addr:housenumber": `${80 + i}a` } });
     }
   return { elements };
 }
 
 let overpassCalls = 0;
+/** Verzögerung des nachgebildeten Overpass (langsamer Server). */
+let overpassDelayMs = 0;
 const overpass = http.createServer((req, res) => {
   let body = "";
   req.on("data", (c) => (body += c));
   req.on("end", () => {
     overpassCalls++;
-    res.setHeader("Content-Type", "application/json");
-    res.end(JSON.stringify(fakeBuildings(body)));
+    setTimeout(() => {
+      res.setHeader("Content-Type", "application/json");
+      res.end(JSON.stringify(fakeBuildings(body)));
+    }, overpassDelayMs);
   });
 });
 await new Promise((r) => overpass.listen(8787, "127.0.0.1", r));
@@ -69,11 +84,25 @@ async function mockOsm(ctx, { styleFails = false } = {}) {
             json: {
               version: 8,
               glyphs: "https://tiles.openfreemap.org/fonts/{fontstack}/{range}.pbf",
-              sources: { leer: { type: "geojson", data: { type: "FeatureCollection", features: [] } } },
+              sources: {
+                leer: { type: "geojson", data: { type: "FeatureCollection", features: [] } },
+                // Häuser der Grundkarte (Platzhalter) im zweiten Gebiet
+                platzhalter: {
+                  type: "geojson",
+                  data: {
+                    type: "FeatureCollection",
+                    features: Array.from({ length: 21 * 21 }, (_, k) => ({
+                      type: "Feature",
+                      properties: {},
+                      geometry: { type: "Polygon", coordinates: [houseRing(FAR_I - 10 + (k % 21), -10 + Math.floor(k / 21))] },
+                    })),
+                  },
+                },
+              },
               layers: [
                 { id: "bg", type: "background", paint: { "background-color": "#ebe8e1" } },
                 { id: "ortsnamen", type: "symbol", source: "leer", layout: { "text-field": "x", "text-font": ["Noto Sans Regular"] } },
-                { id: "building", type: "fill", source: "leer", "source-layer": "building", paint: { "fill-color": "#eee" } },
+                { id: "building", type: "fill", source: "platzhalter", paint: { "fill-color": "#eee" } },
               ],
             },
           }),
@@ -147,6 +176,16 @@ try {
       return f ? (map.getFeatureState({ source: "buildings", id: f.properties.osmId }).status ?? "none") : null;
     }, [x, y]);
   const next = { none: "done", done: "blocked", blocked: "none" };
+  /** Wartet bis zu 15 s, bis das Haus den erwarteten Zustand hat (Häuser laden asynchron). */
+  const expectStatus = async (page, x, y, want, msg) => {
+    const until = Date.now() + 15_000;
+    let got = await statusAt(page, x, y);
+    while (got !== want && Date.now() < until) {
+      await page.waitForTimeout(250);
+      got = await statusAt(page, x, y);
+    }
+    assert.equal(got, want, msg);
+  };
 
   // Zwei schnelle Tipps auf verschiedene Häuser: beide markiert
   await p.mouse.click(cx, cy);
@@ -181,8 +220,8 @@ try {
   track(p3);
   await p3.goto(url);
   await p3.waitForTimeout(2500);
-  assert.equal(await statusAt(p3, cx, cy), "done", "nach Neuladen gelb");
-  assert.equal(await statusAt(p3, cx - 120, cy - 120), "none", "Nachbarhaus bleibt grau");
+  await expectStatus(p3, cx, cy, "done", "nach Neuladen gelb");
+  await expectStatus(p3, cx - 120, cy - 120, "none", "Nachbarhaus bleibt grau");
   // Rausgezoomt: Markierungen als gelbe Punkte, Hinweis zum Heranzoomen
   await p3.evaluate(() => window.__einwurfMap.jumpTo({ zoom: 13.5 }));
   await p3.waitForTimeout(1500);
@@ -290,6 +329,29 @@ try {
   await po.waitForTimeout(1500);
   assert.equal(await statusAt(p2, tx, ty), "done", "nach dem Funkloch gespeichert, live beim anderen Helfer");
   await off.close();
+
+  // Tipp auf ein Haus, das noch lädt (hellgrauer Platzhalter): sofort ein gelber Punkt, danach wird das Haus gelb
+  overpassDelayMs = 5000;
+  const ph = await browser.newContext(phone);
+  await mockOsm(ph);
+  const pp = await ph.newPage();
+  track(pp);
+  await pp.goto(url);
+  await pp.waitForTimeout(2500);
+  await pp.evaluate((c) => window.__einwurfMap.jumpTo({ center: [c.lng, c.lat] }), FAR);
+  await pp.waitForTimeout(1200);
+  assert.equal(await statusAt(pp, cx, cy), null, "Haus noch nicht geladen");
+  await pp.mouse.click(cx, cy);
+  await pp.waitForTimeout(500);
+  const dotsNow = await pp.evaluate(() => window.__einwurfMap.queryRenderedFeatures({ layers: ["tap-points"] }).length);
+  assert.equal(dotsNow, 1, "gelber Punkt sofort");
+  await shot(pp, "5b-platzhalter-tipp");
+  await pp.waitForFunction(() => window.__einwurfMap.queryRenderedFeatures({ layers: ["buildings-fill"] }).length > 0, null, { timeout: 20_000 });
+  await pp.waitForTimeout(1000);
+  assert.equal(await statusAt(pp, cx, cy), "done", "nach dem Laden gelb");
+  assert.equal(await pp.evaluate(() => window.__einwurfMap.queryRenderedFeatures({ layers: ["tap-points"] }).length), 0, "Punkt weg");
+  overpassDelayMs = 0;
+  await ph.close();
 
   // „Bewegung reduzieren“ im System: Farbe wechselt, aber keine Funken
   const calm = await browser.newContext({ ...phone, reducedMotion: "reduce" });

@@ -10,6 +10,7 @@ import {
   cellKey,
   cellsFor,
   centerOf,
+  containsPoint,
   toCollection,
   type BBox,
   type BuildingFeature,
@@ -18,6 +19,7 @@ import { DOUBLE_TAP_MS, dragZoomDelta, onPress, type Press } from "../lib/taps";
 import { markCellOf, markCellsIn } from "../../convex/cells";
 import { nextStatus, statusOf, type HouseStatus, type MarkStatus } from "../../convex/status";
 import { addTap, cellsToWatch, settleTaps, type PendingTap } from "../lib/pendingTaps";
+import { resolvePlaceholderTaps, type PlaceholderTap } from "../lib/placeholderTaps";
 import { BURST_SECONDS, createBurst, drawBurst, type Burst } from "../lib/sparks";
 
 // Ab MapLibre 6 braucht jeder Bundler den Pfad zum Worker.
@@ -81,6 +83,8 @@ interface Props {
   onToggle: (osmId: string, status: HouseStatus, center: number[]) => void;
   /** Ein gemerkter Tipp wurde verworfen, weil jemand anderes das Haus inzwischen geändert hat. */
   onConflict: () => void;
+  /** Kurzer Hinweis für den Helfer. */
+  onNotice: (text: string) => void;
   onLoadState: (s: LoadState) => void;
   /** Lädt die Häuser der Kacheln ("x:y"), über Convex mit gemeinsamem Cache. */
   loadBuildings: (cells: string[]) => Promise<BuildingFeature[]>;
@@ -96,6 +100,7 @@ export function BuildingMap({
   onCellsChange,
   onToggle,
   onConflict,
+  onNotice,
   onLoadState,
   loadBuildings,
   loadedMarkCells,
@@ -119,6 +124,8 @@ export function BuildingMap({
   onToggleRef.current = onToggle;
   const onConflictRef = useRef(onConflict);
   onConflictRef.current = onConflict;
+  const onNoticeRef = useRef(onNotice);
+  onNoticeRef.current = onNotice;
   onLoadStateRef.current = onLoadState;
   onCellsChangeRef.current = onCellsChange;
 
@@ -130,6 +137,10 @@ export function BuildingMap({
     const painted = new Map<string, MarkStatus>();
     /** Tipps auf Häuser, deren Markierungen noch laden (siehe lib/pendingTaps.ts). */
     let pendingTaps = new Map<string, PendingTap>();
+    /** Tipps auf hellgraue Platzhalter, deren Haus noch von Overpass kommt (lib/placeholderTaps.ts). */
+    let placeholderTaps: PlaceholderTap[] = [];
+    /** Gebäude-Ebenen der Grundkarte (Platzhalter). */
+    const baseBuildingLayers: string[] = [];
     /** Laufende Abrufe und ihre Kacheln; bis zu MAX_PARALLEL_LOADS gleichzeitig. */
     let inflight = 0;
     const fetching = new Set<string>();
@@ -333,6 +344,7 @@ export function BuildingMap({
         for (const c of batch) loadedCells.add(cellKey(c.x, c.y));
         (map.getSource("buildings") as GeoJSONSource).setData(toCollection(buildings.values()));
         syncMarks();
+        resolvePlaceholders();
         inflight--;
         keys.forEach((k) => fetching.delete(k));
         backoffMs = 0;
@@ -366,10 +378,12 @@ export function BuildingMap({
       for (const layer of map.getStyle().layers ?? []) {
         // Häuser der Grundkarte als hellgraue Platzhalter: sofort zu sehen, während unsere
         // eigenen (antippbaren) Häuser noch von Overpass kommen. Unsere liegen darüber.
-        if ("source-layer" in layer && layer["source-layer"] === "building" && layer.type === "fill") {
+        const isBuilding = ("source-layer" in layer && layer["source-layer"] === "building") || layer.id === "building";
+        if (isBuilding && layer.type === "fill") {
+          baseBuildingLayers.push(layer.id);
           map.setPaintProperty(layer.id, "fill-color", COLOR_PLACEHOLDER);
           map.setPaintProperty(layer.id, "fill-outline-color", COLOR_PLACEHOLDER_LINE);
-        } else if ("source-layer" in layer && layer["source-layer"] === "building") {
+        } else if (isBuilding) {
           map.setLayoutProperty(layer.id, "visibility", "none");
         }
         // Autobahnschilder brauchen wir nicht; sie erzeugen zudem Warnungen in der Konsole.
@@ -447,6 +461,19 @@ export function BuildingMap({
         filter: ["==", ["get", "shape"], false],
         paint: pointPaint,
       });
+      // Tipps auf Platzhalter: gelber Punkt, bis das Haus geladen ist.
+      map.addSource("tap-points", { type: "geojson", data: EMPTY });
+      map.addLayer({
+        id: "tap-points",
+        type: "circle",
+        source: "tap-points",
+        paint: {
+          "circle-color": COLOR_MARKED,
+          "circle-radius": 7,
+          "circle-stroke-color": "#15171c",
+          "circle-stroke-width": 1.5,
+        },
+      });
       setReady(true);
       syncMarks();
       reportCells();
@@ -480,9 +507,47 @@ export function BuildingMap({
       return (pick(point)?.properties?.osmId as string | undefined) ?? null;
     }
 
-    function toggle(tap: { osmId: string; at: maplibregl.LngLat } | null) {
+    function showPlaceholderTaps() {
+      (map.getSource("tap-points") as GeoJSONSource | undefined)?.setData({
+        type: "FeatureCollection",
+        features: placeholderTaps.map((t) => ({ type: "Feature", properties: {}, geometry: { type: "Point", coordinates: t.lngLat } })),
+      });
+    }
+
+    /** Nach jedem geladenen Abruf: gemerkte Tipps auf Platzhalter ihrem Haus zuordnen. */
+    function resolvePlaceholders() {
+      if (placeholderTaps.length === 0) return;
+      const houseAt = (pt: [number, number]) => {
+        for (const f of buildings.values()) if (containsPoint(f, pt)) return f.properties.osmId;
+        return null;
+      };
+      const r = resolvePlaceholderTaps(placeholderTaps, (c) => loadedCells.has(c), houseAt);
+      placeholderTaps = r.rest;
+      showPlaceholderTaps();
+      for (const { tap, osmId } of r.apply) toggle({ osmId, at: new maplibregl.LngLat(...tap.lngLat) }, { quiet: true });
+      if (r.dropped.length) onNoticeRef.current("An dieser Stelle gibt es kein Haus zum Markieren.");
+    }
+
+    /** Liegt an der Stelle ein Haus der Grundkarte (Platzhalter), dessen eigene Form noch fehlt? */
+    function placeholderAt(point: maplibregl.Point): boolean {
+      if (map.getZoom() < BUILDING_MIN_ZOOM - 0.5 || baseBuildingLayers.length === 0) return false;
+      return map.queryRenderedFeatures(point, { layers: baseBuildingLayers }).length > 0;
+    }
+
+    function toggle(tap: { osmId: string | null; at: maplibregl.LngLat } | null, { quiet = false } = {}) {
       if (disposed || !tap) return;
-      const { osmId, at } = tap;
+      const { at } = tap;
+      if (tap.osmId === null) {
+        // Platzhalter: sofort Rückmeldung, ausgeführt wird der Tipp, wenn das Haus da ist.
+        placeholderTaps = [...placeholderTaps, { lngLat: [at.lng, at.lat] }];
+        showPlaceholderTaps();
+        sparkle("done", at, "");
+        navigator.vibrate?.(12);
+        // Ist die Gegend schon geladen (Platzhalter ohne Haus bei Overpass), gleich auflösen.
+        resolvePlaceholders();
+        return;
+      }
+      const osmId = tap.osmId;
       const mark = marksRef.current.get(osmId);
       const center = mark?.center ?? (buildings.has(osmId) ? centerOf(buildings.get(osmId)!) : null);
       if (!center) return;
@@ -501,6 +566,7 @@ export function BuildingMap({
         reportCells();
         settle();
       }
+      if (quiet) return;
       sparkle(next, at, osmId);
       navigator.vibrate?.(next === "done" ? 12 : 6);
     }
@@ -511,7 +577,7 @@ export function BuildingMap({
     // Erkennung ist dafür aus, damit es nur eine Regel gibt. Pointer-Events zählen jeden
     // Druck genau einmal, egal ob Finger oder Maus.
     map.touchZoomRotate._tapDragZoom.disable();
-    type Tap = { osmId: string; at: maplibregl.LngLat } | null;
+    type Tap = { osmId: string | null; at: maplibregl.LngLat } | null;
     let pending: { press: Press; payload: Tap; timer: ReturnType<typeof setTimeout> } | null = null;
     let lastPress: Press | null = null;
     let doubleArmed = false;
@@ -583,7 +649,7 @@ export function BuildingMap({
       // Das Haus jetzt bestimmen, nicht erst nach der Wartezeit: Bis dahin kann die Karte
       // weitergerückt sein (Standortverfolgung, laufender Zoom).
       const osmId = osmIdAt(e.point);
-      const tap: Tap = osmId ? { osmId, at: e.lngLat } : null;
+      const tap: Tap = osmId || placeholderAt(e.point) ? { osmId, at: e.lngLat } : null;
       pending = {
         press,
         payload: tap,

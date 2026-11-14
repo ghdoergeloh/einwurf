@@ -136,6 +136,7 @@ export function CampaignPage({ slug, isNew }: Props) {
           onCellsChange={setCells}
           onToggle={onToggle}
           onConflict={onConflict}
+          onNotice={showToast}
           onLoadState={setLoadState}
           loadBuildings={loadBuildings}
           loadedMarkCells={loadedMarkCells}
