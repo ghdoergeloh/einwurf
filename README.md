@@ -59,13 +59,12 @@ Im [Convex-Dashboard](https://dashboard.convex.dev) unter *Settings → Deploy K
 ### 2a. Frontend auf Vercel (empfohlen, am einfachsten)
 
 1. Repository auf GitHub pushen und in Vercel importieren.
-2. Einstellungen:
-   - Build Command: `npx convex deploy --cmd 'pnpm build'`
-   - Output Directory: `dist`
-   - Umgebungsvariable `CONVEX_DEPLOY_KEY` = der Production Deploy Key
-3. Deploy. Jeder Push auf `main` deployt danach Backend und Frontend zusammen. `convex deploy` setzt `VITE_CONVEX_URL` für den Build selbst.
+2. In Vercel unter *Settings → Environment Variables* `CONVEX_DEPLOY_KEY` = der Production Deploy Key anlegen, Environment **Production**. Das ist eine Variable in Vercel, kein GitHub-Secret.
+3. Deployen. Build-Befehl, Ausgabeordner und die Umleitung für geteilte Links (`/v/…`) stehen in `vercel.json`, in der Vercel-Oberfläche muss dafür nichts eingestellt werden. `convex deploy` deployt dabei das Backend und setzt `VITE_CONVEX_URL` für den Build.
 
-`vercel.json` leitet alle Pfade auf `index.html` um, damit geteilte Links wie `/v/…` funktionieren.
+Fehlt `VITE_CONVEX_URL` beim Build auf Vercel (Key fehlt oder Build lief nicht über `convex deploy`), bricht der Build mit einer Meldung ab, statt eine Seite ohne Backend zu veröffentlichen.
+
+Optional für Preview-Deployments: einen **Preview Deploy Key** unter demselben Namen mit Environment **Preview** anlegen.
 
 ### 2b. Netlify
 

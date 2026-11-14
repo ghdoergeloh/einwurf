@@ -1,2 +1,5 @@
 allowBuilds:
   esbuild: true
+# Für ältere pnpm-Versionen (z. B. auf Vercel):
+onlyBuiltDependencies:
+  - esbuild
