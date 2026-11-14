@@ -12,8 +12,10 @@ export interface BuildingProps {
 
 export type BuildingFeature = Feature<MultiPolygon, BuildingProps>;
 
-/** Größe einer Kachel im Cache in Grad (etwa 550 m × 500 m in Mitteleuropa). */
+/** Größe einer Kachel im Cache in Grad (in Bornheim etwa 550 m Nord-Süd × 350 m Ost-West). */
 export const CELL_SIZE = 0.005;
+/** Ein Abruf umfasst nur nahe beieinanderliegende Kacheln (Abstand je Richtung kleiner als dieser Wert). */
+export const MAX_CELL_SPAN = 8;
 
 export function buildQuery([w, s, e, n]: BBox): string {
   const box = `${s},${w},${n},${e}`;
@@ -144,7 +146,12 @@ export function centerOf(f: BuildingFeature): [number, number] {
 /** Kachel "x:y" → {x, y}; null bei ungültigem Format. */
 export function parseCellKey(key: string): { x: number; y: number } | null {
   const m = /^(-?\d{1,6}):(-?\d{1,6})$/.exec(key);
-  return m ? { x: Number(m[1]), y: Number(m[2]) } : null;
+  if (!m) return null;
+  const x = Number(m[1]);
+  const y = Number(m[2]);
+  // Nur Kacheln auf der Erde (±180° Länge, ±90° Breite).
+  if (x < -180 / CELL_SIZE || x >= 180 / CELL_SIZE || y < -90 / CELL_SIZE || y >= 90 / CELL_SIZE) return null;
+  return { x, y };
 }
 
 /** Kachel, in der ein Punkt [lng, lat] liegt. */

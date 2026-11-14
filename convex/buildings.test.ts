@@ -4,6 +4,7 @@ import { afterEach, describe, expect, test, vi } from "vitest";
 import { api } from "./_generated/api";
 import schema from "./schema";
 import { CELL_SIZE, cellKeyOf, decodeBuildings } from "./osm";
+import { MAX_FETCHES_PER_MINUTE_PER_CAMPAIGN } from "./buildings";
 
 const modules = import.meta.glob("./**/*.ts");
 const SLUG = "AbCdEfGhIjKlMnOpQrStUv";
@@ -113,6 +114,67 @@ describe("buildings.load", () => {
     const tooMany = Array.from({ length: 25 }, (_, i) => `${X + i}:${Y}`);
     await expect(t.action(api.buildings.load, { slug: SLUG, cells: tooMany })).rejects.toThrow();
     expect(fetchMock).not.toHaveBeenCalled();
+  });
+
+  test("keine Abfrage über halbe Kontinente oder außerhalb der Erde", async () => {
+    const t = await setup();
+    const fetchMock = vi.fn(async () => overpassOk());
+    vi.stubGlobal("fetch", fetchMock);
+    await expect(
+      t.action(api.buildings.load, { slug: SLUG, cells: ["-36000:-18000", "35999:17999"] }),
+    ).rejects.toThrow(/zu groß/);
+    await expect(t.action(api.buildings.load, { slug: SLUG, cells: [CELL_A, `${X + 8}:${Y}`] })).rejects.toThrow(/zu groß/);
+    await expect(t.action(api.buildings.load, { slug: SLUG, cells: ["999999:999999"] })).rejects.toThrow(/Ungültige Kachel/);
+    expect(fetchMock).not.toHaveBeenCalled();
+    // Nah beieinander ist erlaubt
+    await t.action(api.buildings.load, { slug: SLUG, cells: [CELL_A, `${X + 7}:${Y + 7}`] });
+    expect(fetchMock).toHaveBeenCalledTimes(1);
+  });
+
+  test("Overpass-Abrufe sind pro Minute begrenzt, Cache-Treffer nicht", async () => {
+    vi.useFakeTimers({ toFake: ["Date"] });
+    try {
+      const t = await setup();
+      vi.stubGlobal("fetch", vi.fn(async () => new Response(JSON.stringify({ elements: [] }))));
+      for (let i = 0; i < MAX_FETCHES_PER_MINUTE_PER_CAMPAIGN; i++) {
+        await t.action(api.buildings.load, { slug: SLUG, cells: [`${X}:${Y + i * 10}`] });
+      }
+      await expect(t.action(api.buildings.load, { slug: SLUG, cells: [`${X}:${Y - 10}`] })).rejects.toThrow(/sehr viele Häuser/);
+      // Bereits gecacht: geht weiter
+      await expect(t.action(api.buildings.load, { slug: SLUG, cells: [`${X}:${Y}`] })).resolves.toEqual(["[]"]);
+      vi.setSystemTime(Date.now() + 61_000);
+      await expect(t.action(api.buildings.load, { slug: SLUG, cells: [`${X}:${Y - 10}`] })).resolves.toEqual(["[]"]);
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
+  test("viele Helfer gleichzeitig in derselben neuen Kachel: nur ein Overpass-Abruf", async () => {
+    const t = await setup();
+    let release!: () => void;
+    const gate = new Promise<void>((r) => (release = r));
+    const fetchMock = vi.fn(async () => {
+      await gate;
+      return overpassOk();
+    });
+    vi.stubGlobal("fetch", fetchMock);
+    const first = t.action(api.buildings.load, { slug: SLUG, cells: [CELL_A] });
+    await vi.waitFor(() => expect(fetchMock).toHaveBeenCalledTimes(1));
+    const second = t.action(api.buildings.load, { slug: SLUG, cells: [CELL_A] });
+    await new Promise((r) => setTimeout(r, 50));
+    release();
+    const [a, b] = await Promise.all([first, second]);
+    expect(ids(a)).toEqual(["way/1"]);
+    expect(ids(b)).toEqual(["way/1"]);
+    expect(fetchMock).toHaveBeenCalledTimes(1);
+  });
+
+  test("nach einem Fehler ist die Kachel wieder frei", async () => {
+    const t = await setup();
+    vi.stubGlobal("fetch", vi.fn(async () => new Response("busy", { status: 504 })));
+    await expect(t.action(api.buildings.load, { slug: SLUG, cells: [CELL_A] })).rejects.toThrow(/nicht erreichbar/);
+    vi.stubGlobal("fetch", vi.fn(async () => overpassOk()));
+    expect(ids(await t.action(api.buildings.load, { slug: SLUG, cells: [CELL_A] }))).toEqual(["way/1"]);
   });
 
   test("Kachel eines Punkts", () => {

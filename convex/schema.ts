@@ -35,4 +35,12 @@ export default defineSchema({
     /** Häuser, deren Mittelpunkt in der Kachel liegt; Format siehe encodeBuildings. */
     data: v.string(),
   }).index("by_cell", ["cell"]),
+
+  /** Kachel wird gerade von einem Aufruf geladen; andere warten auf den Cache. */
+  cellLocks: defineTable({ cell: v.string(), until: v.number() }).index("by_cell", ["cell"]),
+
+  /** Protokoll der Overpass-Abrufe für die Begrenzung pro Minute. */
+  overpassFetches: defineTable({ slug: v.string(), at: v.number() })
+    .index("by_at", ["at"])
+    .index("by_slug_at", ["slug", "at"]),
 });

@@ -6,6 +6,7 @@ import type { CircleLayerSpecification, ExpressionSpecification, GeoJSONSource, 
 import type { FeatureCollection, Point } from "geojson";
 import {
   CELL_SIZE,
+  MAX_CELL_SPAN,
   cellKey,
   cellsFor,
   centerOf,
@@ -215,7 +216,11 @@ export function BuildingMap({
       const dist = (c: { x: number; y: number }) =>
         Math.hypot((c.x + 0.5) * CELL_SIZE - cx, (c.y + 0.5) * CELL_SIZE - cy);
       missing.sort((a, b2) => dist(a) - dist(b2));
-      const batch = missing.slice(0, MAX_CELLS_PER_REQUEST);
+      // Ein Abruf: die nächsten Kacheln um die erste herum (Grenzen wie in convex/buildings.ts).
+      const first = missing[0];
+      const batch = missing
+        .filter((c) => Math.abs(c.x - first.x) < MAX_CELL_SPAN / 2 && Math.abs(c.y - first.y) < MAX_CELL_SPAN / 2)
+        .slice(0, MAX_CELLS_PER_REQUEST);
       inflight = true;
       updateLoadState();
       try {

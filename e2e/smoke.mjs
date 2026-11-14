@@ -10,7 +10,8 @@ import http from "node:http";
 
 const BASE = process.argv[2] ?? "http://localhost:5173";
 const SHOTS = process.argv[3];
-const CENTER = { lat: 50.76, lng: 6.99 };
+// Jeder Lauf in einem eigenen Gebiet, damit der gemeinsame Gebäude-Cache den Overpass-Weg nicht überdeckt.
+const CENTER = { lat: 50.76, lng: Math.round((6 + (Date.now() % 997) * 0.01) * 1000) / 1000 };
 
 function fakeBuildings(body) {
   const q = new URLSearchParams(body).get("data");
@@ -45,7 +46,7 @@ async function mockOsm(ctx, { styleFails = false } = {}) {
   await ctx.route("https://nominatim.openstreetmap.org/**", (r) =>
     r.fulfill({
       json: [
-        { display_name: "Roisdorf, Bornheim, Rhein-Sieg-Kreis, Nordrhein-Westfalen, Deutschland", name: "Roisdorf", lat: "50.76", lon: "6.99", boundingbox: ["50.758", "50.762", "6.987", "6.993"] },
+        { display_name: "Roisdorf, Bornheim, Rhein-Sieg-Kreis, Nordrhein-Westfalen, Deutschland", name: "Roisdorf", lat: String(CENTER.lat), lon: String(CENTER.lng), boundingbox: [String(CENTER.lat - 0.002), String(CENTER.lat + 0.002), String(CENTER.lng - 0.003), String(CENTER.lng + 0.003)] },
         { display_name: "Bornheim, Rhein-Sieg-Kreis, Nordrhein-Westfalen, Deutschland", name: "Bornheim", lat: "50.75", lon: "6.98", boundingbox: ["50.7", "50.8", "6.9", "7.1"] },
       ],
     }),
@@ -54,7 +55,7 @@ async function mockOsm(ctx, { styleFails = false } = {}) {
     styleFails ? r.fulfill({ status: 500, body: "kaputt" }) : r.fulfill({ json: { version: 8, sources: {}, layers: [{ id: "bg", type: "background", paint: { "background-color": "#ebe8e1" } }] } }),
   );
   // Der Browser darf Overpass nie direkt fragen (CORS, Last) – das macht Convex.
-  const isOverpass = (url) => /overpass|maps\.mail\.ru/.test(url.hostname + url.pathname) && url.hostname !== "localhost";
+  const isOverpass = (url) => /(^|\.)(overpass-api\.de|overpass\.private\.coffee|maps\.mail\.ru)$/.test(url.hostname);
   await ctx.route(isOverpass, (r) => {
     browserCalledOverpass = true;
     return r.abort();

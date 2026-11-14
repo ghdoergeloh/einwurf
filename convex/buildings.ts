@@ -2,6 +2,7 @@ import { action, internalMutation, internalQuery } from "./_generated/server";
 import { internal } from "./_generated/api";
 import { ConvexError, v } from "convex/values";
 import {
+  MAX_CELL_SPAN,
   buildQuery,
   cellKeyOf,
   cellsBBox,
@@ -33,6 +34,13 @@ const DEFAULT_ENDPOINTS = [
   "https://maps.mail.ru/osm/tools/overpass/api/interpreter",
 ];
 const USER_AGENT = "Einwurf/1.0 (gemeinsame Flyer-Verteilkarte)";
+/** Höchstens so viele Overpass-Abrufe pro Minute: je Aktion und insgesamt. */
+export const MAX_FETCHES_PER_MINUTE_PER_CAMPAIGN = 12;
+export const MAX_FETCHES_PER_MINUTE_TOTAL = 40;
+/** So lange gilt eine Kachel als „wird geladen“; andere Aufrufe warten so lange auf den Cache. */
+const LOCK_MS = 45_000;
+const WAIT_POLL_MS = 1_000;
+const WAIT_MAX_MS = 40_000;
 
 export const campaignExists = internalQuery({
   args: { slug: v.string() },
@@ -60,6 +68,59 @@ export const store = internalMutation({
       const row = await ctx.db.query("buildingCells").withIndex("by_cell", (q) => q.eq("cell", cell)).unique();
       if (row) await ctx.db.patch(row._id, { data, fetchedAt: now });
       else await ctx.db.insert("buildingCells", { cell, data, fetchedAt: now });
+    }
+  },
+});
+
+/**
+ * Teilt die fehlenden Kacheln auf: Die noch nicht gesperrten lädt dieser Aufruf selbst
+ * (und sperrt sie), auf die gesperrten wartet er. Prüft dabei die Begrenzung pro Minute.
+ * Läuft als Mutation und damit serialisiert – zwei Aufrufe bekommen nie dieselbe Kachel.
+ */
+export const reserve = internalMutation({
+  args: { slug: v.string(), cells: v.array(v.string()) },
+  handler: async (ctx, { slug, cells }) => {
+    const now = Date.now();
+    const toFetch: string[] = [];
+    const waitFor: string[] = [];
+    for (const cell of cells) {
+      const lock = await ctx.db.query("cellLocks").withIndex("by_cell", (q) => q.eq("cell", cell)).unique();
+      if (lock && lock.until > now) waitFor.push(cell);
+      else toFetch.push(cell);
+    }
+    if (toFetch.length === 0) return { toFetch, waitFor };
+
+    const minuteAgo = now - 60_000;
+    const total = await ctx.db.query("overpassFetches").withIndex("by_at", (q) => q.gt("at", minuteAgo)).take(MAX_FETCHES_PER_MINUTE_TOTAL);
+    const mine = await ctx.db
+      .query("overpassFetches")
+      .withIndex("by_slug_at", (q) => q.eq("slug", slug).gt("at", minuteAgo))
+      .take(MAX_FETCHES_PER_MINUTE_PER_CAMPAIGN);
+    if (total.length >= MAX_FETCHES_PER_MINUTE_TOTAL || mine.length >= MAX_FETCHES_PER_MINUTE_PER_CAMPAIGN) {
+      throw new ConvexError("Gerade werden sehr viele Häuser geladen. Bitte gleich noch einmal versuchen.");
+    }
+    await ctx.db.insert("overpassFetches", { slug, at: now });
+    // Altes Protokoll nebenbei aufräumen.
+    for (const old of await ctx.db.query("overpassFetches").withIndex("by_at", (q) => q.lt("at", now - 3_600_000)).take(50)) {
+      await ctx.db.delete(old._id);
+    }
+
+    for (const cell of toFetch) {
+      const lock = await ctx.db.query("cellLocks").withIndex("by_cell", (q) => q.eq("cell", cell)).unique();
+      if (lock) await ctx.db.patch(lock._id, { until: now + LOCK_MS });
+      else await ctx.db.insert("cellLocks", { cell, until: now + LOCK_MS });
+    }
+    return { toFetch, waitFor };
+  },
+});
+
+/** Gibt Sperren frei (nach dem Speichern oder nach einem Fehler). */
+export const release = internalMutation({
+  args: { cells: v.array(v.string()) },
+  handler: async (ctx, { cells }) => {
+    for (const cell of cells) {
+      const lock = await ctx.db.query("cellLocks").withIndex("by_cell", (q) => q.eq("cell", cell)).unique();
+      if (lock) await ctx.db.delete(lock._id);
     }
   },
 });
@@ -113,38 +174,66 @@ export const load = action({
     if (cells.length > MAX_CELLS_PER_LOAD) throw new ConvexError("Zu viele Kacheln auf einmal");
     const parsed = cells.map(parseCellKey);
     if (parsed.some((c) => c === null)) throw new ConvexError("Ungültige Kachel");
+    // Nur ein zusammenhängendes Stück Karte, keine Abfrage über halbe Kontinente.
+    const xs = parsed.map((c) => c!.x);
+    const ys = parsed.map((c) => c!.y);
+    if (Math.max(...xs) - Math.min(...xs) >= MAX_CELL_SPAN || Math.max(...ys) - Math.min(...ys) >= MAX_CELL_SPAN) {
+      throw new ConvexError("Ausschnitt zu groß");
+    }
     // Kein offener Proxy für Overpass: nur für bestehende Aktionen.
     if (!SLUG_PATTERN.test(slug) || !(await ctx.runQuery(internal.buildings.campaignExists, { slug }))) {
       throw new ConvexError("Verteilaktion nicht gefunden");
     }
 
-    const now = Date.now();
     const have = new Map<string, string>();
-    for (const hit of await ctx.runQuery(internal.buildings.cached, { cells })) {
-      if (now - hit.fetchedAt < CACHE_TTL_MS) have.set(hit.cell, hit.data);
-    }
-    const missing = cells.filter((c) => !have.has(c));
-
-    if (missing.length > 0) {
-      const features = await fetchOverpass(cellsBBox(missing.map((c) => parseCellKey(c)!)));
-      // Jedes Haus gehört genau zu der Kachel seines Mittelpunkts.
-      const byCell = new Map<string, BuildingFeature[]>(missing.map((c) => [c, []]));
-      for (const f of features) byCell.get(cellKeyOf(centerOf(f)))?.push(f);
-      const entries = [...byCell].map(([cell, fs]) => ({ cell, data: encodeBuildings(fs) }));
-      for (const e of entries) have.set(e.cell, e.data);
-      // In Häppchen speichern, damit kein Aufruf zu groß wird; übergroße Kacheln nicht cachen.
-      let batch: typeof entries = [];
-      let size = 0;
-      for (const e of entries.filter((e) => e.data.length < MAX_CACHE_BYTES)) {
-        if (size + e.data.length > 4_000_000 && batch.length) {
-          await ctx.runMutation(internal.buildings.store, { entries: batch });
-          batch = [];
-          size = 0;
-        }
-        batch.push(e);
-        size += e.data.length;
+    const readCache = async (wanted: string[]) => {
+      const now = Date.now();
+      for (const hit of await ctx.runQuery(internal.buildings.cached, { cells: wanted })) {
+        if (now - hit.fetchedAt < CACHE_TTL_MS) have.set(hit.cell, hit.data);
       }
-      if (batch.length) await ctx.runMutation(internal.buildings.store, { entries: batch });
+    };
+    await readCache(cells);
+    const missing = cells.filter((c) => !have.has(c));
+    if (missing.length === 0) return cells.map((c) => have.get(c)!);
+
+    const { toFetch, waitFor } = await ctx.runMutation(internal.buildings.reserve, { slug, cells: missing });
+
+    if (toFetch.length > 0) {
+      try {
+        const features = await fetchOverpass(cellsBBox(toFetch.map((c) => parseCellKey(c)!)));
+        // Jedes Haus gehört genau zu der Kachel seines Mittelpunkts.
+        const byCell = new Map<string, BuildingFeature[]>(toFetch.map((c) => [c, []]));
+        for (const f of features) byCell.get(cellKeyOf(centerOf(f)))?.push(f);
+        const entries = [...byCell].map(([cell, fs]) => ({ cell, data: encodeBuildings(fs) }));
+        for (const e of entries) have.set(e.cell, e.data);
+        // In Häppchen speichern, damit kein Aufruf zu groß wird; übergroße Kacheln nicht cachen.
+        let batch: typeof entries = [];
+        let size = 0;
+        for (const e of entries.filter((e) => e.data.length < MAX_CACHE_BYTES)) {
+          if (size + e.data.length > 4_000_000 && batch.length) {
+            await ctx.runMutation(internal.buildings.store, { entries: batch });
+            batch = [];
+            size = 0;
+          }
+          batch.push(e);
+          size += e.data.length;
+        }
+        if (batch.length) await ctx.runMutation(internal.buildings.store, { entries: batch });
+      } finally {
+        await ctx.runMutation(internal.buildings.release, { cells: toFetch });
+      }
+    }
+
+    // Kacheln, die gerade ein anderer Helfer lädt: auf seinen Cache-Eintrag warten.
+    const started = Date.now();
+    let pendingCells = waitFor;
+    while (pendingCells.length > 0 && Date.now() - started < WAIT_MAX_MS) {
+      await new Promise((r) => setTimeout(r, WAIT_POLL_MS));
+      await readCache(pendingCells);
+      pendingCells = pendingCells.filter((c) => !have.has(c));
+    }
+    if (pendingCells.length > 0) {
+      throw new ConvexError("Die Häuser werden gerade geladen. Bitte gleich noch einmal versuchen.");
     }
 
     return cells.map((c) => have.get(c) ?? "[]");
