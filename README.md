@@ -6,6 +6,7 @@ Eine Karte für Verteilaktionen: Alle Häuser sind dunkelgrau. Wer einen Flyer e
 - **Frontend:** React, Tailwind v4, MapLibre, Vite.
 - **Backend:** [Convex](https://convex.dev), live per Subscription.
 - **Kartendaten:** © OpenStreetMap-Mitwirkende. Grundkarte von [OpenFreeMap](https://openfreemap.org), Gebäude über die [Overpass API](https://overpass-api.de), Ortssuche über [Nominatim](https://nominatim.org). Alle ohne API-Schlüssel.
+- **Gebäude über Convex:** Der Browser fragt Overpass nicht selbst. Die Convex-Action `buildings.load` holt die Häuser je Kachel (etwa 550 × 350 m), speichert sie 30 Tage für alle Helfer und weicht bei Überlastung auf andere öffentliche Overpass-Server aus. Nur der erste Helfer in einem Gebiet wartet auf Overpass.
 
 ## Bedienung der Karte
 
@@ -19,7 +20,7 @@ Eine Karte für Verteilaktionen: Alle Häuser sind dunkelgrau. Wer einen Flyer e
 
 Ein Tipp wartet kurz, ob ein zweiter folgt. Nur so lassen sich Doppeltipp-Zoom und Markieren unterscheiden. Ein Doppeltipp sind zwei Tipps innerhalb von 300 ms und 30 px. Zieht der Finger nach dem zweiten Tipp, zoomt die Karte stufenlos: 150 px nach unten sind eine Stufe hinein. Die Regel steht in `src/lib/taps.ts`. Tippt man schnell ein *anderes* Haus an, wird das erste sofort übernommen.
 
-Häuser werden erst ab Zoomstufe 15 geladen, kachelweise und mit etwas Vorrat über den Rand hinaus. Nach einem Fehler wartet die Karte zunehmend länger (5 s bis 60 s), bevor sie Overpass erneut fragt.
+Häuser werden erst ab Zoomstufe 15 geladen, kachelweise und mit etwas Vorrat über den Rand hinaus. Nach einem Fehler wartet die Karte zunehmend länger (5 s bis 60 s), bevor sie es erneut versucht.
 
 Convex speichert je markiertem Haus nur die OSM-ID und den Mittelpunkt, einsortiert in Zellen von 0,01° (`convex/cells.ts`). Jedes Handy abonniert nur die sichtbaren Zellen. Ein Tipp schickt deshalb nur die Zelle mit dem Haus an die Helfer, die sie gerade sehen, nicht die ganze Aktion. Gelb eingefärbt wird der Umriss, den das Handy ohnehin von Overpass hat. Rausgezoomt, oder solange der Umriss fehlt, zeigt die Karte gelbe Punkte. Ab einem Ausschnitt von mehr als 100 Zellen (etwa ab Zoomstufe 12) zeigt sie keine Markierungen mehr. Ohne Netz zeigt die Karte „Offline“, Convex holt das Speichern nach.
 
@@ -40,7 +41,9 @@ pnpm typecheck
 pnpm test               # Convex-Funktionen (convex-test) und Bibliotheken
 pnpm build
 pnpm e2e                # Browser-Test; braucht laufendes `pnpm dev` + `npx convex dev`
-                        # OSM-Dienste werden darin nachgebildet, Convex ist echt
+                        # OSM-Dienste werden darin nachgebildet, Convex ist echt.
+                        # Einmalig für den Test: npx convex env set OVERPASS_URLS http://127.0.0.1:8787/api/interpreter
+                        # (danach wieder entfernen: npx convex env remove OVERPASS_URLS)
 ```
 
 ## Deployen
@@ -93,5 +96,6 @@ Auch Convex lässt sich selbst betreiben (Docker-Image `ghcr.io/get-convex/conve
 
 ## Grenzen
 
-- Overpass, Nominatim und OpenFreeMap sind kostenlose öffentliche Dienste mit fairen Nutzungsregeln. Für eine Gemeinde-Aktion reicht das. Bei vielen gleichzeitigen Nutzern kann Overpass kurz drosseln; dann zeigt die Karte „Erneut“.
+- Overpass, Nominatim und OpenFreeMap sind kostenlose öffentliche Dienste mit fairen Nutzungsregeln. Dank Cache fragt die App Overpass je Gebiet nur einmal. Sind alle Overpass-Server überlastet, zeigt die Karte „Erneut“.
+- Optional: Convex-Umgebungsvariable `OVERPASS_URLS` (kommagetrennt) legt eigene Overpass-Server fest.
 - Wer einen Link kennt, kann alles in dieser Aktion ändern (so gewollt). Neue Aktionen kann jeder anlegen. Eine Aktion hat höchstens 20.000 Markierungen. Neue Aktionen sind auf 20 pro Minute begrenzt, über alle Nutzer.

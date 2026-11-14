@@ -7,10 +7,8 @@ import type { FeatureCollection, Point } from "geojson";
 import {
   CELL_SIZE,
   cellKey,
-  cellsBBox,
   cellsFor,
   centerOf,
-  fetchBuildings,
   toCollection,
   type BBox,
   type BuildingFeature,
@@ -61,12 +59,23 @@ interface Props {
   onCellsChange: (cells: string[] | null) => void;
   onToggle: (osmId: string, marked: boolean, center: number[]) => void;
   onLoadState: (s: LoadState) => void;
+  /** Lädt die Häuser der Kacheln ("x:y"), über Convex mit gemeinsamem Cache. */
+  loadBuildings: (cells: string[]) => Promise<BuildingFeature[]>;
   controlsRef?: React.MutableRefObject<MapControls | null>;
 }
 
 const EMPTY: FeatureCollection = { type: "FeatureCollection", features: [] };
 
-export function BuildingMap({ center, bbox, marks, onCellsChange, onToggle, onLoadState, controlsRef }: Props) {
+export function BuildingMap({
+  center,
+  bbox,
+  marks,
+  onCellsChange,
+  onToggle,
+  onLoadState,
+  loadBuildings,
+  controlsRef,
+}: Props) {
   const container = useRef<HTMLDivElement>(null);
   const mapRef = useRef<maplibregl.Map | null>(null);
   const syncMarksRef = useRef<(() => void) | null>(null);
@@ -76,6 +85,8 @@ export function BuildingMap({ center, bbox, marks, onCellsChange, onToggle, onLo
   const onToggleRef = useRef(onToggle);
   const onLoadStateRef = useRef(onLoadState);
   const onCellsChangeRef = useRef(onCellsChange);
+  const loadBuildingsRef = useRef(loadBuildings);
+  loadBuildingsRef.current = loadBuildings;
   onToggleRef.current = onToggle;
   onLoadStateRef.current = onLoadState;
   onCellsChangeRef.current = onCellsChange;
@@ -86,7 +97,7 @@ export function BuildingMap({ center, bbox, marks, onCellsChange, onToggle, onLo
     const loadedCells = new Set<string>();
     /** osmIds, die gerade als markiert eingefärbt sind (feature-state). */
     const painted = new Set<string>();
-    let inflight: AbortController | null = null;
+    let inflight = false;
     let disposed = false;
     let loaded = false;
     let backoffMs = 0;
@@ -205,17 +216,16 @@ export function BuildingMap({ center, bbox, marks, onCellsChange, onToggle, onLo
         Math.hypot((c.x + 0.5) * CELL_SIZE - cx, (c.y + 0.5) * CELL_SIZE - cy);
       missing.sort((a, b2) => dist(a) - dist(b2));
       const batch = missing.slice(0, MAX_CELLS_PER_REQUEST);
-      const ctrl = new AbortController();
-      inflight = ctrl;
+      inflight = true;
       updateLoadState();
       try {
-        const features = await fetchBuildings(cellsBBox(batch), ctrl.signal);
+        const features = await loadBuildingsRef.current(batch.map((c) => cellKey(c.x, c.y)));
         if (disposed) return;
         for (const f of features) buildings.set(f.properties.osmId, f);
         for (const c of batch) loadedCells.add(cellKey(c.x, c.y));
         (map.getSource("buildings") as GeoJSONSource).setData(toCollection(buildings.values()));
         syncMarks();
-        inflight = null;
+        inflight = false;
         backoffMs = 0;
         blockedUntil = 0;
         updateLoadState();
@@ -223,7 +233,7 @@ export function BuildingMap({ center, bbox, marks, onCellsChange, onToggle, onLo
         void loadVisible();
       } catch {
         if (disposed) return;
-        inflight = null;
+        inflight = false;
         backoffMs = Math.min(BACKOFF_MAX_MS, backoffMs ? backoffMs * 2 : BACKOFF_START_MS);
         blockedUntil = Date.now() + backoffMs;
         updateLoadState();
@@ -245,6 +255,8 @@ export function BuildingMap({ center, bbox, marks, onCellsChange, onToggle, onLo
         if ("source-layer" in layer && layer["source-layer"] === "building") {
           map.setLayoutProperty(layer.id, "visibility", "none");
         }
+        // Autobahnschilder brauchen wir nicht; sie erzeugen zudem Warnungen in der Konsole.
+        if (layer.id.includes("shield")) map.removeLayer(layer.id);
       }
       map.addSource("buildings", { type: "geojson", data: EMPTY, promoteId: "osmId" });
       map.addSource("mark-points", { type: "geojson", data: EMPTY });
@@ -438,7 +450,6 @@ export function BuildingMap({ center, bbox, marks, onCellsChange, onToggle, onLo
       window.removeEventListener("pointermove", onPointerMove);
       window.removeEventListener("pointerup", endDragZoom);
       window.removeEventListener("pointercancel", endDragZoom);
-      inflight?.abort();
       if (controlsRef) controlsRef.current = null;
       syncMarksRef.current = null;
       map.remove();

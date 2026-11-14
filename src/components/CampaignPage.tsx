@@ -1,8 +1,9 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
-import { useConvexConnectionState, useMutation, useQueries, useQuery } from "convex/react";
+import { useAction, useConvexConnectionState, useMutation, useQueries, useQuery } from "convex/react";
 import { ConvexError } from "convex/values";
 import { api } from "../../convex/_generated/api";
 import { markCellOf } from "../../convex/cells";
+import { decodeBuildings } from "../../convex/osm";
 import { BuildingMap, type LoadState, type MapControls, type Mark } from "./BuildingMap";
 import { ShareSheet } from "./ShareSheet";
 import { LogoMark } from "./Logo";
@@ -78,6 +79,12 @@ export function CampaignPage({ slug, isNew }: Props) {
     if (campaign) document.title = `${campaign.name} · Einwurf`;
   }, [campaign]);
 
+  const loadAction = useAction(api.buildings.load);
+  const loadBuildings = useCallback(
+    async (cells: string[]) => (await loadAction({ slug, cells })).flatMap(decodeBuildings),
+    [loadAction, slug],
+  );
+
   const showToast = useCallback((text: string) => {
     if (toastTimer.current) clearTimeout(toastTimer.current);
     setToast(text);
@@ -112,6 +119,7 @@ export function CampaignPage({ slug, isNew }: Props) {
           onCellsChange={setCells}
           onToggle={onToggle}
           onLoadState={setLoadState}
+          loadBuildings={loadBuildings}
           controlsRef={controls}
         />
       )}

@@ -8,9 +8,11 @@
  * @module
  */
 
+import type * as buildings from "../buildings.js";
 import type * as campaigns from "../campaigns.js";
 import type * as cells from "../cells.js";
 import type * as marks from "../marks.js";
+import type * as osm from "../osm.js";
 import type * as validation from "../validation.js";
 
 import type {
@@ -20,9 +22,11 @@ import type {
 } from "convex/server";
 
 declare const fullApi: ApiFromModules<{
+  buildings: typeof buildings;
   campaigns: typeof campaigns;
   cells: typeof cells;
   marks: typeof marks;
+  osm: typeof osm;
   validation: typeof validation;
 }>;
 

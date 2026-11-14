@@ -1,8 +1,12 @@
-// Browser-Test der ganzen App gegen ein laufendes `pnpm dev` + `npx convex dev`.
-// OSM-Dienste (Ortssuche, Grundkarte, Overpass) werden nachgebildet, Convex ist echt.
+// Browser-Test der ganzen App gegen ein laufendes `pnpm dev` + `npx convex dev` (lokal).
+// OSM-Dienste werden nachgebildet, Convex ist echt:
+//  - Ortssuche und Grundkarte im Browser (Playwright-Routen),
+//  - Overpass als kleiner HTTP-Server auf Port 8787, den die Convex-Action fragt.
+//    Einmalig: npx convex env set OVERPASS_URLS http://127.0.0.1:8787/api/interpreter
 // Aufruf: node e2e/smoke.mjs [basis-url] [ordner-für-screenshots]
 import { chromium } from "playwright";
 import assert from "node:assert/strict";
+import http from "node:http";
 
 const BASE = process.argv[2] ?? "http://localhost:5173";
 const SHOTS = process.argv[3];
@@ -24,6 +28,19 @@ function fakeBuildings(body) {
   return { elements };
 }
 
+let overpassCalls = 0;
+const overpass = http.createServer((req, res) => {
+  let body = "";
+  req.on("data", (c) => (body += c));
+  req.on("end", () => {
+    overpassCalls++;
+    res.setHeader("Content-Type", "application/json");
+    res.end(JSON.stringify(fakeBuildings(body)));
+  });
+});
+await new Promise((r) => overpass.listen(8787, "127.0.0.1", r));
+
+let browserCalledOverpass = false;
 async function mockOsm(ctx, { styleFails = false } = {}) {
   await ctx.route("https://nominatim.openstreetmap.org/**", (r) =>
     r.fulfill({
@@ -36,7 +53,12 @@ async function mockOsm(ctx, { styleFails = false } = {}) {
   await ctx.route("https://tiles.openfreemap.org/**", (r) =>
     styleFails ? r.fulfill({ status: 500, body: "kaputt" }) : r.fulfill({ json: { version: 8, sources: {}, layers: [{ id: "bg", type: "background", paint: { "background-color": "#ebe8e1" } }] } }),
   );
-  await ctx.route("https://overpass-api.de/**", (r) => r.fulfill({ json: fakeBuildings(r.request().postData()) }));
+  // Der Browser darf Overpass nie direkt fragen (CORS, Last) – das macht Convex.
+  const isOverpass = (url) => /overpass|maps\.mail\.ru/.test(url.hostname + url.pathname) && url.hostname !== "localhost";
+  await ctx.route(isOverpass, (r) => {
+    browserCalledOverpass = true;
+    return r.abort();
+  });
 }
 
 const shot = (page, name) => SHOTS && page.screenshot({ path: `${SHOTS}/${name}.png` });
@@ -207,7 +229,10 @@ try {
   await shot(d, "7-map-desktop");
 
   assert.deepEqual(errors, [], "keine Fehler in der Konsole");
+  assert.equal(browserCalledOverpass, false, "Browser fragt Overpass nicht direkt");
+  assert.ok(overpassCalls > 0, "Convex hat Overpass gefragt");
   console.log("OK");
 } finally {
+  overpass.close();
   await browser.close();
 }

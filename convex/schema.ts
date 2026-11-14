@@ -26,4 +26,13 @@ export default defineSchema({
   })
     .index("by_campaign_osm", ["campaignId", "osmId"])
     .index("by_campaign_cell", ["campaignId", "cell"]),
+
+  /** Gemeinsamer Cache der OSM-Gebäude je Kachel (convex/osm.ts), für alle Aktionen. */
+  buildingCells: defineTable({
+    /** Kachel "x:y" in Schritten von CELL_SIZE. */
+    cell: v.string(),
+    fetchedAt: v.number(),
+    /** Häuser, deren Mittelpunkt in der Kachel liegt; Format siehe encodeBuildings. */
+    data: v.string(),
+  }).index("by_cell", ["cell"]),
 });
