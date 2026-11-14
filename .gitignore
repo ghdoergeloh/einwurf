@@ -8,3 +8,6 @@ coverage
 .pnpm-store
 .convex-tmp
 *.tsbuildinfo
+
+# Mess- und Debug-Skripte von Hand
+/.*.mjs

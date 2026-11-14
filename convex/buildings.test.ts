@@ -465,6 +465,29 @@ describe("buildings.load", () => {
     }
   });
 
+  test("Auffrischen startet erst nach Ablauf der Frist: endet sofort, fragt Overpass nicht", async () => {
+    vi.useFakeTimers({ toFake: ["setTimeout", "clearTimeout", "Date"] });
+    try {
+      const t = await setup();
+      const fetchMock = vi.fn(async () => overpassOk());
+      vi.stubGlobal("fetch", fetchMock);
+      const r = await t.mutation(internal.buildings.reserve, { slug: `${SLUG}:vorladen`, cells: [CELL_A], kind: "prefetch" });
+      vi.setSystemTime(r.until + 1_000);
+      let settled = false;
+      const pending = t
+        .action(internal.buildings.refresh, { slug: SLUG, cells: r.toFetch, lockIds: r.lockIds, lockedUntil: r.until })
+        .finally(() => (settled = true));
+      await vi.advanceTimersByTimeAsync(1_000);
+      await pending;
+      expect(settled).toBe(true);
+      expect(fetchMock).not.toHaveBeenCalled();
+      // Sperre freigegeben
+      expect(await t.run((ctx) => ctx.db.query("cellLocks").collect())).toHaveLength(0);
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
   test("mehrere Helfer öffnen ein veraltetes Gebiet: nur ein Auffrischen", async () => {
     const t = await setup();
     await t.run((ctx) => ctx.db.insert("buildingCells", { cell: CELL_A, fetchedAt: Date.now(), data: '[["way/77",[]]]' }));

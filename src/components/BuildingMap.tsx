@@ -341,10 +341,13 @@ export function BuildingMap({
         if (disposed) return;
         inflight--;
         keys.forEach((k) => fetching.delete(k));
-        backoffMs = Math.min(BACKOFF_MAX_MS, backoffMs ? backoffMs * 2 : BACKOFF_START_MS);
-        blockedUntil = Date.now() + backoffMs;
+        // Zwei parallele Abrufe, die an derselben Störung scheitern, zählen als ein Fehler.
+        if (Date.now() >= blockedUntil) {
+          backoffMs = Math.min(BACKOFF_MAX_MS, backoffMs ? backoffMs * 2 : BACKOFF_START_MS);
+          blockedUntil = Date.now() + backoffMs;
+        }
         updateLoadState();
-        setTimeout(() => void loadVisible(), backoffMs + 50);
+        setTimeout(() => void loadVisible(), Math.max(0, blockedUntil - Date.now()) + 50);
       }
     }
 

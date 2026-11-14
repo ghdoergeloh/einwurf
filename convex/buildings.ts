@@ -267,7 +267,11 @@ function fetchOverpass(
       );
       return true;
     };
-    launch();
+    if (!launch()) {
+      // Frist schon vorbei (z. B. Auffrischen kam spät dran): gar nicht erst fragen.
+      finish();
+      reject(new ConvexError("Die Gebäudedaten (OpenStreetMap) sind gerade nicht erreichbar. Bitte gleich noch einmal versuchen."));
+    }
   });
 }
 
