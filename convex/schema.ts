@@ -34,7 +34,9 @@ export default defineSchema({
     fetchedAt: v.number(),
     /** Häuser, deren Mittelpunkt in der Kachel liegt; Format siehe encodeBuildings. */
     data: v.string(),
-  }).index("by_cell", ["cell"]),
+  })
+    .index("by_cell", ["cell"])
+    .index("by_fetchedAt", ["fetchedAt"]),
 
   /** Kachel wird gerade von einem Aufruf geladen; andere warten auf den Cache. */
   cellLocks: defineTable({ cell: v.string(), until: v.number() }).index("by_cell", ["cell"]),

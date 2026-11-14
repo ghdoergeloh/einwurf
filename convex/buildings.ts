@@ -26,7 +26,7 @@ export const MAX_CELLS_PER_LOAD = 24;
 const CACHE_TTL_MS = 30 * 24 * 60 * 60 * 1000;
 /** Convex-Dokumente dürfen höchstens 1 MiB groß sein. */
 const MAX_CACHE_BYTES = 900_000;
-const OVERPASS_TIMEOUT_MS = 30_000;
+const OVERPASS_TIMEOUT_MS = 25_000;
 /** Öffentliche Overpass-Server, der Reihe nach. Überschreibbar mit der Convex-Umgebungsvariable OVERPASS_URLS. */
 const DEFAULT_ENDPOINTS = [
   "https://overpass-api.de/api/interpreter",
@@ -37,10 +37,12 @@ const USER_AGENT = "Einwurf/1.0 (gemeinsame Flyer-Verteilkarte)";
 /** Höchstens so viele Overpass-Abrufe pro Minute: je Aktion und insgesamt. */
 export const MAX_FETCHES_PER_MINUTE_PER_CAMPAIGN = 12;
 export const MAX_FETCHES_PER_MINUTE_TOTAL = 40;
-/** So lange gilt eine Kachel als „wird geladen“; andere Aufrufe warten so lange auf den Cache. */
-const LOCK_MS = 45_000;
+/**
+ * So lange gilt eine Kachel als „wird geladen“: so lange, wie ein Abruf über alle Server
+ * höchstens dauern kann, plus Puffer fürs Speichern. Andere Aufrufe warten so lange auf den Cache.
+ */
+const lockMs = () => endpoints().length * OVERPASS_TIMEOUT_MS + 15_000;
 const WAIT_POLL_MS = 1_000;
-const WAIT_MAX_MS = 40_000;
 
 export const campaignExists = internalQuery({
   args: { slug: v.string() },
@@ -88,7 +90,7 @@ export const reserve = internalMutation({
       if (lock && lock.until > now) waitFor.push(cell);
       else toFetch.push(cell);
     }
-    if (toFetch.length === 0) return { toFetch, waitFor };
+    if (toFetch.length === 0) return { toFetch, waitFor, lockIds: [] };
 
     const minuteAgo = now - 60_000;
     const total = await ctx.db.query("overpassFetches").withIndex("by_at", (q) => q.gt("at", minuteAgo)).take(MAX_FETCHES_PER_MINUTE_TOTAL);
@@ -105,23 +107,38 @@ export const reserve = internalMutation({
       await ctx.db.delete(old._id);
     }
 
+    // Jede Sperre ist ein neues Dokument; seine ID ist das Kennzeichen für `release`.
+    const lockIds = [];
     for (const cell of toFetch) {
-      const lock = await ctx.db.query("cellLocks").withIndex("by_cell", (q) => q.eq("cell", cell)).unique();
-      if (lock) await ctx.db.patch(lock._id, { until: now + LOCK_MS });
-      else await ctx.db.insert("cellLocks", { cell, until: now + LOCK_MS });
+      const old = await ctx.db.query("cellLocks").withIndex("by_cell", (q) => q.eq("cell", cell)).unique();
+      if (old) await ctx.db.delete(old._id);
+      lockIds.push(await ctx.db.insert("cellLocks", { cell, until: now + lockMs() }));
     }
-    return { toFetch, waitFor };
+    return { toFetch, waitFor, lockIds };
   },
 });
 
-/** Gibt Sperren frei (nach dem Speichern oder nach einem Fehler). */
+/**
+ * Gibt die eigenen Sperren frei (nach dem Speichern oder nach einem Fehler). Eine inzwischen
+ * abgelaufene und neu vergebene Sperre hat eine andere ID und bleibt stehen.
+ */
 export const release = internalMutation({
-  args: { cells: v.array(v.string()) },
-  handler: async (ctx, { cells }) => {
-    for (const cell of cells) {
-      const lock = await ctx.db.query("cellLocks").withIndex("by_cell", (q) => q.eq("cell", cell)).unique();
-      if (lock) await ctx.db.delete(lock._id);
+  args: { lockIds: v.array(v.id("cellLocks")) },
+  handler: async (ctx, { lockIds }) => {
+    for (const id of lockIds) {
+      if (await ctx.db.get(id)) await ctx.db.delete(id);
     }
+  },
+});
+
+/** Täglich: abgelaufene Kacheln aus dem Cache löschen (siehe crons.ts). */
+export const cleanup = internalMutation({
+  args: {},
+  handler: async (ctx) => {
+    const cutoff = Date.now() - CACHE_TTL_MS;
+    const old = await ctx.db.query("buildingCells").withIndex("by_fetchedAt", (q) => q.lt("fetchedAt", cutoff)).take(500);
+    for (const row of old) await ctx.db.delete(row._id);
+    if (old.length === 500) await ctx.scheduler.runAfter(0, internal.buildings.cleanup, {});
   },
 });
 
@@ -196,7 +213,7 @@ export const load = action({
     const missing = cells.filter((c) => !have.has(c));
     if (missing.length === 0) return cells.map((c) => have.get(c)!);
 
-    const { toFetch, waitFor } = await ctx.runMutation(internal.buildings.reserve, { slug, cells: missing });
+    const { toFetch, waitFor, lockIds } = await ctx.runMutation(internal.buildings.reserve, { slug, cells: missing });
 
     if (toFetch.length > 0) {
       try {
@@ -220,14 +237,14 @@ export const load = action({
         }
         if (batch.length) await ctx.runMutation(internal.buildings.store, { entries: batch });
       } finally {
-        await ctx.runMutation(internal.buildings.release, { cells: toFetch });
+        await ctx.runMutation(internal.buildings.release, { lockIds });
       }
     }
 
     // Kacheln, die gerade ein anderer Helfer lädt: auf seinen Cache-Eintrag warten.
     const started = Date.now();
     let pendingCells = waitFor;
-    while (pendingCells.length > 0 && Date.now() - started < WAIT_MAX_MS) {
+    while (pendingCells.length > 0 && Date.now() - started < lockMs()) {
       await new Promise((r) => setTimeout(r, WAIT_POLL_MS));
       await readCache(pendingCells);
       pendingCells = pendingCells.filter((c) => !have.has(c));

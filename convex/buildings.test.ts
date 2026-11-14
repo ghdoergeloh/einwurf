@@ -1,7 +1,7 @@
 // @vitest-environment edge-runtime
 import { convexTest } from "convex-test";
 import { afterEach, describe, expect, test, vi } from "vitest";
-import { api } from "./_generated/api";
+import { api, internal } from "./_generated/api";
 import schema from "./schema";
 import { CELL_SIZE, cellKeyOf, decodeBuildings } from "./osm";
 import { MAX_FETCHES_PER_MINUTE_PER_CAMPAIGN } from "./buildings";
@@ -175,6 +175,43 @@ describe("buildings.load", () => {
     await expect(t.action(api.buildings.load, { slug: SLUG, cells: [CELL_A] })).rejects.toThrow(/nicht erreichbar/);
     vi.stubGlobal("fetch", vi.fn(async () => overpassOk()));
     expect(ids(await t.action(api.buildings.load, { slug: SLUG, cells: [CELL_A] }))).toEqual(["way/1"]);
+  });
+
+  test("spätes Freigeben löscht keine neu vergebene Sperre", async () => {
+    vi.useFakeTimers({ toFake: ["Date"] });
+    try {
+      const t = await setup();
+      const first = await t.mutation(internal.buildings.reserve, { slug: SLUG, cells: [CELL_A] });
+      expect(first.toFetch).toEqual([CELL_A]);
+      // Solange die Sperre gilt, wartet ein zweiter Aufruf
+      expect((await t.mutation(internal.buildings.reserve, { slug: SLUG, cells: [CELL_A] })).waitFor).toEqual([CELL_A]);
+      // Sperre läuft ab (Abruf hing), ein dritter Aufruf übernimmt
+      vi.setSystemTime(Date.now() + 10 * 60_000);
+      const third = await t.mutation(internal.buildings.reserve, { slug: SLUG, cells: [CELL_A] });
+      expect(third.toFetch).toEqual([CELL_A]);
+      // Der erste meldet sich spät zurück und gibt frei – die Sperre des dritten bleibt
+      await t.mutation(internal.buildings.release, { lockIds: first.lockIds });
+      expect((await t.mutation(internal.buildings.reserve, { slug: SLUG, cells: [CELL_A] })).waitFor).toEqual([CELL_A]);
+      await t.mutation(internal.buildings.release, { lockIds: third.lockIds });
+      expect((await t.mutation(internal.buildings.reserve, { slug: SLUG, cells: [CELL_A] })).toFetch).toEqual([CELL_A]);
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
+  test("Aufräumen löscht nur abgelaufene Kacheln", async () => {
+    vi.useFakeTimers({ toFake: ["Date"] });
+    try {
+      const t = await setup();
+      await t.mutation(internal.buildings.store, { entries: [{ cell: CELL_A, data: "[]" }] });
+      vi.setSystemTime(Date.now() + 31 * 24 * 3600_000);
+      await t.mutation(internal.buildings.store, { entries: [{ cell: CELL_B, data: "[]" }] });
+      await t.mutation(internal.buildings.cleanup, {});
+      const left = await t.run((ctx) => ctx.db.query("buildingCells").collect());
+      expect(left.map((r) => r.cell)).toEqual([CELL_B]);
+    } finally {
+      vi.useRealTimers();
+    }
   });
 
   test("Kachel eines Punkts", () => {
