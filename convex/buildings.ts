@@ -30,7 +30,13 @@ export const MAX_CELLS_PER_LOAD = 24;
 const CACHE_TTL_MS = 30 * 24 * 60 * 60 * 1000;
 /** Convex-Dokumente dürfen höchstens 1 MiB groß sein. */
 const MAX_CACHE_BYTES = 900_000;
-const OVERPASS_TIMEOUT_MS = 25_000;
+/**
+ * So lange darf ein Overpass-Server brauchen. Die öffentlichen Server sind oft ausgelastet;
+ * dann wartet eine Abfrage 20–40 s in der Warteschlange, egal wie klein sie ist.
+ */
+const OVERPASS_TIMEOUT_MS = 60_000;
+/** Antwortet ein Server so lange nicht, wird zusätzlich der nächste gefragt; die erste Antwort gewinnt. */
+const OVERPASS_HEDGE_MS = 10_000;
 /** Öffentliche Overpass-Server, der Reihe nach. Überschreibbar mit der Convex-Umgebungsvariable OVERPASS_URLS. */
 const DEFAULT_ENDPOINTS = [
   "https://overpass-api.de/api/interpreter",
@@ -48,7 +54,13 @@ export const MAX_PREFETCH_FETCHES_PER_MINUTE = 15;
  * So lange gilt eine Kachel als „wird geladen“: so lange, wie ein Abruf über alle Server
  * höchstens dauern kann, plus Puffer fürs Speichern. Andere Aufrufe warten so lange auf den Cache.
  */
-const lockMs = () => endpoints().length * OVERPASS_TIMEOUT_MS + 15_000;
+const lockMs = () => (endpoints().length - 1) * OVERPASS_HEDGE_MS + OVERPASS_TIMEOUT_MS + 15_000;
+/**
+ * Muss Overpass gefragt werden, kommen bis zu so viele noch nicht geladene Nachbarkacheln mit:
+ * Die Wartezeit hängt kaum von der Größe ab, und beim Weiterschieben ist dann alles sofort da.
+ */
+const MAX_FETCH_CELLS = 30;
+const NEIGHBOUR_RING = 2;
 const WAIT_POLL_MS = 1_000;
 
 export const campaignExists = internalQuery({
@@ -157,37 +169,90 @@ function endpoints(): string[] {
   return fromEnv?.length ? fromEnv : DEFAULT_ENDPOINTS;
 }
 
-async function fetchOverpass(bbox: [number, number, number, number]): Promise<BuildingFeature[]> {
+/** Ein Server, eine Abfrage. Wirft bei Fehler, Überlastung oder Laufzeitfehler von Overpass. */
+async function askOverpass(url: string, query: string, signal: AbortSignal): Promise<BuildingFeature[]> {
+  const res = await fetch(url, {
+    method: "POST",
+    headers: { "User-Agent": USER_AGENT, "Content-Type": "application/x-www-form-urlencoded" },
+    body: new URLSearchParams({ data: query }).toString(),
+    signal,
+  });
+  if (!res.ok) throw new Error(`HTTP ${res.status}`);
+  const json = (await res.json()) as { elements?: unknown[]; remark?: string };
+  // Bei Zeitüberschreitung antwortet Overpass mit 200 und einem „remark“.
+  if (json.remark && /error|timed out/i.test(json.remark)) throw new Error(json.remark);
+  return parseOverpass(json as Parameters<typeof parseOverpass>[0]);
+}
+
+/**
+ * Fragt die Server versetzt: zuerst den ersten; scheitert er oder antwortet er nicht innerhalb
+ * von OVERPASS_HEDGE_MS, zusätzlich den nächsten. Die erste gültige Antwort gewinnt, die
+ * anderen Abfragen werden abgebrochen.
+ */
+function fetchOverpass(bbox: [number, number, number, number]): Promise<BuildingFeature[]> {
+  const urls = endpoints();
+  const query = buildQuery(bbox);
   const problems: string[] = [];
-  for (const url of endpoints()) {
-    const ctrl = new AbortController();
-    const timer = setTimeout(() => ctrl.abort(), OVERPASS_TIMEOUT_MS);
-    try {
-      const res = await fetch(url, {
-        method: "POST",
-        headers: { "User-Agent": USER_AGENT, "Content-Type": "application/x-www-form-urlencoded" },
-        body: new URLSearchParams({ data: buildQuery(bbox) }).toString(),
-        signal: ctrl.signal,
-      });
-      if (!res.ok) {
-        problems.push(`${url}: HTTP ${res.status}`);
-        continue;
-      }
-      const json = (await res.json()) as { elements?: unknown[]; remark?: string };
-      // Bei Zeitüberschreitung antwortet Overpass mit 200 und einem „remark“.
-      if (json.remark && /error|timed out/i.test(json.remark)) {
-        problems.push(`${url}: ${json.remark}`);
-        continue;
-      }
-      return parseOverpass(json as Parameters<typeof parseOverpass>[0]);
-    } catch (e) {
-      problems.push(`${url}: ${e instanceof Error ? e.message : String(e)}`);
-    } finally {
-      clearTimeout(timer);
+  const ctrls: AbortController[] = [];
+  const timers: ReturnType<typeof setTimeout>[] = [];
+  return new Promise((resolve, reject) => {
+    let next = 0;
+    let running = 0;
+    let done = false;
+    const finish = () => {
+      done = true;
+      timers.forEach(clearTimeout);
+      ctrls.forEach((c) => c.abort());
+    };
+    const launch = () => {
+      if (done || next >= urls.length) return;
+      const url = urls[next++];
+      const ctrl = new AbortController();
+      ctrls.push(ctrl);
+      running++;
+      timers.push(setTimeout(() => ctrl.abort(), OVERPASS_TIMEOUT_MS));
+      const hedge = setTimeout(launch, OVERPASS_HEDGE_MS);
+      timers.push(hedge);
+      askOverpass(url, query, ctrl.signal).then(
+        (features) => {
+          if (done) return;
+          finish();
+          resolve(features);
+        },
+        (e: unknown) => {
+          running--;
+          if (done) return;
+          problems.push(`${url}: ${e instanceof Error ? e.message : String(e)}`);
+          clearTimeout(hedge);
+          if (next < urls.length) launch();
+          else if (running === 0) {
+            finish();
+            console.warn("Overpass nicht erreichbar", problems);
+            reject(new ConvexError("Die Gebäudedaten (OpenStreetMap) sind gerade nicht erreichbar. Bitte gleich noch einmal versuchen."));
+          }
+        },
+      );
+    };
+    launch();
+  });
+}
+
+/** Kacheln rund um die angefragten (bis NEIGHBOUR_RING), die nächsten zuerst, ohne die angefragten. */
+function neighbours(cells: string[]): string[] {
+  const parsed = cells.map((c) => parseCellKey(c)!);
+  const xs = parsed.map((c) => c.x);
+  const ys = parsed.map((c) => c.y);
+  const [x0, x1, y0, y1] = [Math.min(...xs), Math.max(...xs), Math.min(...ys), Math.max(...ys)];
+  const cx = (x0 + x1) / 2;
+  const cy = (y0 + y1) / 2;
+  const own = new Set(cells);
+  const out: { key: string; d: number }[] = [];
+  for (let x = x0 - NEIGHBOUR_RING; x <= x1 + NEIGHBOUR_RING; x++)
+    for (let y = y0 - NEIGHBOUR_RING; y <= y1 + NEIGHBOUR_RING; y++) {
+      const key = `${x}:${y}`;
+      if (!own.has(key) && parseCellKey(key)) out.push({ key, d: Math.hypot(x - cx, y - cy) });
     }
-  }
-  console.warn("Overpass nicht erreichbar", problems);
-  throw new ConvexError("Die Gebäudedaten (OpenStreetMap) sind gerade nicht erreichbar. Bitte gleich noch einmal versuchen.");
+  return out.sort((a, b) => a.d - b.d).map((c) => c.key);
 }
 
 /**
@@ -222,7 +287,21 @@ async function loadCells(
     return { data: cells.map((c) => have.get(c) ?? stale.get(c)!), fetched: false };
   }
 
-  const { toFetch, waitFor, lockIds } = await ctx.runMutation(internal.buildings.reserve, { slug: rateKey, cells: missing, kind });
+  // Karte: Nachbarkacheln ohne gültigen Cache-Eintrag gleich mitladen (siehe MAX_FETCH_CELLS).
+  let extra: string[] = [];
+  if (kind === "map" && missing.length < MAX_FETCH_CELLS) {
+    const candidates = neighbours(missing);
+    const fresh = new Set(
+      (await ctx.runQuery(internal.buildings.cached, { cells: candidates }))
+        .filter((h) => Date.now() - h.fetchedAt < CACHE_TTL_MS && h.format === BUILDINGS_FORMAT)
+        .map((h) => h.cell),
+    );
+    extra = candidates.filter((c) => !fresh.has(c)).slice(0, MAX_FETCH_CELLS - missing.length);
+  }
+  const reserved = await ctx.runMutation(internal.buildings.reserve, { slug: rateKey, cells: [...missing, ...extra], kind });
+  const { toFetch, lockIds } = reserved;
+  // Warten nur auf angefragte Kacheln, die gerade jemand anderes lädt; Nachbarn sind Zugabe.
+  const waitFor = reserved.waitFor.filter((c) => missing.includes(c));
 
   if (toFetch.length > 0) {
     try {

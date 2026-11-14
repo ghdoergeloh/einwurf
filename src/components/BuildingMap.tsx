@@ -29,6 +29,8 @@ export const MAP_STYLE_URL = "https://tiles.openfreemap.org/styles/positron";
 export const BUILDING_MIN_ZOOM = 15;
 /** Mindest-Zoom beim Öffnen einer Aktion. */
 const START_MIN_ZOOM = 16;
+/** Overpass braucht oft 20–40 s; ein neues Gebiet soll nicht auf den laufenden Abruf warten. */
+const MAX_PARALLEL_LOADS = 2;
 /** Ab hier stehen Hausnummern auf den Häusern. */
 const HOUSE_NUMBER_MIN_ZOOM = 17;
 /** Mehr Kacheln auf einmal laden wir nicht (schont den öffentlichen Overpass-Server). */
@@ -122,7 +124,9 @@ export function BuildingMap({
     const painted = new Map<string, MarkStatus>();
     /** Tipps auf Häuser, deren Markierungen noch laden (siehe lib/pendingTaps.ts). */
     let pendingTaps = new Map<string, PendingTap>();
-    let inflight = false;
+    /** Laufende Abrufe und ihre Kacheln; bis zu MAX_PARALLEL_LOADS gleichzeitig. */
+    let inflight = 0;
+    const fetching = new Set<string>();
     let disposed = false;
     let loaded = false;
     let backoffMs = 0;
@@ -280,7 +284,7 @@ export function BuildingMap({
 
     function updateLoadState() {
       if (map.getZoom() < BUILDING_MIN_ZOOM) onLoadStateRef.current("zoom");
-      else if (inflight) onLoadStateRef.current("loading");
+      else if (inflight > 0) onLoadStateRef.current("loading");
       else if (Date.now() < blockedUntil) onLoadStateRef.current("error");
       else onLoadStateRef.current("idle");
     }
@@ -288,12 +292,12 @@ export function BuildingMap({
     async function loadVisible(force = false) {
       if (disposed || !loaded) return;
       if (map.getZoom() < BUILDING_MIN_ZOOM) return updateLoadState();
-      if (inflight) return;
+      if (inflight >= MAX_PARALLEL_LOADS) return;
       // Nach einem Fehler nicht bei jedem Verschieben neu fragen (Overpass drosselt sonst noch mehr).
       if (!force && Date.now() < blockedUntil) return updateLoadState();
       // Etwas über den Rand hinaus laden, damit beim Schieben keine leeren Flächen auftauchen.
       const view = paddedView();
-      const missing = cellsFor(view).filter((c) => !loadedCells.has(cellKey(c.x, c.y)));
+      const missing = cellsFor(view).filter((c) => !loadedCells.has(cellKey(c.x, c.y)) && !fetching.has(cellKey(c.x, c.y)));
       if (missing.length === 0) return updateLoadState();
       // Mitte zuerst, falls der Ausschnitt größer ist als ein Abruf.
       const cx = (view[0] + view[2]) / 2;
@@ -306,16 +310,19 @@ export function BuildingMap({
       const batch = missing
         .filter((c) => Math.abs(c.x - first.x) < MAX_CELL_SPAN / 2 && Math.abs(c.y - first.y) < MAX_CELL_SPAN / 2)
         .slice(0, MAX_CELLS_PER_REQUEST);
-      inflight = true;
+      const keys = batch.map((c) => cellKey(c.x, c.y));
+      inflight++;
+      keys.forEach((k) => fetching.add(k));
       updateLoadState();
       try {
-        const features = await loadBuildingsRef.current(batch.map((c) => cellKey(c.x, c.y)));
+        const features = await loadBuildingsRef.current(keys);
         if (disposed) return;
         for (const f of features) buildings.set(f.properties.osmId, f);
         for (const c of batch) loadedCells.add(cellKey(c.x, c.y));
         (map.getSource("buildings") as GeoJSONSource).setData(toCollection(buildings.values()));
         syncMarks();
-        inflight = false;
+        inflight--;
+        keys.forEach((k) => fetching.delete(k));
         backoffMs = 0;
         blockedUntil = 0;
         updateLoadState();
@@ -323,7 +330,8 @@ export function BuildingMap({
         void loadVisible();
       } catch {
         if (disposed) return;
-        inflight = false;
+        inflight--;
+        keys.forEach((k) => fetching.delete(k));
         backoffMs = Math.min(BACKOFF_MAX_MS, backoffMs ? backoffMs * 2 : BACKOFF_START_MS);
         blockedUntil = Date.now() + backoffMs;
         updateLoadState();

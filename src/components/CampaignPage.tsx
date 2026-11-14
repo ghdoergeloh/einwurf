@@ -211,6 +211,8 @@ export function CampaignPage({ slug, isNew }: Props) {
   );
 }
 
+const SLOW_LOADING_MS = 6_000;
+
 function StatusPill({
   state,
   toast,
@@ -222,6 +224,14 @@ function StatusPill({
   offline: boolean;
   onRetry: () => void;
 }) {
+  // Overpass braucht manchmal eine halbe Minute; dann sagen, dass es weitergeht.
+  const [slow, setSlow] = useState(false);
+  useEffect(() => {
+    setSlow(false);
+    if (state !== "loading") return;
+    const t = setTimeout(() => setSlow(true), SLOW_LOADING_MS);
+    return () => clearTimeout(t);
+  }, [state]);
   const base =
     "flex max-w-full items-center gap-2.5 rounded-2xl px-4 py-2.5 text-[13px] font-medium leading-snug shadow-[0_10px_30px_-10px_rgba(0,0,0,0.45)] sm:text-sm";
   if (toast)
@@ -269,7 +279,12 @@ function StatusPill({
     return (
       <div className={`${base} bg-white text-ink`}>
         <span className="size-3.5 shrink-0 animate-spin rounded-full border-2 border-ink/20 border-t-ink" />
-        Häuser werden geladen …
+        <span>
+          Häuser werden geladen …
+          {slow && (
+            <span className="block text-muted">OpenStreetMap ist gerade langsam, das kann bis zu einer Minute dauern.</span>
+          )}
+        </span>
       </div>
     );
   return (

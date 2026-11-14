@@ -87,6 +87,63 @@ describe("buildings.load", () => {
     expect(fetchMock.mock.calls.map((c) => String(c[0]))).toEqual(["https://eins.example/api", "https://zwei.example/api"]);
   });
 
+  test("langsamer Server: nach 10 s wird zusätzlich der nächste gefragt, die erste Antwort gewinnt", async () => {
+    vi.useFakeTimers({ toFake: ["setTimeout", "clearTimeout", "Date"] });
+    try {
+      const t = await setup();
+      vi.stubEnv("OVERPASS_URLS", "https://eins.example/api,https://zwei.example/api");
+      let abortedEins = false;
+      const fetchMock = vi.fn((url: string, init?: RequestInit) =>
+        url.startsWith("https://eins")
+          ? new Promise<Response>((_, reject) =>
+              init?.signal?.addEventListener("abort", () => {
+                abortedEins = true;
+                reject(new Error("aborted"));
+              }),
+            )
+          : Promise.resolve(overpassOk()),
+      );
+      vi.stubGlobal("fetch", fetchMock);
+      const pending = t.action(api.buildings.load, { slug: SLUG, cells: [CELL_A] });
+      await vi.advanceTimersByTimeAsync(9_000);
+      expect(fetchMock).toHaveBeenCalledTimes(1);
+      await vi.advanceTimersByTimeAsync(1_500);
+      expect(ids(await pending)).toEqual(["way/1"]);
+      expect(fetchMock.mock.calls.map((c) => String(c[0]))).toEqual(["https://eins.example/api", "https://zwei.example/api"]);
+      expect(abortedEins).toBe(true);
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
+  test("Overpass braucht 40 s (Warteschlange): Antwort zählt noch", async () => {
+    vi.useFakeTimers({ toFake: ["setTimeout", "clearTimeout", "Date"] });
+    try {
+      const t = await setup();
+      vi.stubEnv("OVERPASS_URLS", "https://eins.example/api");
+      vi.stubGlobal("fetch", vi.fn((_url: string, init?: RequestInit) => new Promise<Response>((resolve, reject) => {
+        setTimeout(() => resolve(overpassOk()), 40_000);
+        init?.signal?.addEventListener("abort", () => reject(new Error("aborted")));
+      })));
+      const pending = t.action(api.buildings.load, { slug: SLUG, cells: [CELL_A] });
+      await vi.advanceTimersByTimeAsync(41_000);
+      expect(ids(await pending)).toEqual(["way/1"]);
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
+  test("wer ohnehin auf Overpass wartet, lädt die Nachbarschaft gleich mit", async () => {
+    const t = await setup();
+    const fetchMock = vi.fn(async () => overpassOk());
+    vi.stubGlobal("fetch", fetchMock);
+    await t.action(api.buildings.load, { slug: SLUG, cells: [CELL_A] });
+    expect(fetchMock).toHaveBeenCalledTimes(1);
+    // Nachbarkachel liegt schon im Cache
+    expect(ids(await t.action(api.buildings.load, { slug: SLUG, cells: [CELL_B, `${X - 1}:${Y + 1}`] }))).toEqual(["way/2", "way/3"]);
+    expect(fetchMock).toHaveBeenCalledTimes(1);
+  });
+
   test("Laufzeitfehler von Overpass (200 mit remark) zählt als Fehler", async () => {
     const t = await setup();
     vi.stubEnv("OVERPASS_URLS", "https://eins.example/api");
@@ -251,13 +308,24 @@ describe("buildings.load", () => {
     }
   });
 
-  test("Vorladen ersetzt alte Einträge, statt sie stehen zu lassen", async () => {
+  test("Auffrischen ersetzt alte Einträge", async () => {
     const t = await setup();
     await t.run((ctx) => ctx.db.insert("buildingCells", { cell: CELL_A, fetchedAt: Date.now(), data: '[["way/77",[]]]' }));
     vi.stubGlobal("fetch", vi.fn(async () => overpassOk()));
     await t.action(internal.buildings.refresh, { slug: SLUG, cells: [CELL_A] });
     const row = await t.run((ctx) => ctx.db.query("buildingCells").collect());
     expect(row.map((r) => r.format)).toEqual([2]);
+  });
+
+  test("teils veraltet, teils fehlend: sofort laden, Häuser für alle Kacheln", async () => {
+    const t = await setup();
+    await t.run((ctx) => ctx.db.insert("buildingCells", { cell: CELL_A, fetchedAt: Date.now(), data: '[["way/77",[]]]' }));
+    const fetchMock = vi.fn(async () => overpassOk());
+    vi.stubGlobal("fetch", fetchMock);
+    const res = await t.action(api.buildings.load, { slug: SLUG, cells: [CELL_A, CELL_B] });
+    expect(fetchMock).toHaveBeenCalledTimes(1);
+    expect(ids([res[0]])).toEqual(["way/1"]);
+    expect(ids([res[1]])).toEqual(["way/2", "way/3"]);
   });
 
   test("Kachel eines Punkts", () => {
