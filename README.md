@@ -8,6 +8,7 @@ Eine Karte für Verteilaktionen: Alle Häuser sind dunkelgrau. Wer einen Flyer e
 - **Kartendaten:** © OpenStreetMap-Mitwirkende. Grundkarte von [OpenFreeMap](https://openfreemap.org), Gebäude über die [Overpass API](https://overpass-api.de), Ortssuche über [Nominatim](https://nominatim.org). Alle ohne API-Schlüssel.
 - **Gebäude über Convex:** Der Browser fragt Overpass nicht selbst. Die Convex-Action `buildings.load` holt die Häuser je Kachel (etwa 550 × 350 m), speichert sie 30 Tage für alle Helfer und weicht bei Überlastung auf andere öffentliche Overpass-Server aus. Nur der erste Helfer in einem Gebiet wartet auf Overpass.
 - **Vorladen:** Beim Anlegen einer Aktion lädt Convex im Hintergrund alle Häuser des gesuchten Ortes in den Cache, vom Ortsmittelpunkt nach außen, höchstens 600 Kacheln (etwa 100–120 km², ungefähr ganz Bornheim) und gebremst (höchstens etwa 8 Overpass-Abrufe pro Minute je Aktion, alle Vorladungen zusammen höchstens 15 pro Minute; die Karte hat getrennt davon 30 pro Minute, Vorladen bremst sie also nie aus). Im Teilen-Dialog stehen Fortschritt und der Knopf „Gebiet vorladen“ (für ältere Aktionen oder nach einem Fehler). Gespeichert wird je Kachel ein Eintrag mit allen Häusern als Text, nicht ein Eintrag pro Haus.
+- **Hausnummern:** ab Zoomstufe 17 auf den Häusern, hell auf grauen, dunkel auf gelben Häusern. Sie kommen mit den Häusern von Overpass, entweder vom Gebäude selbst oder von einem Adresspunkt darin. Ältere Cache-Einträge ohne Nummern liefert Convex sofort aus und lädt sie im Hintergrund neu (im Kontingent des Vorladen), die Nummern erscheinen dann beim nächsten Öffnen. „Aktualisieren“ im Teilen-Dialog holt sie für das ganze Gebiet.
 
 ## Bedienung der Karte
 
@@ -20,6 +21,8 @@ Eine Karte für Verteilaktionen: Alle Häuser sind dunkelgrau. Wer einen Flyer e
 | Standort-Knopf | eigene Position verfolgen |
 
 Ein Tipp wartet kurz, ob ein zweiter folgt. Für „nicht möglich“ also zweimal mit kurzer Pause tippen; zwei schnelle Tipps zoomen. Nur so lassen sich Doppeltipp-Zoom und Markieren unterscheiden. Ein Doppeltipp sind zwei Tipps innerhalb von 300 ms und 30 px. Zieht der Finger nach dem zweiten Tipp, zoomt die Karte stufenlos: 150 px nach unten sind eine Stufe hinein. Die Regel steht in `src/lib/taps.ts`. Tippt man schnell ein *anderes* Haus an, wird das erste sofort übernommen.
+
+Ein Tipp färbt das Haus sofort, dazu sprühen kurz „Pixel-Funken“ (`src/lib/sparks.ts`; mit „Bewegung reduzieren“ im System ohne). Ist der Stand des Hauses noch nicht geladen (langsames Netz, Funkloch), merkt sich das Handy den Tipp und schickt ihn ab, sobald der Stand da ist (`src/lib/pendingTaps.ts`). Hat inzwischen jemand anderes das Haus geändert, gilt dessen Stand, und ein Hinweis erscheint. Der Zähler oben zählt ein gemerktes Haus erst nach dem Abschicken.
 
 Häuser werden erst ab Zoomstufe 15 geladen, kachelweise und mit etwas Vorrat über den Rand hinaus. Nach einem Fehler wartet die Karte zunehmend länger (5 s bis 60 s), bevor sie es erneut versucht.
 

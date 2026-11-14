@@ -24,7 +24,10 @@ function fakeBuildings(body) {
       if (x < w || x > e || y < s || y > n) continue;
       const dx = 0.00013, dy = 0.0001;
       const ring = [[x - dx, y - dy], [x + dx, y - dy], [x + dx, y + dy], [x - dx, y + dy], [x - dx, y - dy]];
-      elements.push({ type: "way", id: 100000 + (i + 80) * 1000 + (j + 80), geometry: ring.map(([lon, lat]) => ({ lat, lon })) });
+      // Jedes zweite Haus hat eine Hausnummer am Gebäude, jedes vierte einen Adresspunkt darin.
+      const tags = (i + j) % 2 === 0 ? { building: "yes", "addr:housenumber": String(80 + i) } : { building: "yes" };
+      elements.push({ type: "way", id: 100000 + (i + 80) * 1000 + (j + 80), tags, geometry: ring.map(([lon, lat]) => ({ lat, lon })) });
+      if ((i + j) % 4 === 0) elements.push({ type: "node", id: 900000 + (i + 80) * 1000 + (j + 80), lat: y, lon: x, tags: { "addr:housenumber": `${80 + i}a` } });
     }
   return { elements };
 }
@@ -52,7 +55,21 @@ async function mockOsm(ctx, { styleFails = false } = {}) {
     }),
   );
   await ctx.route("https://tiles.openfreemap.org/**", (r) =>
-    styleFails ? r.fulfill({ status: 500, body: "kaputt" }) : r.fulfill({ json: { version: 8, sources: {}, layers: [{ id: "bg", type: "background", paint: { "background-color": "#ebe8e1" } }] } }),
+    styleFails
+      ? r.fulfill({ status: 500, body: "kaputt" })
+      : r.request().url().includes("/fonts/")
+        ? r.continue() // echte Schrift, damit Hausnummern gezeichnet werden
+        : r.fulfill({
+            json: {
+              version: 8,
+              glyphs: "https://tiles.openfreemap.org/fonts/{fontstack}/{range}.pbf",
+              sources: { leer: { type: "geojson", data: { type: "FeatureCollection", features: [] } } },
+              layers: [
+                { id: "bg", type: "background", paint: { "background-color": "#ebe8e1" } },
+                { id: "ortsnamen", type: "symbol", source: "leer", layout: { "text-field": "x", "text-font": ["Noto Sans Regular"] } },
+              ],
+            },
+          }),
   );
   // Der Browser darf Overpass nie direkt fragen (CORS, Last) – das macht Convex.
   const isOverpass = (url) => /(^|\.)(overpass-api\.de|overpass\.private\.coffee|maps\.mail\.ru)$/.test(url.hostname);
@@ -132,6 +149,17 @@ try {
   assert.equal(await count(p2), "2", "live beim zweiten Helfer");
   assert.equal(await statusAt(p2, cx, cy), "done", "beim zweiten Helfer gelb");
   await shot(p2, "3-live");
+
+  // Hausnummern ab Zoomstufe 17 auf den Häusern
+  const zStart = await zoom(p2);
+  await p2.evaluate(() => window.__einwurfMap.jumpTo({ zoom: 17.5 }));
+  await p2.waitForTimeout(2500);
+  const numbers = await p2.evaluate(() => window.__einwurfMap.queryRenderedFeatures({ layers: ["buildings-number"] }).map((f) => f.properties.hn));
+  assert.ok(numbers.length > 3, "Hausnummern sichtbar");
+  assert.ok(numbers.some((n) => n.includes(",")), "Adresspunkt und Gebäudenummer zusammen");
+  await shot(p2, "3a-hausnummern");
+  await p2.evaluate((z) => window.__einwurfMap.jumpTo({ zoom: z }), zStart);
+  await p2.waitForTimeout(1500);
 
   // Wer später dazukommt, sieht die Häuser gelb (Markierung vor oder nach den Umrissen geladen)
   const c3 = await browser.newContext(phone);
@@ -223,9 +251,31 @@ try {
   online = false;
   for (const ws of sockets) ws.close();
   await po.getByText("Offline.").waitFor({ timeout: 15_000 });
+  // Weg- und zurückschieben: Die Häuser sind noch da, ihr Markierungsstand muss neu geladen
+  // werden und kommt offline nicht. Ein Tipp färbt trotzdem sofort und wird nachgeholt.
+  await po.evaluate(() => window.__einwurfMap.panBy([4000, 0], { duration: 0 }));
+  await po.waitForTimeout(800);
+  await po.evaluate(() => window.__einwurfMap.panBy([-4000, 0], { duration: 0 }));
+  await po.waitForTimeout(800);
+  const tx = cx + 120, ty = cy + 120;
+  assert.equal(await statusAt(po, tx, ty), "none");
+  await po.mouse.click(tx, ty);
+  await po.waitForTimeout(400);
+  assert.equal(await statusAt(po, tx, ty), "done", "sofort gelb, obwohl der Stand noch lädt");
+  const sparkPixels = await po.evaluate(() => {
+    const c = document.querySelector("canvas[aria-hidden]");
+    const d = c.getContext("2d").getImageData(0, 0, c.width, c.height).data;
+    let n = 0;
+    for (let i = 3; i < d.length; i += 4) if (d[i] > 0) n++;
+    return n;
+  });
+  assert.ok(sparkPixels > 20, "Pixel-Funken zu sehen");
   await shot(po, "5-offline");
+  assert.equal(await statusAt(p2, tx, ty), "none", "noch nicht gespeichert");
   online = true;
   await po.getByText("Offline.").waitFor({ state: "hidden", timeout: 30_000 });
+  await po.waitForTimeout(1500);
+  assert.equal(await statusAt(p2, tx, ty), "done", "nach dem Funkloch gespeichert, live beim anderen Helfer");
   await off.close();
 
   // Unbekannter Link

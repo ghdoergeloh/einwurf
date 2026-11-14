@@ -17,6 +17,8 @@ import {
 import { DOUBLE_TAP_MS, dragZoomDelta, onPress, type Press } from "../lib/taps";
 import { markCellOf, markCellsIn } from "../../convex/cells";
 import { nextStatus, statusOf, type HouseStatus, type MarkStatus } from "../../convex/status";
+import { addTap, settleTaps, type PendingTap } from "../lib/pendingTaps";
+import { BURST_SECONDS, createBurst, drawBurst, type Burst } from "../lib/sparks";
 
 // Ab MapLibre 6 braucht jeder Bundler den Pfad zum Worker.
 maplibregl.setWorkerUrl(workerUrl);
@@ -27,6 +29,8 @@ export const MAP_STYLE_URL = "https://tiles.openfreemap.org/styles/positron";
 export const BUILDING_MIN_ZOOM = 15;
 /** Mindest-Zoom beim Öffnen einer Aktion. */
 const START_MIN_ZOOM = 16;
+/** Ab hier stehen Hausnummern auf den Häusern. */
+const HOUSE_NUMBER_MIN_ZOOM = 17;
 /** Mehr Kacheln auf einmal laden wir nicht (schont den öffentlichen Overpass-Server). */
 const MAX_CELLS_PER_REQUEST = 24;
 /** Mehr Markierungs-Zellen abonnieren wir nicht; weiter rausgezoomt gibt es keine Punkte. */
@@ -67,6 +71,8 @@ interface Props {
   onCellsChange: (cells: string[] | null) => void;
   /** Neuer Zustand nach einem Tipp (offen → Flyer drin → nicht möglich → offen). */
   onToggle: (osmId: string, status: HouseStatus, center: number[]) => void;
+  /** Ein gemerkter Tipp wurde verworfen, weil jemand anderes das Haus inzwischen geändert hat. */
+  onConflict: () => void;
   onLoadState: (s: LoadState) => void;
   /** Lädt die Häuser der Kacheln ("x:y"), über Convex mit gemeinsamem Cache. */
   loadBuildings: (cells: string[]) => Promise<BuildingFeature[]>;
@@ -81,6 +87,7 @@ export function BuildingMap({
   marks,
   onCellsChange,
   onToggle,
+  onConflict,
   onLoadState,
   loadBuildings,
   loadedMarkCells,
@@ -89,6 +96,8 @@ export function BuildingMap({
   const container = useRef<HTMLDivElement>(null);
   const mapRef = useRef<maplibregl.Map | null>(null);
   const syncMarksRef = useRef<(() => void) | null>(null);
+  const settleRef = useRef<(() => void) | null>(null);
+  const sparksRef = useRef<HTMLCanvasElement>(null);
   const [ready, setReady] = useState(false);
   // In Refs, damit die Karten-Callbacks immer den aktuellen Stand sehen.
   const marksRef = useRef<Map<string, Mark>>(new Map());
@@ -100,6 +109,8 @@ export function BuildingMap({
   loadedMarkCellsRef.current = loadedMarkCells;
   loadBuildingsRef.current = loadBuildings;
   onToggleRef.current = onToggle;
+  const onConflictRef = useRef(onConflict);
+  onConflictRef.current = onConflict;
   onLoadStateRef.current = onLoadState;
   onCellsChangeRef.current = onCellsChange;
 
@@ -109,6 +120,8 @@ export function BuildingMap({
     const loadedCells = new Set<string>();
     /** osmIds, die gerade als markiert eingefärbt sind (feature-state). */
     const painted = new Map<string, MarkStatus>();
+    /** Tipps auf Häuser, deren Markierungen noch laden (siehe lib/pendingTaps.ts). */
+    let pendingTaps = new Map<string, PendingTap>();
     let inflight = false;
     let disposed = false;
     let loaded = false;
@@ -159,7 +172,11 @@ export function BuildingMap({
     /** Färbt markierte Häuser per feature-state und setzt Punkte für Häuser ohne Umriss. */
     function syncMarks() {
       if (!loaded) return;
-      const current = marksRef.current;
+      const current = new Map(marksRef.current);
+      for (const [id, p] of pendingTaps) {
+        if (p.to === "none") current.delete(id);
+        else current.set(id, { osmId: id, center: p.center, status: p.to });
+      }
       for (const id of [...painted.keys()]) {
         if (!current.has(id)) {
           map.setFeatureState({ source: "buildings", id }, { status: "none" });
@@ -183,6 +200,60 @@ export function BuildingMap({
       (map.getSource("mark-points") as GeoJSONSource | undefined)?.setData(points);
     }
     syncMarksRef.current = syncMarks;
+
+    /** Gemerkte Tipps abschicken, sobald der echte Zustand ihrer Zelle bekannt ist. */
+    function settle() {
+      if (pendingTaps.size === 0) return;
+      const r = settleTaps(
+        pendingTaps,
+        (c) => loadedMarkCellsRef.current.has(markCellOf(c[0], c[1])),
+        (id) => statusOf(marksRef.current.get(id)),
+      );
+      pendingTaps = r.rest;
+      for (const t of r.send) {
+        onToggleRef.current(t.osmId, t.status, t.center);
+        // Bis die Liste neu kommt, gilt schon der neue Zustand (kein kurzes Zurückspringen).
+        if (t.status === "none") marksRef.current.delete(t.osmId);
+        else marksRef.current.set(t.osmId, { osmId: t.osmId, center: t.center, status: t.status });
+      }
+      if (r.conflicts.length) onConflictRef.current();
+      syncMarks();
+    }
+    settleRef.current = settle;
+
+    // ---------- Pixel-Funken ----------
+
+    const reduceMotion = window.matchMedia?.("(prefers-reduced-motion: reduce)").matches ?? false;
+    let bursts: { burst: Burst; at: maplibregl.LngLat; start: number }[] = [];
+    let frame = 0;
+    function drawSparks(now: number) {
+      frame = 0;
+      const cv = sparksRef.current;
+      const ctx = cv?.getContext("2d");
+      if (!cv || !ctx) return;
+      const dpr = Math.min(2, window.devicePixelRatio || 1);
+      const w = cv.clientWidth;
+      const h = cv.clientHeight;
+      if (cv.width !== Math.round(w * dpr) || cv.height !== Math.round(h * dpr)) {
+        cv.width = Math.round(w * dpr);
+        cv.height = Math.round(h * dpr);
+      }
+      ctx.setTransform(dpr, 0, 0, dpr, 0, 0);
+      ctx.clearRect(0, 0, w, h);
+      bursts = bursts.filter((b) => (now - b.start) / 1000 < BURST_SECONDS);
+      for (const b of bursts) {
+        // Am Ort auf der Karte festhalten, auch wenn sie gerade geschoben wird.
+        const p = map.project(b.at);
+        drawBurst(ctx, b.burst, p.x, p.y, (now - b.start) / 1000);
+      }
+      // Nur zeichnen, solange etwas sprüht.
+      if (bursts.length) frame = requestAnimationFrame(drawSparks);
+    }
+    function sparkle(status: HouseStatus, at: maplibregl.LngLat) {
+      if (reduceMotion) return;
+      bursts.push({ burst: createBurst(status), at, start: performance.now() });
+      if (!frame) frame = requestAnimationFrame(drawSparks);
+    }
 
     /** Sichtbarer Ausschnitt plus Vorrat am Rand (gleich für Häuser und Markierungen). */
     function paddedView(): BBox {
@@ -300,6 +371,28 @@ export function BuildingMap({
           "line-width": ["interpolate", ["linear"], ["zoom"], 15, 0.6, 18, byState(0.8, 2, 2)],
         },
       });
+      // Hausnummern: auf dem Haus, hell auf dunkel, dunkel auf gelb. Schrift aus dem Stil der Grundkarte.
+      const font = (map.getStyle().layers ?? [])
+        .map((l) => (l.type === "symbol" ? l.layout?.["text-font"] : undefined))
+        .find((f): f is string[] => Array.isArray(f) && f.every((x) => typeof x === "string"));
+      if (map.getStyle().glyphs && font) {
+        map.addLayer({
+          id: "buildings-number",
+          type: "symbol",
+          source: "buildings",
+          minzoom: HOUSE_NUMBER_MIN_ZOOM,
+          filter: ["has", "hn"],
+          layout: {
+            "text-field": ["get", "hn"],
+            "text-font": font.some((f) => f.includes("Bold")) ? font : [font[0].replace(/Regular|Italic/, "Bold")],
+            "text-size": ["interpolate", ["linear"], ["zoom"], HOUSE_NUMBER_MIN_ZOOM, 10, 19, 14],
+            "text-padding": 1,
+          },
+          paint: {
+            "text-color": byState("#d4d7de", "#3a2f00", "#f3ecd0"),
+          },
+        });
+      }
       const pointPaint: CircleLayerSpecification["paint"] = {
         "circle-color": ["match", ["get", "status"], "blocked", COLOR_BLOCKED, COLOR_MARKED],
         "circle-radius": ["interpolate", ["linear"], ["zoom"], 10, 2, 14, 4.5, 18, 7],
@@ -356,17 +449,28 @@ export function BuildingMap({
       return (pick(point)?.properties?.osmId as string | undefined) ?? null;
     }
 
-    function toggle(osmId: string | null) {
-      if (disposed || !osmId) return;
+    function toggle(tap: { osmId: string; at: maplibregl.LngLat } | null) {
+      if (disposed || !tap) return;
+      const { osmId, at } = tap;
       const mark = marksRef.current.get(osmId);
-      const next = nextStatus(statusOf(mark));
       const center = mark?.center ?? (buildings.has(osmId) ? centerOf(buildings.get(osmId)!) : null);
       if (!center) return;
-      // Erst weiterschalten, wenn wir den Zustand des Hauses kennen; sonst könnte ein
-      // Tipp ein dunkelgelbes Haus, dessen Markierung noch lädt, auf gelb zurücksetzen.
-      if (!loadedMarkCellsRef.current.has(markCellOf(center[0], center[1]))) return;
-      onToggleRef.current(osmId, next, center);
-      navigator.vibrate?.(12);
+      const known = loadedMarkCellsRef.current.has(markCellOf(center[0], center[1]));
+      let next: HouseStatus;
+      if (known && !pendingTaps.has(osmId)) {
+        next = nextStatus(statusOf(mark));
+        onToggleRef.current(osmId, next, center);
+      } else {
+        // Zustand lädt noch: sofort umfärben, abschicken erst, wenn er bekannt ist. So kann
+        // ein Tipp kein „nicht möglich“ überschreiben, das jemand anderes gesetzt hat.
+        const pending = pendingTaps.get(osmId);
+        next = nextStatus(pending ? pending.to : statusOf(mark));
+        pendingTaps = addTap(pendingTaps, osmId, statusOf(mark), center);
+        syncMarks();
+        settle();
+      }
+      sparkle(next, at);
+      navigator.vibrate?.(next === "done" ? 12 : 6);
     }
 
     // Ein Tipp wartet kurz, ob ein zweiter folgt, wie bei Google Maps:
@@ -375,7 +479,8 @@ export function BuildingMap({
     // Erkennung ist dafür aus, damit es nur eine Regel gibt. Pointer-Events zählen jeden
     // Druck genau einmal, egal ob Finger oder Maus.
     map.touchZoomRotate._tapDragZoom.disable();
-    let pending: { press: Press; payload: string | null; timer: ReturnType<typeof setTimeout> } | null = null;
+    type Tap = { osmId: string; at: maplibregl.LngLat } | null;
+    let pending: { press: Press; payload: Tap; timer: ReturnType<typeof setTimeout> } | null = null;
     let lastPress: Press | null = null;
     let doubleArmed = false;
     let dragZoom: { pointerId: number; startY: number; startZoom: number; around: maplibregl.LngLat; moved: boolean } | null =
@@ -446,12 +551,13 @@ export function BuildingMap({
       // Das Haus jetzt bestimmen, nicht erst nach der Wartezeit: Bis dahin kann die Karte
       // weitergerückt sein (Standortverfolgung, laufender Zoom).
       const osmId = osmIdAt(e.point);
+      const tap: Tap = osmId ? { osmId, at: e.lngLat } : null;
       pending = {
         press,
-        payload: osmId,
+        payload: tap,
         timer: setTimeout(() => {
           pending = null;
-          toggle(osmId);
+          toggle(tap);
         }, DOUBLE_TAP_MS),
       };
     });
@@ -464,6 +570,8 @@ export function BuildingMap({
     return () => {
       disposed = true;
       clearPending();
+      if (frame) cancelAnimationFrame(frame);
+      settleRef.current = null;
       canvas.removeEventListener("pointerdown", onPointerDown);
       window.removeEventListener("pointermove", onPointerMove);
       window.removeEventListener("pointerup", endDragZoom);
@@ -480,13 +588,17 @@ export function BuildingMap({
 
   useEffect(() => {
     marksRef.current = new Map(marks.map((m) => [m.osmId, m]));
-    if (ready) syncMarksRef.current?.();
-  }, [marks, ready]);
+    if (ready) {
+      syncMarksRef.current?.();
+      settleRef.current?.();
+    }
+  }, [marks, loadedMarkCells, ready]);
 
   // MapLibre setzt am Container position: relative; deshalb ein eigener Rahmen außen.
   return (
     <div className="absolute inset-0">
       <div ref={container} className="h-full w-full" data-testid="map" />
+      <canvas ref={sparksRef} className="pointer-events-none absolute inset-0 h-full w-full" aria-hidden="true" />
     </div>
   );
 }

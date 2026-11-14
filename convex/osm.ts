@@ -8,7 +8,12 @@ export type BBox = [west: number, south: number, east: number, north: number];
 
 export interface BuildingProps {
   osmId: string;
+  /** Hausnummer(n) aus OSM, z. B. "12" oder "3, 5"; fehlt bei Garagen, Schuppen usw. */
+  hn?: string;
 }
+
+/** Format der Cache-Einträge; ältere Einträge (ohne Hausnummern) werden neu geladen. */
+export const BUILDINGS_FORMAT = 2;
 
 export type BuildingFeature = Feature<MultiPolygon, BuildingProps>;
 
@@ -19,7 +24,7 @@ export const MAX_CELL_SPAN = 8;
 
 export function buildQuery([w, s, e, n]: BBox): string {
   const box = `${s},${w},${n},${e}`;
-  return `[out:json][timeout:25];(way["building"](${box});relation["building"]["type"="multipolygon"](${box}););out geom;`;
+  return `[out:json][timeout:25];(way["building"](${box});relation["building"]["type"="multipolygon"](${box});node["addr:housenumber"](${box}););out geom;`;
 }
 
 interface OverpassPoint {
@@ -34,6 +39,9 @@ interface OverpassMember {
 interface OverpassElement {
   type: string;
   id: number;
+  lat?: number;
+  lon?: number;
+  tags?: Record<string, string>;
   geometry?: OverpassPoint[];
   members?: OverpassMember[];
 }
@@ -78,6 +86,7 @@ export function joinRings(parts: Position[][]): Position[][] {
 /** Wandelt eine Overpass-Antwort in GeoJSON-Gebäude um. */
 export function parseOverpass(json: { elements?: OverpassElement[] }): BuildingFeature[] {
   const features: BuildingFeature[] = [];
+  const numbers = new Map<BuildingFeature, string[]>();
   for (const el of json.elements ?? []) {
     let coords: Position[][][] = [];
     if (el.type === "way" && el.geometry) {
@@ -97,8 +106,80 @@ export function parseOverpass(json: { elements?: OverpassElement[] }): BuildingF
       properties: { osmId: `${el.type}/${el.id}` },
       geometry: { type: "MultiPolygon", coordinates: coords },
     });
+    const own = el.tags?.["addr:housenumber"];
+    if (own) numbers.set(features[features.length - 1], own.split(/[;,]/).map((x) => x.trim()));
+  }
+  assignAddressPoints(features, json.elements ?? [], numbers);
+  for (const [f, list] of numbers) {
+    const unique = [...new Set(list.filter(Boolean))].sort(byHouseNumber);
+    if (unique.length) f.properties.hn = unique.length > 3 ? `${unique.slice(0, 3).join(", ")} …` : unique.join(", ");
   }
   return features;
+}
+
+/** Natürliche Reihenfolge: 3 < 5 < 11 < 11a. */
+const byHouseNumber = (a: string, b: string) => parseInt(a, 10) - parseInt(b, 10) || a.localeCompare(b, "de");
+
+/** Rastergröße für die Suche, in welchem Haus ein Adresspunkt liegt (≈ 30 m). */
+const GRID = 0.0004;
+
+/**
+ * Adresspunkte (Knoten mit addr:housenumber) dem Haus zuordnen, in dem sie liegen.
+ * In Deutschland hängt die Hausnummer oft an so einem Punkt statt am Gebäude.
+ */
+function assignAddressPoints(features: BuildingFeature[], elements: OverpassElement[], numbers: Map<BuildingFeature, string[]>) {
+  const points = elements.filter((el) => el.type === "node" && el.tags?.["addr:housenumber"]);
+  if (points.length === 0) return;
+  const grid = new Map<string, BuildingFeature[]>();
+  /** Sehr große Gebäude (Hallen, Fehler in den Daten) nicht ins Raster, sondern immer prüfen. */
+  const big: BuildingFeature[] = [];
+  const boxes = new Map<BuildingFeature, BBox>();
+  for (const f of features) {
+    let [w, s, e, n] = [Infinity, Infinity, -Infinity, -Infinity];
+    for (const poly of f.geometry.coordinates)
+      for (const [x, y] of poly[0]) {
+        w = Math.min(w, x); e = Math.max(e, x); s = Math.min(s, y); n = Math.max(n, y);
+      }
+    boxes.set(f, [w, s, e, n]);
+    if ((Math.floor(e / GRID) - Math.floor(w / GRID) + 1) * (Math.floor(n / GRID) - Math.floor(s / GRID) + 1) > 100) {
+      big.push(f);
+      continue;
+    }
+    for (let gx = Math.floor(w / GRID); gx <= Math.floor(e / GRID); gx++)
+      for (let gy = Math.floor(s / GRID); gy <= Math.floor(n / GRID); gy++) {
+        const k = `${gx}:${gy}`;
+        const list = grid.get(k);
+        if (list) list.push(f);
+        else grid.set(k, [f]);
+      }
+  }
+  const contains = (f: BuildingFeature, pt: Position) => {
+    const [w, s, e, n] = boxes.get(f)!;
+    return pt[0] >= w && pt[0] <= e && pt[1] >= s && pt[1] <= n && f.geometry.coordinates.some((poly) => inRing(pt, poly[0]));
+  };
+  for (const el of points) {
+    const hn = el.tags!["addr:housenumber"];
+    if (el.lon === undefined || el.lat === undefined) continue;
+    const pt: Position = [el.lon, el.lat];
+    const house =
+      grid.get(`${Math.floor(el.lon / GRID)}:${Math.floor(el.lat / GRID)}`)?.find((f) => contains(f, pt)) ??
+      big.find((f) => contains(f, pt));
+    if (!house) continue;
+    const list = numbers.get(house) ?? [];
+    list.push(...hn.split(/[;,]/).map((x) => x.trim()));
+    numbers.set(house, list);
+  }
+}
+
+/** Punkt im Ring (Strahl-Methode). */
+function inRing([x, y]: Position, ring: Position[]): boolean {
+  let inside = false;
+  for (let i = 0, j = ring.length - 1; i < ring.length; j = i++) {
+    const [xi, yi] = ring[i];
+    const [xj, yj] = ring[j];
+    if (yi > y !== yj > y && x < ((xj - xi) * (y - yi)) / (yj - yi) + xi) inside = !inside;
+  }
+  return inside;
 }
 
 export function cellKey(x: number, y: number) {
@@ -159,20 +240,24 @@ export function cellKeyOf([lng, lat]: [number, number]): string {
   return cellKey(Math.floor(lng / CELL_SIZE), Math.floor(lat / CELL_SIZE));
 }
 
-/** Kompakte Form für Cache und Übertragung: [[osmId, MultiPolygon-Koordinaten], …] als JSON. */
+/** Kompakte Form für Cache und Übertragung: [[osmId, MultiPolygon-Koordinaten, Hausnummer?], …] als JSON. */
 export function encodeBuildings(features: BuildingFeature[]): string {
   const r = (x: number) => Math.round(x * 1e6) / 1e6; // ≈ 10 cm
   return JSON.stringify(
-    features.map((f) => [f.properties.osmId, f.geometry.coordinates.map((p) => p.map((ring) => ring.map(([x, y]) => [r(x), r(y)])))]),
+    features.map((f) => {
+      const row: unknown[] = [f.properties.osmId, f.geometry.coordinates.map((p) => p.map((ring) => ring.map(([x, y]) => [r(x), r(y)])))];
+      if (f.properties.hn) row.push(f.properties.hn);
+      return row;
+    }),
   );
 }
 
 export function decodeBuildings(data: string): BuildingFeature[] {
-  const rows = JSON.parse(data) as [string, Position[][][]][];
-  return rows.map(([osmId, coordinates]) => ({
+  const rows = JSON.parse(data) as [string, Position[][][], string?][];
+  return rows.map(([osmId, coordinates, hn]) => ({
     type: "Feature",
     id: osmId,
-    properties: { osmId },
+    properties: hn ? { osmId, hn } : { osmId },
     geometry: { type: "MultiPolygon", coordinates },
   }));
 }

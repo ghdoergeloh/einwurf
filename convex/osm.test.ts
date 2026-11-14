@@ -1,5 +1,5 @@
 import { describe, expect, test } from "vitest";
-import { CELL_SIZE, MAX_CELL_SPAN, parseCellKey, planPrefetch, prefetchArea } from "./osm";
+import { CELL_SIZE, MAX_CELL_SPAN, buildQuery, decodeBuildings, encodeBuildings, parseCellKey, parseOverpass, planPrefetch, prefetchArea } from "./osm";
 
 const ROISDORF: [number, number, number, number] = [6.97, 50.745, 7.0, 50.765];
 const EFB: [number, number] = [6.985, 50.755];
@@ -63,4 +63,74 @@ describe("prefetchArea", () => {
     const [w, s, e, n] = prefetchArea({ center: { lat: 50, lng: 7 }, bbox: null });
     expect(w < 7 && e > 7 && s < 50 && n > 50).toBe(true);
   });
+});
+
+describe("Hausnummern", () => {
+  const square = (id: number, lon: number, lat: number, tags?: Record<string, string>) => {
+    const d = 0.0001;
+    return {
+      type: "way",
+      id,
+      tags,
+      geometry: [
+        { lat: lat - d, lon: lon - d },
+        { lat: lat - d, lon: lon + d },
+        { lat: lat + d, lon: lon + d },
+        { lat: lat + d, lon: lon - d },
+        { lat: lat - d, lon: lon - d },
+      ],
+    };
+  };
+  const node = (id: number, lon: number, lat: number, hn: string) => ({ type: "node", id, lat, lon, tags: { "addr:housenumber": hn } });
+
+  test("Abfrage holt auch Adresspunkte", () => {
+    expect(buildQuery([7, 50, 7.01, 50.01])).toContain('node["addr:housenumber"]');
+  });
+
+  test("Nummer am Gebäude oder am Adresspunkt im Gebäude", () => {
+    const fs = parseOverpass({
+      elements: [
+        square(1, 7, 50, { building: "yes", "addr:housenumber": "12" }),
+        square(2, 7.001, 50),
+        node(10, 7.001, 50, "14a"),
+        square(3, 7.002, 50), // Garage ohne Nummer
+        node(11, 7.005, 50, "99"), // Adresse ohne Haus
+      ],
+    });
+    expect(fs.map((f) => [f.properties.osmId, f.properties.hn])).toEqual([
+      ["way/1", "12"],
+      ["way/2", "14a"],
+      ["way/3", undefined],
+    ]);
+  });
+
+  test("mehrere Adressen in einem Haus: sortiert, höchstens drei", () => {
+    const fs = parseOverpass({
+      elements: [
+        square(1, 7, 50),
+        node(10, 7, 50, "5"),
+        node(11, 7.00002, 50, "3"),
+        node(12, 7.00004, 50, "11"),
+        node(13, 7.00006, 50, "7"),
+        node(14, 7.00008, 50, "3"),
+      ],
+    });
+    expect(fs[0].properties.hn).toBe("3, 5, 7 …");
+  });
+
+  test("Kodieren und Dekodieren behält die Nummer; altes Format ohne Nummer geht weiter", () => {
+    const fs = parseOverpass({ elements: [square(1, 7, 50, { "addr:housenumber": "2" }), square(2, 7.001, 50)] });
+    const back = decodeBuildings(encodeBuildings(fs));
+    expect(back.map((f) => f.properties.hn)).toEqual(["2", undefined]);
+    const old = JSON.stringify([["way/9", fs[0].geometry.coordinates]]);
+    expect(decodeBuildings(old)[0].properties).toEqual({ osmId: "way/9" });
+  });
+});
+
+test("riesiges Gebäude: Adresspunkt wird trotzdem gefunden, ohne Speicher zu sprengen", () => {
+  const ring = [[6, 50], [8, 50], [8, 51], [6, 51], [6, 50]].map(([lon, lat]) => ({ lon, lat }));
+  const fs = parseOverpass({
+    elements: [{ type: "way", id: 1, geometry: ring }, { type: "node", id: 2, lon: 7, lat: 50.5, tags: { "addr:housenumber": "1" } }],
+  });
+  expect(fs[0].properties.hn).toBe("1");
 });

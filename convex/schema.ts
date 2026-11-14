@@ -38,6 +38,8 @@ export default defineSchema({
     fetchedAt: v.number(),
     /** Häuser, deren Mittelpunkt in der Kachel liegt; Format siehe encodeBuildings. */
     data: v.string(),
+    /** BUILDINGS_FORMAT beim Speichern; fehlt bei Einträgen ohne Hausnummern. */
+    format: v.optional(v.number()),
   })
     .index("by_cell", ["cell"])
     .index("by_fetchedAt", ["fetchedAt"]),

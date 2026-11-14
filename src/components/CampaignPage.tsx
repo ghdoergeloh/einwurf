@@ -115,6 +115,11 @@ export function CampaignPage({ slug, isNew }: Props) {
     [setMark, slug, showToast],
   );
 
+  const onConflict = useCallback(
+    () => showToast("Jemand anderes hat dieses Haus gerade geändert. Sein Stand gilt, bitte nachsehen."),
+    [showToast],
+  );
+
   if (campaign === null) return <NotFound />;
 
   const url = `${location.origin}${campaignPath(slug)}`;
@@ -130,6 +135,7 @@ export function CampaignPage({ slug, isNew }: Props) {
           marks={marks}
           onCellsChange={setCells}
           onToggle={onToggle}
+          onConflict={onConflict}
           onLoadState={setLoadState}
           loadBuildings={loadBuildings}
           loadedMarkCells={loadedMarkCells}

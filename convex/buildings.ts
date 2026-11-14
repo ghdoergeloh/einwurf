@@ -3,6 +3,7 @@ import type { Id } from "./_generated/dataModel";
 import { internal } from "./_generated/api";
 import { ConvexError, v } from "convex/values";
 import {
+  BUILDINGS_FORMAT,
   MAX_CELL_SPAN,
   buildQuery,
   cellKeyOf,
@@ -59,10 +60,10 @@ export const campaignExists = internalQuery({
 export const cached = internalQuery({
   args: { cells: v.array(v.string()) },
   handler: async (ctx, { cells }) => {
-    const out: { cell: string; data: string; fetchedAt: number }[] = [];
+    const out: { cell: string; data: string; fetchedAt: number; format: number }[] = [];
     for (const cell of cells) {
       const row = await ctx.db.query("buildingCells").withIndex("by_cell", (q) => q.eq("cell", cell)).unique();
-      if (row) out.push({ cell, data: row.data, fetchedAt: row.fetchedAt });
+      if (row) out.push({ cell, data: row.data, fetchedAt: row.fetchedAt, format: row.format ?? 1 });
     }
     return out;
   },
@@ -74,8 +75,8 @@ export const store = internalMutation({
     const now = Date.now();
     for (const { cell, data } of entries) {
       const row = await ctx.db.query("buildingCells").withIndex("by_cell", (q) => q.eq("cell", cell)).unique();
-      if (row) await ctx.db.patch(row._id, { data, fetchedAt: now });
-      else await ctx.db.insert("buildingCells", { cell, data, fetchedAt: now });
+      if (row) await ctx.db.patch(row._id, { data, fetchedAt: now, format: BUILDINGS_FORMAT });
+      else await ctx.db.insert("buildingCells", { cell, data, fetchedAt: now, format: BUILDINGS_FORMAT });
     }
   },
 });
@@ -199,17 +200,27 @@ async function loadCells(
   rateKey: string,
   cells: string[],
   kind: "map" | "prefetch" = "map",
+  { wait = true }: { wait?: boolean } = {},
 ): Promise<{ data: string[]; fetched: boolean }> {
   const have = new Map<string, string>();
+  /** Veraltete Einträge (älter als 30 Tage oder altes Format). */
+  const stale = new Map<string, string>();
   const readCache = async (wanted: string[]) => {
     const now = Date.now();
     for (const hit of await ctx.runQuery(internal.buildings.cached, { cells: wanted })) {
-      if (now - hit.fetchedAt < CACHE_TTL_MS) have.set(hit.cell, hit.data);
+      if (now - hit.fetchedAt < CACHE_TTL_MS && hit.format === BUILDINGS_FORMAT) have.set(hit.cell, hit.data);
+      else stale.set(hit.cell, hit.data);
     }
   };
   await readCache(cells);
   const missing = cells.filter((c) => !have.has(c));
   if (missing.length === 0) return { data: cells.map((c) => have.get(c)!), fetched: false };
+  // Karte: Gibt es für alles einen veralteten Eintrag (älter als 30 Tage oder ohne Hausnummern),
+  // sofort den zeigen und im Hintergrund auffrischen. Overpass braucht manchmal 30 s und mehr.
+  if (kind === "map" && missing.every((c) => stale.has(c))) {
+    await ctx.scheduler.runAfter(0, internal.buildings.refresh, { slug: rateKey, cells: missing });
+    return { data: cells.map((c) => have.get(c) ?? stale.get(c)!), fetched: false };
+  }
 
   const { toFetch, waitFor, lockIds } = await ctx.runMutation(internal.buildings.reserve, { slug: rateKey, cells: missing, kind });
 
@@ -241,7 +252,7 @@ async function loadCells(
 
   // Kacheln, die gerade ein anderer Helfer lädt: auf seinen Cache-Eintrag warten.
   const started = Date.now();
-  let pendingCells = waitFor;
+  let pendingCells = wait ? waitFor : [];
   while (pendingCells.length > 0 && Date.now() - started < lockMs()) {
     await new Promise((r) => setTimeout(r, WAIT_POLL_MS));
     await readCache(pendingCells);
@@ -277,6 +288,20 @@ export const load = action({
     }
 
     return (await loadCells(ctx, slug, cells)).data;
+  },
+});
+
+/** Frischt veraltete Kacheln im Hintergrund auf (siehe loadCells), im Kontingent des Vorladens. */
+export const refresh = internalAction({
+  args: { slug: v.string(), cells: v.array(v.string()) },
+  handler: async (ctx, { slug, cells }) => {
+    try {
+      // Kacheln, die gerade jemand lädt, überspringen statt warten.
+      await loadCells(ctx, prefetchRateKey(slug), cells, "prefetch", { wait: false });
+    } catch (e) {
+      // Nicht schlimm: Beim nächsten Ansehen wird es wieder versucht.
+      console.warn("Auffrischen fehlgeschlagen", e instanceof Error ? e.message : String(e));
+    }
   },
 });
 

@@ -214,6 +214,52 @@ describe("buildings.load", () => {
     }
   });
 
+  test("Einträge im alten Format (ohne Hausnummern): sofort ausliefern, im Hintergrund auffrischen", async () => {
+    vi.useFakeTimers();
+    try {
+      const t = await setup();
+      // So sahen Einträge vor den Hausnummern aus: ohne Formatnummer.
+      await t.run((ctx) => ctx.db.insert("buildingCells", { cell: CELL_A, fetchedAt: Date.now(), data: '[["way/77",[]]]' }));
+      const fetchMock = vi.fn(async () => overpassOk());
+      vi.stubGlobal("fetch", fetchMock);
+      // Sofort: die alten Häuser, ohne auf Overpass zu warten
+      expect(ids(await t.action(api.buildings.load, { slug: SLUG, cells: [CELL_A] }))).toEqual(["way/77"]);
+      expect(fetchMock).toHaveBeenCalledTimes(0);
+      // Im Hintergrund aufgefrischt
+      await t.finishAllScheduledFunctions(vi.runAllTimers);
+      expect(fetchMock).toHaveBeenCalledTimes(1);
+      expect(ids(await t.action(api.buildings.load, { slug: SLUG, cells: [CELL_A] }))).toEqual(["way/1"]);
+      expect(fetchMock).toHaveBeenCalledTimes(1);
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
+  test("Auffrischen scheitert: kein Fehler, die alten Häuser bleiben", async () => {
+    vi.useFakeTimers();
+    try {
+      const t = await setup();
+      await t.run((ctx) => ctx.db.insert("buildingCells", { cell: CELL_A, fetchedAt: Date.now(), data: '[["way/77",[]]]' }));
+      vi.stubGlobal("fetch", vi.fn(async () => { throw new TypeError("network"); }));
+      expect(ids(await t.action(api.buildings.load, { slug: SLUG, cells: [CELL_A] }))).toEqual(["way/77"]);
+      await t.finishAllScheduledFunctions(vi.runAllTimers);
+      expect(ids(await t.action(api.buildings.load, { slug: SLUG, cells: [CELL_A] }))).toEqual(["way/77"]);
+      // Ohne alten Eintrag bleibt es beim Fehler
+      await expect(t.action(api.buildings.load, { slug: SLUG, cells: [CELL_B] })).rejects.toThrow(/nicht erreichbar/);
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
+  test("Vorladen ersetzt alte Einträge, statt sie stehen zu lassen", async () => {
+    const t = await setup();
+    await t.run((ctx) => ctx.db.insert("buildingCells", { cell: CELL_A, fetchedAt: Date.now(), data: '[["way/77",[]]]' }));
+    vi.stubGlobal("fetch", vi.fn(async () => overpassOk()));
+    await t.action(internal.buildings.refresh, { slug: SLUG, cells: [CELL_A] });
+    const row = await t.run((ctx) => ctx.db.query("buildingCells").collect());
+    expect(row.map((r) => r.format)).toEqual([2]);
+  });
+
   test("Kachel eines Punkts", () => {
     expect(cellKeyOf([(X + 0.5) * CELL_SIZE, (Y + 0.5) * CELL_SIZE])).toBe(CELL_A);
   });
