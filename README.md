@@ -64,7 +64,9 @@ Im [Convex-Dashboard](https://dashboard.convex.dev) unter *Settings → Deploy K
 
 Fehlt `VITE_CONVEX_URL` beim Build auf Vercel (Key fehlt oder Build lief nicht über `convex deploy`), bricht der Build mit einer Meldung ab, statt eine Seite ohne Backend zu veröffentlichen.
 
-Optional für Preview-Deployments: einen **Preview Deploy Key** unter demselben Namen mit Environment **Preview** anlegen.
+**Preview-Deployments** (Pushes auf andere Branches als `main`) brauchen ebenfalls einen Key, sonst schlagen sie rot fehl. Dafür gibt es zwei Wege:
+- einen **Preview Deploy Key** im Convex-Dashboard erzeugen und unter demselben Namen mit Environment **Preview** anlegen (Convex legt dann je Branch ein eigenes Test-Backend an), oder
+- Previews in Vercel abschalten: *Settings → Git → Ignored Build Step* auf „Only build production“ stellen.
 
 ### 2b. Netlify
 
