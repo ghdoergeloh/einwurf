@@ -31,6 +31,7 @@ export const create = mutation({
       if (args.bbox.length !== 4) throw new ConvexError("Ungültiger Ausschnitt");
       assertLatLng(s, w);
       assertLatLng(n, e);
+      if (!(w < e && s < n)) throw new ConvexError("Ungültiger Ausschnitt");
     }
     const existing = await ctx.db
       .query("campaigns")

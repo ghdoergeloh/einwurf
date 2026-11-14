@@ -39,7 +39,10 @@ const DEFAULT_ENDPOINTS = [
 const USER_AGENT = "Einwurf/1.0 (gemeinsame Flyer-Verteilkarte)";
 /** Höchstens so viele Overpass-Abrufe pro Minute: je Aktion und insgesamt. */
 export const MAX_FETCHES_PER_MINUTE_PER_CAMPAIGN = 12;
-export const MAX_FETCHES_PER_MINUTE_TOTAL = 40;
+/** Insgesamt für die Karte (alle Aktionen) … */
+export const MAX_FETCHES_PER_MINUTE_TOTAL = 30;
+/** … und getrennt davon fürs Vorladen (alle Aktionen), damit es die Karte nie ausbremst. */
+export const MAX_PREFETCH_FETCHES_PER_MINUTE = 15;
 /**
  * So lange gilt eine Kachel als „wird geladen“: so lange, wie ein Abruf über alle Server
  * höchstens dauern kann, plus Puffer fürs Speichern. Andere Aufrufe warten so lange auf den Cache.
@@ -83,8 +86,8 @@ export const store = internalMutation({
  * Läuft als Mutation und damit serialisiert – zwei Aufrufe bekommen nie dieselbe Kachel.
  */
 export const reserve = internalMutation({
-  args: { slug: v.string(), cells: v.array(v.string()) },
-  handler: async (ctx, { slug, cells }) => {
+  args: { slug: v.string(), cells: v.array(v.string()), kind: v.optional(v.union(v.literal("map"), v.literal("prefetch"))) },
+  handler: async (ctx, { slug, cells, kind = "map" }) => {
     const now = Date.now();
     const toFetch: string[] = [];
     const waitFor: string[] = [];
@@ -96,15 +99,18 @@ export const reserve = internalMutation({
     if (toFetch.length === 0) return { toFetch, waitFor, lockIds: [] };
 
     const minuteAgo = now - 60_000;
-    const total = await ctx.db.query("overpassFetches").withIndex("by_at", (q) => q.gt("at", minuteAgo)).take(MAX_FETCHES_PER_MINUTE_TOTAL);
+    const totalLimit = kind === "prefetch" ? MAX_PREFETCH_FETCHES_PER_MINUTE : MAX_FETCHES_PER_MINUTE_TOTAL;
+    const total = (
+      await ctx.db.query("overpassFetches").withIndex("by_at", (q) => q.gt("at", minuteAgo)).take(MAX_FETCHES_PER_MINUTE_TOTAL + MAX_PREFETCH_FETCHES_PER_MINUTE + 10)
+    ).filter((f) => (f.kind ?? "map") === kind);
     const mine = await ctx.db
       .query("overpassFetches")
       .withIndex("by_slug_at", (q) => q.eq("slug", slug).gt("at", minuteAgo))
       .take(MAX_FETCHES_PER_MINUTE_PER_CAMPAIGN);
-    if (total.length >= MAX_FETCHES_PER_MINUTE_TOTAL || mine.length >= MAX_FETCHES_PER_MINUTE_PER_CAMPAIGN) {
+    if (total.length >= totalLimit || mine.length >= MAX_FETCHES_PER_MINUTE_PER_CAMPAIGN) {
       throw new ConvexError("Gerade werden sehr viele Häuser geladen. Bitte gleich noch einmal versuchen.");
     }
-    await ctx.db.insert("overpassFetches", { slug, at: now });
+    await ctx.db.insert("overpassFetches", { slug, kind, at: now });
     // Altes Protokoll nebenbei aufräumen.
     for (const old of await ctx.db.query("overpassFetches").withIndex("by_at", (q) => q.lt("at", now - 3_600_000)).take(50)) {
       await ctx.db.delete(old._id);
@@ -188,7 +194,12 @@ async function fetchOverpass(bbox: [number, number, number, number]): Promise<Bu
  * geladen wird). `rateKey` bestimmt das Kontingent pro Minute (Aktion oder Vorladen).
  * Erwartet geprüfte Kacheln. `fetched` sagt, ob Overpass gefragt wurde.
  */
-async function loadCells(ctx: ActionCtx, rateKey: string, cells: string[]): Promise<{ data: string[]; fetched: boolean }> {
+async function loadCells(
+  ctx: ActionCtx,
+  rateKey: string,
+  cells: string[],
+  kind: "map" | "prefetch" = "map",
+): Promise<{ data: string[]; fetched: boolean }> {
   const have = new Map<string, string>();
   const readCache = async (wanted: string[]) => {
     const now = Date.now();
@@ -200,7 +211,7 @@ async function loadCells(ctx: ActionCtx, rateKey: string, cells: string[]): Prom
   const missing = cells.filter((c) => !have.has(c));
   if (missing.length === 0) return { data: cells.map((c) => have.get(c)!), fetched: false };
 
-  const { toFetch, waitFor, lockIds } = await ctx.runMutation(internal.buildings.reserve, { slug: rateKey, cells: missing });
+  const { toFetch, waitFor, lockIds } = await ctx.runMutation(internal.buildings.reserve, { slug: rateKey, cells: missing, kind });
 
   if (toFetch.length > 0) {
     try {
@@ -299,12 +310,15 @@ export async function startPrefetch(ctx: MutationCtx, slug: string) {
   const batches = planPrefetch(prefetchArea(campaign), [campaign.center.lng, campaign.center.lat]);
   const job = {
     slug,
-    status: "running" as const,
+    // Nichts zu laden (z. B. alter, verdrehter Ausschnitt): gleich fertig statt ewig „läuft“.
+    status: batches.length ? ("running" as const) : ("done" as const),
     batches,
     total: batches.reduce((n, b) => n + b.length, 0),
     done: 0,
     failures: 0,
     updatedAt: now,
+    // Neue Laufnummer: Schritte einer älteren Kette werden ignoriert.
+    run: (existing?.run ?? 0) + 1,
   };
   let jobId: Id<"prefetchJobs">;
   if (existing) {
@@ -313,7 +327,7 @@ export async function startPrefetch(ctx: MutationCtx, slug: string) {
   } else {
     jobId = await ctx.db.insert("prefetchJobs", job);
   }
-  await ctx.scheduler.runAfter(0, internal.buildings.prefetchStep, { jobId });
+  if (job.status === "running") await ctx.scheduler.runAfter(0, internal.buildings.prefetchStep, { jobId, run: job.run });
   return jobId;
 }
 
@@ -333,8 +347,9 @@ export const prefetchStatus = query({
     if (!SLUG_PATTERN.test(slug)) return null;
     const job = await ctx.db.query("prefetchJobs").withIndex("by_slug", (q) => q.eq("slug", slug)).unique();
     if (!job) return null;
-    const stale = job.status === "running" && Date.now() - job.updatedAt > PREFETCH_STALE_MS;
-    return { status: stale ? ("failed" as const) : job.status, done: job.done, total: job.total };
+    // Ob ein Auftrag hängt, entscheidet der Browser anhand von updatedAt (eine Query wird
+    // nur bei Datenänderung neu berechnet, nicht mit der Zeit).
+    return { status: job.status, done: job.done, total: job.total, updatedAt: job.updatedAt, staleAfterMs: PREFETCH_STALE_MS };
   },
 });
 
@@ -345,10 +360,10 @@ export const prefetchJob = internalQuery({
 
 /** Ergebnis eines Schritts festhalten und den nächsten einplanen. */
 export const prefetchAdvance = internalMutation({
-  args: { jobId: v.id("prefetchJobs"), ok: v.boolean(), fetched: v.boolean() },
-  handler: async (ctx, { jobId, ok, fetched }) => {
+  args: { jobId: v.id("prefetchJobs"), run: v.number(), ok: v.boolean(), fetched: v.boolean() },
+  handler: async (ctx, { jobId, run, ok, fetched }) => {
     const job = await ctx.db.get(jobId);
-    if (!job || job.status !== "running") return;
+    if (!job || job.status !== "running" || (job.run ?? 0) !== run) return;
     const now = Date.now();
     if (ok) {
       const [first, ...rest] = job.batches;
@@ -359,7 +374,7 @@ export const prefetchAdvance = internalMutation({
       }
       await ctx.db.patch(jobId, { batches: rest, done, failures: 0, updatedAt: now });
       // Kam alles aus dem Cache, gleich weiter; sonst Overpass eine Pause gönnen.
-      await ctx.scheduler.runAfter(fetched ? PREFETCH_PAUSE_MS : 0, internal.buildings.prefetchStep, { jobId });
+      await ctx.scheduler.runAfter(fetched ? PREFETCH_PAUSE_MS : 0, internal.buildings.prefetchStep, { jobId, run });
     } else {
       const failures = job.failures + 1;
       if (failures >= PREFETCH_MAX_FAILURES) {
@@ -367,23 +382,23 @@ export const prefetchAdvance = internalMutation({
         return;
       }
       await ctx.db.patch(jobId, { failures, updatedAt: now });
-      await ctx.scheduler.runAfter(PREFETCH_RETRY_MS * failures, internal.buildings.prefetchStep, { jobId });
+      await ctx.scheduler.runAfter(PREFETCH_RETRY_MS * failures, internal.buildings.prefetchStep, { jobId, run });
     }
   },
 });
 
 /** Ein Schritt: den nächsten Block laden. */
 export const prefetchStep = internalAction({
-  args: { jobId: v.id("prefetchJobs") },
-  handler: async (ctx, { jobId }) => {
+  args: { jobId: v.id("prefetchJobs"), run: v.number() },
+  handler: async (ctx, { jobId, run }) => {
     const job = await ctx.runQuery(internal.buildings.prefetchJob, { jobId });
-    if (!job || job.status !== "running" || job.batches.length === 0) return;
+    if (!job || job.status !== "running" || (job.run ?? 0) !== run || job.batches.length === 0) return;
     try {
-      const { fetched } = await loadCells(ctx, prefetchRateKey(job.slug), job.batches[0]);
-      await ctx.runMutation(internal.buildings.prefetchAdvance, { jobId, ok: true, fetched });
+      const { fetched } = await loadCells(ctx, prefetchRateKey(job.slug), job.batches[0], "prefetch");
+      await ctx.runMutation(internal.buildings.prefetchAdvance, { jobId, run, ok: true, fetched });
     } catch (e) {
       console.warn("Vorladen: Block fehlgeschlagen", e instanceof Error ? e.message : e);
-      await ctx.runMutation(internal.buildings.prefetchAdvance, { jobId, ok: false, fetched: false });
+      await ctx.runMutation(internal.buildings.prefetchAdvance, { jobId, run, ok: false, fetched: false });
     }
   },
 });

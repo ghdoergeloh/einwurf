@@ -55,10 +55,17 @@ export default defineSchema({
     done: v.number(),
     failures: v.number(),
     updatedAt: v.number(),
+    /** Laufnummer; Schritte einer älteren Kette werden ignoriert. */
+    run: v.optional(v.number()),
   }).index("by_slug", ["slug"]),
 
   /** Protokoll der Overpass-Abrufe für die Begrenzung pro Minute. */
-  overpassFetches: defineTable({ slug: v.string(), at: v.number() })
+  overpassFetches: defineTable({
+    slug: v.string(),
+    at: v.number(),
+    /** „map“ (Karte, Standard) oder „prefetch“ (Vorladen); getrennte Gesamtkontingente. */
+    kind: v.optional(v.union(v.literal("map"), v.literal("prefetch"))),
+  })
     .index("by_at", ["at"])
     .index("by_slug_at", ["slug", "at"]),
 });

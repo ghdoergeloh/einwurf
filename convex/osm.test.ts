@@ -24,9 +24,30 @@ describe("planPrefetch", () => {
     }
   });
 
-  test("beginnt am Startpunkt", () => {
+  test("beginnt am Startpunkt und geht nach außen", () => {
     const start = `${Math.floor(EFB[0] / CELL_SIZE)}:${Math.floor(EFB[1] / CELL_SIZE)}`;
     expect(batches[0]).toContain(start);
+    const kx = Math.cos((EFB[1] * Math.PI) / 180);
+    const dist = (b: string[]) => {
+      const c = b.map((k) => parseCellKey(k)!);
+      const mx = ((Math.min(...c.map((p) => p.x)) + Math.max(...c.map((p) => p.x)) + 1) / 2) * CELL_SIZE;
+      const my = ((Math.min(...c.map((p) => p.y)) + Math.max(...c.map((p) => p.y)) + 1) / 2) * CELL_SIZE;
+      return Math.hypot((mx - EFB[0]) * kx, my - EFB[1]);
+    };
+    const d = batches.map(dist);
+    for (let i = 1; i < d.length; i++) expect(d[i]).toBeGreaterThanOrEqual(d[i - 1] - 1e-9);
+  });
+
+  test("riesiger oder weltweiter Ausschnitt: schnell und begrenzt", () => {
+    const t0 = performance.now();
+    const world = planPrefetch([-180, -89, 179.99, 89], EFB);
+    expect(performance.now() - t0).toBeLessThan(50);
+    expect(world.flat().length).toBeLessThanOrEqual(600);
+    expect(world[0]).toContain(`${Math.floor(EFB[0] / CELL_SIZE)}:${Math.floor(EFB[1] / CELL_SIZE)}`);
+  });
+
+  test("verdrehter Ausschnitt: kein Plan", () => {
+    expect(planPrefetch([7, 50.8, 6.9, 50.7], EFB)).toEqual([]);
   });
 
   test("großes Gebiet: begrenzt, die fernen Blöcke fallen weg", () => {

@@ -177,7 +177,7 @@ export function decodeBuildings(data: string): BuildingFeature[] {
   }));
 }
 
-/** Höchstens so viele Kacheln lädt das Vorladen je Aktion (etwa 30–40 km² in Mitteleuropa). */
+/** Höchstens so viele Kacheln lädt das Vorladen je Aktion (in Mitteleuropa etwa 100–120 km², etwa ganz Bornheim). */
 export const MAX_PREFETCH_CELLS = 600;
 /** Ein Vorlade-Abruf umfasst einen Block von 6 × 4 Kacheln (= MAX_CELLS_PER_LOAD, Spanne < MAX_CELL_SPAN). */
 const BLOCK_W = 6;
@@ -189,18 +189,34 @@ const BLOCK_H = 4;
  */
 export function planPrefetch(bbox: BBox, start: [number, number], maxCells = MAX_PREFETCH_CELLS): string[][] {
   const [w, s, e, n] = bbox;
-  const x0 = Math.floor(w / CELL_SIZE);
-  const x1 = Math.floor(e / CELL_SIZE);
-  const y0 = Math.floor(s / CELL_SIZE);
-  const y1 = Math.floor(n / CELL_SIZE);
+  if (!(w < e && s < n)) return [];
+  // Nur ein Fenster um den Startpunkt betrachten: Mehr als maxCells Kacheln werden ohnehin
+  // nicht geladen, und so bleibt die Planung auch für riesige Ausschnitte schnell.
+  const r = Math.ceil(Math.sqrt(maxCells)) + Math.max(BLOCK_W, BLOCK_H);
+  const sx = Math.floor(start[0] / CELL_SIZE);
+  const sy = Math.floor(start[1] / CELL_SIZE);
+  const x0 = Math.max(Math.floor(w / CELL_SIZE), sx - r);
+  const x1 = Math.min(Math.floor(e / CELL_SIZE), sx + r);
+  const y0 = Math.max(Math.floor(s / CELL_SIZE), sy - r);
+  const y1 = Math.min(Math.floor(n / CELL_SIZE), sy + r);
+  if (x0 > x1 || y0 > y1) return [];
   const blocks: { cells: string[]; dist: number }[] = [];
-  for (let bx = x0; bx <= x1; bx += BLOCK_W) {
-    for (let by = y0; by <= y1; by += BLOCK_H) {
+  // Raster so ausrichten, dass die Startkachel mitten in einem Block liegt.
+  const ox = sx - Math.floor(BLOCK_W / 2);
+  const oy = sy - Math.floor(BLOCK_H / 2);
+  const firstX = ox - Math.ceil((ox - x0) / BLOCK_W) * BLOCK_W;
+  const firstY = oy - Math.ceil((oy - y0) / BLOCK_H) * BLOCK_H;
+  for (let bx = firstX; bx <= x1; bx += BLOCK_W) {
+    for (let by = firstY; by <= y1; by += BLOCK_H) {
       const cells: string[] = [];
-      for (let x = bx; x < Math.min(bx + BLOCK_W, x1 + 1); x++)
-        for (let y = by; y < Math.min(by + BLOCK_H, y1 + 1); y++) cells.push(cellKey(x, y));
-      const cx = (bx + Math.min(BLOCK_W, x1 + 1 - bx) / 2) * CELL_SIZE;
-      const cy = (by + Math.min(BLOCK_H, y1 + 1 - by) / 2) * CELL_SIZE;
+      const xa = Math.max(bx, x0);
+      const xb = Math.min(bx + BLOCK_W, x1 + 1);
+      const ya = Math.max(by, y0);
+      const yb = Math.min(by + BLOCK_H, y1 + 1);
+      if (xa >= xb || ya >= yb) continue;
+      for (let x = xa; x < xb; x++) for (let y = ya; y < yb; y++) cells.push(cellKey(x, y));
+      const cx = ((xa + xb) / 2) * CELL_SIZE;
+      const cy = ((ya + yb) / 2) * CELL_SIZE;
       // Abstand in etwa gleichen Metern (Länge schrumpft mit dem Breitengrad).
       const kx = Math.cos((start[1] * Math.PI) / 180);
       blocks.push({ cells, dist: Math.hypot((cx - start[0]) * kx, cy - start[1]) });

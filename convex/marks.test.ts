@@ -45,6 +45,13 @@ describe("campaigns", () => {
     await expect(t.mutation(api.campaigns.create, { ...base, slug: SLUG })).rejects.toThrow();
   });
 
+  test("verdrehter Ausschnitt wird abgelehnt", async () => {
+    const t = convexTest(schema, modules);
+    const base = { slug: SLUG, name: "x", placeLabel: "y", center: { lat: 50, lng: 7 } };
+    await expect(t.mutation(api.campaigns.create, { ...base, bbox: [7.1, 50, 7.0, 50.1] })).rejects.toThrow(/Ausschnitt/);
+    await expect(t.mutation(api.campaigns.create, { ...base, bbox: [7.0, 50.1, 7.1, 50] })).rejects.toThrow(/Ausschnitt/);
+  });
+
   test("leerer oder zu langer Name wird abgelehnt", async () => {
     const t = convexTest(schema, modules);
     const base = { slug: SLUG, placeLabel: "y", center: { lat: 1, lng: 1 } };

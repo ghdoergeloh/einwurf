@@ -152,16 +152,27 @@ export function ShareSheet({ slug, url, title, isNew, onClose }: Props) {
 
 /** Häuser des Gebiets vorab in den Cache laden, damit Helfer unterwegs nicht warten. */
 function PrefetchPanel({ slug }: { slug: string }) {
-  const status = useQuery(api.buildings.prefetchStatus, { slug });
+  const job = useQuery(api.buildings.prefetchStatus, { slug });
   const start = useMutation(api.buildings.prefetch);
   const [starting, setStarting] = useState(false);
-  if (status === undefined) return null;
-  const running = status?.status === "running";
-  const pct = status && status.total > 0 ? Math.round((status.done / status.total) * 100) : 0;
+  const [now, setNow] = useState(() => Date.now());
+  useEffect(() => {
+    const id = setInterval(() => setNow(Date.now()), 15_000);
+    return () => clearInterval(id);
+  }, []);
+  if (job === undefined) return null;
+
+  // Läuft ein Auftrag schon lange nicht weiter, gilt er als hängen geblieben.
+  const status = job === null ? "none" : job.status === "running" && now - job.updatedAt > job.staleAfterMs ? "failed" : job.status;
+  const pct = job && job.total > 0 ? Math.round((job.done / job.total) * 100) : 0;
+  const run = () => {
+    setStarting(true);
+    start({ slug }).finally(() => setStarting(false));
+  };
 
   return (
     <div className="mt-4 rounded-2xl bg-paper p-4 text-sm" data-testid="prefetch">
-      {running ? (
+      {status === "running" && (
         <>
           <div className="flex items-center justify-between gap-3">
             <span className="font-medium">Häuser des Gebiets werden vorgeladen …</span>
@@ -172,25 +183,35 @@ function PrefetchPanel({ slug }: { slug: string }) {
           </div>
           <p className="mt-2 text-xs text-muted">Läuft im Hintergrund weiter, auch wenn du die Seite schließt.</p>
         </>
-      ) : (
+      )}
+      {status === "done" && (
         <div className="flex items-center justify-between gap-3">
-          <span className={status?.status === "done" ? "font-medium" : "text-muted"}>
-            {status?.status === "done"
-              ? "Häuser des Gebiets sind vorgeladen ✓"
-              : status?.status === "failed"
-                ? "Vorladen hat nicht geklappt (OpenStreetMap überlastet)."
-                : "Häuser vorab laden, damit unterwegs nichts wartet."}
+          <span className="font-medium">Häuser des Gebiets sind vorgeladen ✓</span>
+          <button
+            type="button"
+            disabled={starting}
+            onClick={run}
+            title="Fehlende oder veraltete Häuser nachladen"
+            className="shrink-0 text-xs text-muted underline underline-offset-2 hover:text-ink disabled:opacity-40"
+          >
+            Aktualisieren
+          </button>
+        </div>
+      )}
+      {(status === "none" || status === "failed") && (
+        <div className="flex items-center justify-between gap-3">
+          <span className="text-muted">
+            {status === "failed"
+              ? "Vorladen hat nicht geklappt (OpenStreetMap überlastet)."
+              : "Häuser vorab laden, damit unterwegs nichts wartet."}
           </span>
           <button
             type="button"
             disabled={starting}
-            onClick={() => {
-              setStarting(true);
-              start({ slug }).finally(() => setStarting(false));
-            }}
+            onClick={run}
             className="shrink-0 rounded-xl bg-ink px-3 py-2 text-xs font-medium text-white transition hover:bg-ink-2 disabled:opacity-40"
           >
-            {status?.status === "done" ? "Erneut prüfen" : status?.status === "failed" ? "Nochmal versuchen" : "Gebiet vorladen"}
+            {status === "failed" ? "Nochmal versuchen" : "Gebiet vorladen"}
           </button>
         </div>
       )}

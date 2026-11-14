@@ -25,7 +25,8 @@ export function parseNominatim(results: NominatimResult[]): Place[] {
       short: r.name || r.display_name.split(",")[0],
       lat: Number(r.lat),
       lng: Number(r.lon),
-      bbox: b && b.every(Number.isFinite) ? [b[2], b[0], b[3], b[1]] : null,
+      // Orte über die Datumsgrenze (West > Ost) bekommen keinen Ausschnitt, nur die Mitte.
+      bbox: b && b.every(Number.isFinite) && b[2] < b[3] && b[0] < b[1] ? [b[2], b[0], b[3], b[1]] : null,
     };
   });
 }
