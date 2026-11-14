@@ -35,8 +35,11 @@ const MAX_CACHE_BYTES = 900_000;
  * dann wartet eine Abfrage 20–40 s in der Warteschlange, egal wie klein sie ist.
  */
 const OVERPASS_TIMEOUT_MS = 60_000;
-/** Antwortet ein Server so lange nicht, wird zusätzlich der nächste gefragt; die erste Antwort gewinnt. */
-const OVERPASS_HEDGE_MS = 10_000;
+/**
+ * Antwortet ein Server so lange nicht, wird zusätzlich der nächste gefragt; die erste Antwort
+ * gewinnt. Länger als eine übliche Antwort (20–30 s), damit nicht jeder Abruf alle Server belastet.
+ */
+const OVERPASS_HEDGE_MS = 35_000;
 /** Öffentliche Overpass-Server, der Reihe nach. Überschreibbar mit der Convex-Umgebungsvariable OVERPASS_URLS. */
 const DEFAULT_ENDPOINTS = [
   "https://overpass-api.de/api/interpreter",
@@ -99,17 +102,27 @@ export const store = internalMutation({
  * Läuft als Mutation und damit serialisiert – zwei Aufrufe bekommen nie dieselbe Kachel.
  */
 export const reserve = internalMutation({
-  args: { slug: v.string(), cells: v.array(v.string()), kind: v.optional(v.union(v.literal("map"), v.literal("prefetch"))) },
-  handler: async (ctx, { slug, cells, kind = "map" }) => {
+  args: {
+    slug: v.string(),
+    cells: v.array(v.string()),
+    kind: v.optional(v.union(v.literal("map"), v.literal("prefetch"))),
+    /** Nachbarkacheln als Zugabe; nur, wenn ohnehin eine angefragte Kachel geladen wird. */
+    extra: v.optional(v.array(v.string())),
+  },
+  handler: async (ctx, { slug, cells, kind = "map", extra = [] }) => {
     const now = Date.now();
     const toFetch: string[] = [];
     const waitFor: string[] = [];
-    for (const cell of cells) {
+    const locked = async (cell: string) => {
       const lock = await ctx.db.query("cellLocks").withIndex("by_cell", (q) => q.eq("cell", cell)).unique();
-      if (lock && lock.until > now) waitFor.push(cell);
+      return !!lock && lock.until > now;
+    };
+    for (const cell of cells) {
+      if (await locked(cell)) waitFor.push(cell);
       else toFetch.push(cell);
     }
     if (toFetch.length === 0) return { toFetch, waitFor, lockIds: [] };
+    for (const cell of extra) if (!cells.includes(cell) && !(await locked(cell))) toFetch.push(cell);
 
     const minuteAgo = now - 60_000;
     const totalLimit = kind === "prefetch" ? MAX_PREFETCH_FETCHES_PER_MINUTE : MAX_FETCHES_PER_MINUTE_TOTAL;
@@ -298,10 +311,7 @@ async function loadCells(
     );
     extra = candidates.filter((c) => !fresh.has(c)).slice(0, MAX_FETCH_CELLS - missing.length);
   }
-  const reserved = await ctx.runMutation(internal.buildings.reserve, { slug: rateKey, cells: [...missing, ...extra], kind });
-  const { toFetch, lockIds } = reserved;
-  // Warten nur auf angefragte Kacheln, die gerade jemand anderes lädt; Nachbarn sind Zugabe.
-  const waitFor = reserved.waitFor.filter((c) => missing.includes(c));
+  const { toFetch, waitFor, lockIds } = await ctx.runMutation(internal.buildings.reserve, { slug: rateKey, cells: missing, kind, extra });
 
   if (toFetch.length > 0) {
     try {

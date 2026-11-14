@@ -87,7 +87,7 @@ describe("buildings.load", () => {
     expect(fetchMock.mock.calls.map((c) => String(c[0]))).toEqual(["https://eins.example/api", "https://zwei.example/api"]);
   });
 
-  test("langsamer Server: nach 10 s wird zusätzlich der nächste gefragt, die erste Antwort gewinnt", async () => {
+  test("Server hängt: nach 35 s wird zusätzlich der nächste gefragt, die erste Antwort gewinnt", async () => {
     vi.useFakeTimers({ toFake: ["setTimeout", "clearTimeout", "Date"] });
     try {
       const t = await setup();
@@ -105,7 +105,7 @@ describe("buildings.load", () => {
       );
       vi.stubGlobal("fetch", fetchMock);
       const pending = t.action(api.buildings.load, { slug: SLUG, cells: [CELL_A] });
-      await vi.advanceTimersByTimeAsync(9_000);
+      await vi.advanceTimersByTimeAsync(34_000);
       expect(fetchMock).toHaveBeenCalledTimes(1);
       await vi.advanceTimersByTimeAsync(1_500);
       expect(ids(await pending)).toEqual(["way/1"]);
@@ -128,6 +128,40 @@ describe("buildings.load", () => {
       const pending = t.action(api.buildings.load, { slug: SLUG, cells: [CELL_A] });
       await vi.advanceTimersByTimeAsync(41_000);
       expect(ids(await pending)).toEqual(["way/1"]);
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
+  test("normale Wartezeit (30 s): nur ein Server wird gefragt", async () => {
+    vi.useFakeTimers({ toFake: ["setTimeout", "clearTimeout", "Date"] });
+    try {
+      const t = await setup();
+      vi.stubEnv("OVERPASS_URLS", "https://eins.example/api,https://zwei.example/api");
+      const fetchMock = vi.fn(() => new Promise<Response>((r) => setTimeout(() => r(overpassOk()), 30_000)));
+      vi.stubGlobal("fetch", fetchMock);
+      const pending = t.action(api.buildings.load, { slug: SLUG, cells: [CELL_A] });
+      await vi.advanceTimersByTimeAsync(31_000);
+      await pending;
+      expect(fetchMock).toHaveBeenCalledTimes(1);
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
+  test("angefragte Kachel lädt gerade jemand anderes: kein Abruf nur für Nachbarn", async () => {
+    vi.useFakeTimers({ toFake: ["setTimeout", "clearTimeout", "Date"] });
+    try {
+      const t = await setup();
+      await t.mutation(internal.buildings.reserve, { slug: "anderer", cells: [CELL_A] });
+      const fetchMock = vi.fn(async () => overpassOk());
+      vi.stubGlobal("fetch", fetchMock);
+      const pending = t.action(api.buildings.load, { slug: SLUG, cells: [CELL_A] }).catch((e: Error) => e);
+      await vi.advanceTimersByTimeAsync(200_000);
+      await pending;
+      expect(fetchMock).not.toHaveBeenCalled();
+      const mine = await t.run((ctx) => ctx.db.query("overpassFetches").filter((q) => q.eq(q.field("slug"), SLUG)).collect());
+      expect(mine).toHaveLength(0);
     } finally {
       vi.useRealTimers();
     }

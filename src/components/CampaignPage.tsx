@@ -282,7 +282,7 @@ function StatusPill({
         <span>
           Häuser werden geladen …
           {slow && (
-            <span className="block text-muted">OpenStreetMap ist gerade langsam, das kann bis zu einer Minute dauern.</span>
+            <span className="block text-muted">OpenStreetMap ist gerade langsam, das kann eine Weile dauern.</span>
           )}
         </span>
       </div>
