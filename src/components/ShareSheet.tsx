@@ -162,8 +162,10 @@ function PrefetchPanel({ slug }: { slug: string }) {
   }, []);
   if (job === undefined) return null;
 
-  // Läuft ein Auftrag schon lange nicht weiter, gilt er als hängen geblieben.
-  const status = job === null ? "none" : job.status === "running" && now - job.updatedAt > job.staleAfterMs ? "failed" : job.status;
+  // Läuft ein Auftrag schon lange nicht weiter, gilt er als hängen geblieben. Eine Minute
+  // großzügiger als der Server, falls die Uhr des Handys etwas vorgeht.
+  const stale = job !== null && job.status === "running" && now - job.updatedAt > job.staleAfterMs + 60_000;
+  const status = job === null ? "none" : stale ? "failed" : job.status;
   const pct = job && job.total > 0 ? Math.round((job.done / job.total) * 100) : 0;
   const run = () => {
     setStarting(true);

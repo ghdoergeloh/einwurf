@@ -2,7 +2,7 @@
 import { convexTest } from "convex-test";
 import { afterEach, beforeEach, describe, expect, test, vi } from "vitest";
 import { api } from "./_generated/api";
-import { MAX_PREFETCH_FETCHES_PER_MINUTE } from "./buildings";
+import { MAX_FETCHES_PER_MINUTE_TOTAL, MAX_PREFETCH_FETCHES_PER_MINUTE } from "./buildings";
 import schema from "./schema";
 
 const modules = import.meta.glob("./**/*.ts");
@@ -96,6 +96,9 @@ describe("Vorladen", () => {
     await t.run(async (ctx) => {
       for (let i = 0; i < MAX_PREFETCH_FETCHES_PER_MINUTE; i++)
         await ctx.db.insert("overpassFetches", { slug: `andere${i}:vorladen`, kind: "prefetch", at: Date.now() });
+      // …und die Karte fast am eigenen Limit: Ohne Trennung nach Art wäre jetzt Schluss.
+      for (let i = 0; i < MAX_FETCHES_PER_MINUTE_TOTAL - 1; i++)
+        await ctx.db.insert("overpassFetches", { slug: `karte${i}`, kind: "map", at: Date.now() });
     });
     await expect(t.action(api.buildings.load, { slug: SLUG, cells: ["1500:10200"] })).resolves.toEqual(["[]"]);
     await t.finishAllScheduledFunctions(vi.runAllTimers);
