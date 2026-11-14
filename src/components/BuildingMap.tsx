@@ -16,6 +16,7 @@ import {
 } from "../lib/overpass";
 import { DOUBLE_TAP_MS, dragZoomDelta, onPress, type Press } from "../lib/taps";
 import { markCellsIn } from "../../convex/cells";
+import { nextStatus, statusOf, type HouseStatus, type MarkStatus } from "../../convex/status";
 
 // Ab MapLibre 6 braucht jeder Bundler den Pfad zum Worker.
 maplibregl.setWorkerUrl(workerUrl);
@@ -38,11 +39,15 @@ const COLOR_HOUSE = "#24262c";
 const COLOR_HOUSE_LINE = "#0d0e11";
 const COLOR_MARKED = "#ffd60a";
 const COLOR_MARKED_LINE = "#c99a00";
+/** Einwerfen nicht möglich: dunkles, gräuliches Gelb. */
+export const COLOR_BLOCKED = "#8c7d3f";
+const COLOR_BLOCKED_LINE = "#5e5326";
 
 export interface Mark {
   osmId: string;
   /** [lng, lat] */
   center: number[];
+  status: MarkStatus;
 }
 
 export interface MapControls {
@@ -58,7 +63,8 @@ interface Props {
   marks: Mark[];
   /** Sichtbare Markierungs-Zellen; null = zu weit herausgezoomt. */
   onCellsChange: (cells: string[] | null) => void;
-  onToggle: (osmId: string, marked: boolean, center: number[]) => void;
+  /** Neuer Zustand nach einem Tipp (offen → Flyer drin → nicht möglich → offen). */
+  onToggle: (osmId: string, status: HouseStatus, center: number[]) => void;
   onLoadState: (s: LoadState) => void;
   /** Lädt die Häuser der Kacheln ("x:y"), über Convex mit gemeinsamem Cache. */
   loadBuildings: (cells: string[]) => Promise<BuildingFeature[]>;
@@ -97,7 +103,7 @@ export function BuildingMap({
     const buildings = new Map<string, BuildingFeature>();
     const loadedCells = new Set<string>();
     /** osmIds, die gerade als markiert eingefärbt sind (feature-state). */
-    const painted = new Set<string>();
+    const painted = new Map<string, MarkStatus>();
     let inflight = false;
     let disposed = false;
     let loaded = false;
@@ -149,23 +155,23 @@ export function BuildingMap({
     function syncMarks() {
       if (!loaded) return;
       const current = marksRef.current;
-      for (const id of painted) {
+      for (const id of [...painted.keys()]) {
         if (!current.has(id)) {
-          map.setFeatureState({ source: "buildings", id }, { marked: false });
+          map.setFeatureState({ source: "buildings", id }, { status: "none" });
           painted.delete(id);
         }
       }
-      for (const id of current.keys()) {
-        if (!painted.has(id)) {
-          map.setFeatureState({ source: "buildings", id }, { marked: true });
-          painted.add(id);
+      for (const [id, m] of current) {
+        if (painted.get(id) !== m.status) {
+          map.setFeatureState({ source: "buildings", id }, { status: m.status });
+          painted.set(id, m.status);
         }
       }
       const points: FeatureCollection<Point> = {
         type: "FeatureCollection",
         features: [...current.values()].map((m) => ({
           type: "Feature",
-          properties: { osmId: m.osmId, shape: buildings.has(m.osmId) },
+          properties: { osmId: m.osmId, shape: buildings.has(m.osmId), status: m.status },
           geometry: { type: "Point", coordinates: m.center },
         })),
       };
@@ -266,15 +272,17 @@ export function BuildingMap({
       map.addSource("buildings", { type: "geojson", data: EMPTY, promoteId: "osmId" });
       map.addSource("mark-points", { type: "geojson", data: EMPTY });
 
-      const isMarked: ExpressionSpecification = ["boolean", ["feature-state", "marked"], false];
+      const state: ExpressionSpecification = ["coalesce", ["feature-state", "status"], "none"];
+      const byState = (none: string | number, done: string | number, blocked: string | number): ExpressionSpecification =>
+        ["match", state, "done", done, "blocked", blocked, none];
       map.addLayer({
         id: "buildings-fill",
         type: "fill",
         source: "buildings",
         minzoom: BUILDING_MIN_ZOOM - 0.5,
         paint: {
-          "fill-color": ["case", isMarked, COLOR_MARKED, COLOR_HOUSE],
-          "fill-opacity": ["case", isMarked, 1, 0.9],
+          "fill-color": byState(COLOR_HOUSE, COLOR_MARKED, COLOR_BLOCKED),
+          "fill-opacity": byState(0.9, 1, 1),
         },
       });
       map.addLayer({
@@ -283,12 +291,12 @@ export function BuildingMap({
         source: "buildings",
         minzoom: BUILDING_MIN_ZOOM - 0.5,
         paint: {
-          "line-color": ["case", isMarked, COLOR_MARKED_LINE, COLOR_HOUSE_LINE],
-          "line-width": ["interpolate", ["linear"], ["zoom"], 15, 0.6, 18, ["case", isMarked, 2, 0.8]],
+          "line-color": byState(COLOR_HOUSE_LINE, COLOR_MARKED_LINE, COLOR_BLOCKED_LINE),
+          "line-width": ["interpolate", ["linear"], ["zoom"], 15, 0.6, 18, byState(0.8, 2, 2)],
         },
       });
       const pointPaint: CircleLayerSpecification["paint"] = {
-        "circle-color": COLOR_MARKED,
+        "circle-color": ["match", ["get", "status"], "blocked", COLOR_BLOCKED, COLOR_MARKED],
         "circle-radius": ["interpolate", ["linear"], ["zoom"], 10, 2, 14, 4.5, 18, 7],
         "circle-stroke-color": "#15171c",
         "circle-stroke-width": 1,
@@ -346,13 +354,10 @@ export function BuildingMap({
     function toggle(osmId: string | null) {
       if (disposed || !osmId) return;
       const mark = marksRef.current.get(osmId);
-      if (mark) {
-        onToggleRef.current(osmId, false, mark.center);
-      } else {
-        const building = buildings.get(osmId);
-        if (!building) return;
-        onToggleRef.current(osmId, true, centerOf(building));
-      }
+      const next = nextStatus(statusOf(mark));
+      const center = mark?.center ?? (buildings.has(osmId) ? centerOf(buildings.get(osmId)!) : null);
+      if (!center) return;
+      onToggleRef.current(osmId, next, center);
       navigator.vibrate?.(12);
     }
 

@@ -3,6 +3,7 @@ import { useAction, useConvexConnectionState, useMutation, useQueries, useQuery 
 import { ConvexError } from "convex/values";
 import { api } from "../../convex/_generated/api";
 import { markCellOf } from "../../convex/cells";
+import { countDelta, statusOf, type HouseStatus } from "../../convex/status";
 import { decodeBuildings } from "../../convex/osm";
 import { BuildingMap, type LoadState, type MapControls, type Mark } from "./BuildingMap";
 import { ShareSheet } from "./ShareSheet";
@@ -44,16 +45,22 @@ export function CampaignPage({ slug, isNew }: Props) {
     const cell = markCellOf(args.center[0], args.center[1]);
     const list = store.getQuery(api.marks.inCell, { slug: args.slug, cell });
     if (list === undefined) return;
-    const was = list.some((m) => m.osmId === args.osmId);
+    const target: HouseStatus = args.status ?? (args.marked ? "done" : "none");
+    const from = statusOf(list.find((m) => m.osmId === args.osmId));
     const without = list.filter((m) => m.osmId !== args.osmId);
     store.setQuery(
       api.marks.inCell,
       { slug: args.slug, cell },
-      args.marked ? [...without, { osmId: args.osmId, center: args.center }] : without,
+      target === "none" ? without : [...without, { osmId: args.osmId, center: args.center, status: target }],
     );
     const c = store.getQuery(api.campaigns.get, { slug: args.slug });
-    const delta = args.marked === was ? 0 : args.marked ? 1 : -1;
-    if (c) store.setQuery(api.campaigns.get, { slug: args.slug }, { ...c, markCount: Math.max(0, c.markCount + delta) });
+    const d = countDelta(from, target);
+    if (c)
+      store.setQuery(api.campaigns.get, { slug: args.slug }, {
+        ...c,
+        markCount: Math.max(0, c.markCount + d.done),
+        blockedCount: Math.max(0, c.blockedCount + d.blocked),
+      });
   });
 
   useEffect(() => {
@@ -92,8 +99,8 @@ export function CampaignPage({ slug, isNew }: Props) {
   }, []);
 
   const onToggle = useCallback(
-    (osmId: string, marked: boolean, center: number[]) => {
-      setMark({ slug, osmId, marked, center }).catch((err: unknown) => {
+    (osmId: string, status: HouseStatus, center: number[]) => {
+      setMark({ slug, osmId, status, center }).catch((err: unknown) => {
         showToast(
           err instanceof ConvexError && typeof err.data === "string"
             ? err.data
@@ -108,6 +115,7 @@ export function CampaignPage({ slug, isNew }: Props) {
 
   const url = `${location.origin}${campaignPath(slug)}`;
   const count = campaign?.markCount ?? 0;
+  const blocked = campaign?.blockedCount ?? 0;
 
   return (
     <div className="fixed inset-0 touch-none overflow-hidden overscroll-none bg-[#e9e7e1] select-none">
@@ -147,6 +155,21 @@ export function CampaignPage({ slug, isNew }: Props) {
             </span>
             <span className="sr-only">Häuser mit Flyer</span>
           </div>
+          {blocked > 0 && (
+            <div
+              className="-ml-1.5 flex shrink-0 items-center gap-1 rounded-xl bg-[#8c7d3f] px-2 py-1.5 text-white"
+              title="Einwerfen nicht möglich"
+            >
+              <svg viewBox="0 0 24 24" className="size-3.5" fill="none" stroke="currentColor" strokeWidth="2.5" aria-hidden="true">
+                <circle cx="12" cy="12" r="8" />
+                <path d="m6.5 6.5 11 11" />
+              </svg>
+              <span className="text-sm font-semibold tabular-nums" data-testid="blocked-count">
+                {blocked}
+              </span>
+              <span className="sr-only">Häuser, bei denen Einwerfen nicht möglich war</span>
+            </div>
+          )}
           <button
             type="button"
             onClick={() => setShareOpen(true)}
@@ -239,10 +262,13 @@ function StatusPill({
     );
   return (
     <div className={`${base} bg-ink/90 text-white backdrop-blur`}>
-      <span className="size-3 shrink-0 rounded-[3px] bg-sun" />
+      <span className="flex shrink-0 flex-col gap-1" aria-hidden="true">
+        <span className="size-3 rounded-[3px] bg-sun" />
+        <span className="size-3 rounded-[3px] bg-[#8c7d3f]" />
+      </span>
       <span>
         Haus antippen, wenn der Flyer drin ist.
-        <span className="block text-white/60">Nochmal tippen macht es rückgängig.</span>
+        <span className="block text-white/60">Nochmal: nicht möglich (z. B. „Keine Werbung“). Nochmal: zurück.</span>
       </span>
     </div>
   );

@@ -76,7 +76,7 @@ describe("marks", () => {
     const t = await setup();
     await t.mutation(api.marks.set, { slug: SLUG, osmId: "way/1", marked: true, center: HOUSE });
     await t.mutation(api.marks.set, { slug: SLUG, osmId: "way/1", marked: true, center: HOUSE });
-    expect(await t.query(api.marks.inCell, { slug: SLUG, cell: CELL })).toEqual([{ osmId: "way/1", center: HOUSE }]);
+    expect(await t.query(api.marks.inCell, { slug: SLUG, cell: CELL })).toEqual([{ osmId: "way/1", center: HOUSE, status: "done" }]);
     expect((await t.query(api.campaigns.get, { slug: SLUG }))?.markCount).toBe(1);
 
     await t.mutation(api.marks.set, { slug: SLUG, osmId: "way/1", marked: false, center: HOUSE });
@@ -85,14 +85,49 @@ describe("marks", () => {
     expect((await t.query(api.campaigns.get, { slug: SLUG }))?.markCount).toBe(0);
   });
 
+  test("Zustände: Flyer drin → nicht möglich → offen, mit Zählern", async () => {
+    const t = await setup();
+    const get = () => t.query(api.campaigns.get, { slug: SLUG });
+    await t.mutation(api.marks.set, { slug: SLUG, osmId: "way/1", status: "done", center: HOUSE });
+    expect(await t.query(api.marks.inCell, { slug: SLUG, cell: CELL })).toEqual([{ osmId: "way/1", center: HOUSE, status: "done" }]);
+    expect(await get()).toMatchObject({ markCount: 1, blockedCount: 0 });
+
+    await t.mutation(api.marks.set, { slug: SLUG, osmId: "way/1", status: "blocked", center: HOUSE });
+    expect(await t.query(api.marks.inCell, { slug: SLUG, cell: CELL })).toEqual([{ osmId: "way/1", center: HOUSE, status: "blocked" }]);
+    expect(await get()).toMatchObject({ markCount: 0, blockedCount: 1 });
+
+    // gleicher Zielzustand zweimal (zwei Helfer gleichzeitig): keine Doppelzählung
+    await t.mutation(api.marks.set, { slug: SLUG, osmId: "way/1", status: "blocked", center: HOUSE });
+    expect(await get()).toMatchObject({ markCount: 0, blockedCount: 1 });
+
+    await t.mutation(api.marks.set, { slug: SLUG, osmId: "way/1", status: "none", center: HOUSE });
+    expect(await t.query(api.marks.inCell, { slug: SLUG, cell: CELL })).toEqual([]);
+    expect(await get()).toMatchObject({ markCount: 0, blockedCount: 0 });
+  });
+
+  test("ältere Markierungen ohne Zustand sind Flyer drin; ältere Clients mit marked funktionieren weiter", async () => {
+    const t = await setup();
+    await t.run(async (ctx) => {
+      const c = (await ctx.db.query("campaigns").first())!;
+      await ctx.db.insert("marks", { campaignId: c._id, osmId: "way/9", center: HOUSE, cell: CELL });
+      await ctx.db.patch(c._id, { markCount: 1 });
+    });
+    expect(await t.query(api.marks.inCell, { slug: SLUG, cell: CELL })).toEqual([{ osmId: "way/9", center: HOUSE, status: "done" }]);
+    await t.mutation(api.marks.set, { slug: SLUG, osmId: "way/9", status: "blocked", center: HOUSE });
+    expect(await t.query(api.campaigns.get, { slug: SLUG })).toMatchObject({ markCount: 0, blockedCount: 1 });
+    await t.mutation(api.marks.set, { slug: SLUG, osmId: "way/9", marked: false, center: HOUSE });
+    await t.mutation(api.marks.set, { slug: SLUG, osmId: "way/8", marked: true, center: HOUSE });
+    expect(await t.query(api.campaigns.get, { slug: SLUG })).toMatchObject({ markCount: 1, blockedCount: 0 });
+  });
+
   test("eine Zelle liefert nur ihre eigenen Häuser", async () => {
     const t = await setup();
     const far = [7.05, 50.05];
     await t.mutation(api.marks.set, { slug: SLUG, osmId: "way/1", marked: true, center: HOUSE });
     await t.mutation(api.marks.set, { slug: SLUG, osmId: "way/2", marked: true, center: far });
-    expect(await t.query(api.marks.inCell, { slug: SLUG, cell: CELL })).toEqual([{ osmId: "way/1", center: HOUSE }]);
+    expect(await t.query(api.marks.inCell, { slug: SLUG, cell: CELL })).toEqual([{ osmId: "way/1", center: HOUSE, status: "done" }]);
     expect(await t.query(api.marks.inCell, { slug: SLUG, cell: markCellOf(far[0], far[1]) })).toEqual([
-      { osmId: "way/2", center: far },
+      { osmId: "way/2", center: far, status: "done" },
     ]);
   });
 

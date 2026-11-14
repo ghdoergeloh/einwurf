@@ -108,15 +108,17 @@ try {
   const cx = box.x + box.width / 2;
   const cy = box.y + box.height / 2;
   const count = (page) => page.getByTestId("count").textContent();
+  const blocked = async (page) => ((await page.getByTestId("blocked-count").count()) ? page.getByTestId("blocked-count").textContent() : "0");
   const zoom = (page) => page.evaluate(() => window.__einwurfMap.getZoom());
-  /** Ist das Haus an diesem Bildschirmpunkt gelb eingefärbt (feature-state)? */
-  const markedAt = (page, x, y) =>
+  /** Zustand des Hauses an diesem Bildschirmpunkt laut Einfärbung (feature-state): none, done, blocked. */
+  const statusAt = (page, x, y) =>
     page.evaluate(([x, y]) => {
       const map = window.__einwurfMap;
       const r = map.getCanvasContainer().getBoundingClientRect();
       const [f] = map.queryRenderedFeatures([x - r.left, y - r.top], { layers: ["buildings-fill"] });
-      return f ? Boolean(map.getFeatureState({ source: "buildings", id: f.properties.osmId }).marked) : null;
+      return f ? (map.getFeatureState({ source: "buildings", id: f.properties.osmId }).status ?? "none") : null;
     }, [x, y]);
+  const next = { none: "done", done: "blocked", blocked: "none" };
 
   // Zwei schnelle Tipps auf verschiedene Häuser: beide markiert
   await p.mouse.click(cx, cy);
@@ -124,7 +126,7 @@ try {
   await p.waitForTimeout(1200);
   assert.equal(await count(p), "2");
   assert.equal(await count(p2), "2", "live beim zweiten Helfer");
-  assert.equal(await markedAt(p2, cx, cy), true, "beim zweiten Helfer gelb");
+  assert.equal(await statusAt(p2, cx, cy), "done", "beim zweiten Helfer gelb");
   await shot(p2, "3-live");
 
   // Wer später dazukommt, sieht die Häuser gelb (Markierung vor oder nach den Umrissen geladen)
@@ -134,8 +136,8 @@ try {
   track(p3);
   await p3.goto(url);
   await p3.waitForTimeout(2500);
-  assert.equal(await markedAt(p3, cx, cy), true, "nach Neuladen gelb");
-  assert.equal(await markedAt(p3, cx - 120, cy - 120), false, "Nachbarhaus bleibt grau");
+  assert.equal(await statusAt(p3, cx, cy), "done", "nach Neuladen gelb");
+  assert.equal(await statusAt(p3, cx - 120, cy - 120), "none", "Nachbarhaus bleibt grau");
   // Rausgezoomt: Markierungen als gelbe Punkte, Hinweis zum Heranzoomen
   await p3.evaluate(() => window.__einwurfMap.jumpTo({ zoom: 13.5 }));
   await p3.waitForTimeout(1500);
@@ -144,24 +146,39 @@ try {
   await p3.getByText("Heranzoomen, um Häuser zu sehen").waitFor();
   await shot(p3, "3b-zoomed-out");
 
-  // Der zweite Helfer nimmt eine Markierung zurück
+  // Der zweite Helfer tippt ein gelbes Haus nochmal an: „nicht möglich“ (dunkelgelb), bei allen
+  assert.equal(await blocked(p), "0", "ohne „nicht möglich“ keine zweite Zahl");
   await p2.mouse.click(cx, cy);
   await p2.waitForTimeout(1200);
   assert.equal(await count(p), "1");
+  assert.equal(await blocked(p), "1");
+  assert.equal(await statusAt(p, cx, cy), "blocked", "dunkelgelb beim ersten Helfer");
+  await shot(p, "3c-blocked");
+  // …und ein drittes Mal: wieder offen
+  await p2.mouse.click(cx, cy);
+  await p2.waitForTimeout(1200);
+  assert.equal(await statusAt(p, cx, cy), "none");
+  assert.equal(await blocked(p), "0");
+  await p2.mouse.click(cx, cy); // wieder gelb für die weiteren Schritte
+  await p2.waitForTimeout(1200);
+  assert.equal(await count(p), "2");
 
-  // Zwei Tipps mit 350 ms Pause sind zwei einzelne Tipps: markieren und zurücknehmen, kein Zoom
+  // Zwei Tipps mit 350 ms Pause sind zwei einzelne Tipps (offen → gelb → dunkelgelb), kein Zoom
   const z0 = await zoom(p);
   await p.mouse.click(cx - 120, cy - 120);
   await p.waitForTimeout(350);
   await p.mouse.click(cx - 120, cy - 120);
   await p.waitForTimeout(1200);
-  assert.equal(await count(p), "1", "langsamer Doppeltipp: an und wieder aus");
+  assert.equal(await statusAt(p, cx - 120, cy - 120), "blocked", "langsamer Doppeltipp: zwei Schritte weiter");
+  assert.equal(await count(p), "2");
+  assert.equal(await blocked(p), "1");
   assert.equal(await zoom(p), z0, "langsamer Doppeltipp zoomt nicht");
 
-  // Doppeltipp zoomt genau eine Stufe und markiert nichts
+  // Doppeltipp zoomt genau eine Stufe und schaltet nichts weiter
   await p.mouse.dblclick(cx - 120, cy - 120);
   await p.waitForTimeout(1200);
-  assert.equal(await count(p), "1", "Doppeltipp darf nicht markieren");
+  assert.equal(await count(p), "2", "Doppeltipp darf nicht markieren");
+  assert.equal(await blocked(p), "1", "Doppeltipp darf nicht markieren");
   assert.ok(Math.abs((await zoom(p)) - (z0 + 1)) < 0.01, "Doppeltipp zoomt eine Stufe");
   await shot(p, "4-after-dblclick");
 
@@ -173,19 +190,18 @@ try {
   await p.mouse.move(cx + 120, cy + 270, { steps: 8 });
   await p.mouse.up();
   await p.waitForTimeout(800);
-  assert.equal(await count(p), "1", "Doppeltipp-und-ziehen darf nicht markieren");
+  assert.equal(await count(p), "2", "Doppeltipp-und-ziehen darf nicht markieren");
+  assert.equal(await blocked(p), "1", "Doppeltipp-und-ziehen darf nicht markieren");
   assert.ok(Math.abs((await zoom(p)) - (z1 + 1)) < 0.05, "150 px ziehen = eine Zoomstufe");
 
   // Rückt die Karte in der Wartezeit weiter (Standortverfolgung), zählt das angetippte Haus
-  const before = await markedAt(p, cx, cy);
+  const before = await statusAt(p, cx, cy);
   await p.mouse.click(cx, cy);
   await p.evaluate(() => window.__einwurfMap.panBy([200, 0], { duration: 0 }));
   await p.waitForTimeout(800);
   await p.evaluate(() => window.__einwurfMap.panBy([-200, 0], { duration: 0 }));
   await p.waitForTimeout(500);
-  assert.equal(await markedAt(p, cx, cy), !before, "das angetippte Haus wurde umgeschaltet");
-  await p.mouse.click(cx, cy); // zurücksetzen
-  await p.waitForTimeout(800);
+  assert.equal(await statusAt(p, cx, cy), next[before], "das angetippte Haus wurde weitergeschaltet");
 
   // Funkloch: Die Verbindung zu Convex reißt ab → Hinweis, dass später gespeichert wird
   const off = await browser.newContext(phone);

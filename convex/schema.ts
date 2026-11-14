@@ -10,8 +10,10 @@ export default defineSchema({
     center: v.object({ lat: v.number(), lng: v.number() }),
     /** [west, süd, ost, nord] des gesuchten Ortes, für den Startausschnitt. */
     bbox: v.optional(v.array(v.number())),
-    /** Anzahl markierter Häuser, wird bei jeder Änderung mitgeführt. */
+    /** Anzahl Häuser mit Flyer („done“), wird bei jeder Änderung mitgeführt. */
     markCount: v.optional(v.number()),
+    /** Anzahl Häuser, bei denen Einwerfen nicht möglich war („blocked“). */
+    blockedCount: v.optional(v.number()),
   })
     .index("by_slug", ["slug"]),
 
@@ -23,6 +25,8 @@ export default defineSchema({
     center: v.array(v.number()),
     /** Rasterzelle des Mittelpunkts, siehe cells.ts. */
     cell: v.string(),
+    /** Zustand, siehe status.ts. Fehlt bei älteren Markierungen und heißt dann „done“. */
+    status: v.optional(v.union(v.literal("done"), v.literal("blocked"))),
   })
     .index("by_campaign_osm", ["campaignId", "osmId"])
     .index("by_campaign_cell", ["campaignId", "cell"]),

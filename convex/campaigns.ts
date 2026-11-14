@@ -51,6 +51,7 @@ export const create = mutation({
       center: args.center,
       bbox: args.bbox,
       markCount: 0,
+      blockedCount: 0,
     });
     return args.slug;
   },
@@ -73,6 +74,7 @@ export const get = query({
       center: campaign.center,
       bbox: campaign.bbox ?? null,
       markCount: campaign.markCount ?? 0,
+      blockedCount: campaign.blockedCount ?? 0,
       createdAt: campaign._creationTime,
     };
   },

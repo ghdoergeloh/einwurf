@@ -1,6 +1,6 @@
 # Einwurf – gemeinsame Flyer-Verteilkarte
 
-Eine Karte für Verteilaktionen: Alle Häuser sind dunkelgrau. Wer einen Flyer eingeworfen hat, tippt das Haus an, und es wird gelb. Ein zweiter Tipp nimmt die Markierung zurück. Alle mit dem Link sehen die Änderungen sofort.
+Eine Karte für Verteilaktionen: Alle Häuser sind dunkelgrau. Wer einen Flyer eingeworfen hat, tippt das Haus an, und es wird gelb. Ein zweiter Tipp macht es dunkelgelb: Einwerfen nicht möglich, etwa wegen eines Aufklebers „Keine Werbung“ oder weil der Briefkasten nicht erreichbar ist. Ein dritter Tipp macht es wieder grau. Alle mit dem Link sehen die Änderungen sofort.
 
 - **Ohne Anmeldung.** Jede Aktion hat einen geheimen Link (`/v/<22 Zeichen>`, etwa 131 Bit Zufall). Aktionen werden nirgends aufgelistet.
 - **Frontend:** React, Tailwind v4, MapLibre, Vite.
@@ -12,7 +12,7 @@ Eine Karte für Verteilaktionen: Alle Häuser sind dunkelgrau. Wer einen Flyer e
 
 | Geste | Wirkung |
 | --- | --- |
-| Tippen auf ein Haus | markieren oder Markierung zurücknehmen (nach 0,3 s, siehe unten) |
+| Tippen auf ein Haus | weiterschalten: grau (offen) → gelb (Flyer drin) → dunkelgelb (nicht möglich) → grau (nach 0,3 s, siehe unten) |
 | Doppeltipp | hineinzoomen (markiert nichts) |
 | Doppeltipp und ziehen | mit einem Finger zoomen |
 | Ziehen, Pinch, Mausrad, +/− | schieben und zoomen |

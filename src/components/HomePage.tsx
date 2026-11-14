@@ -182,7 +182,7 @@ export function HomePage() {
             {[
               ["Ort wählen", "Stadt, Ortsteil oder Straße suchen."],
               ["Link teilen", "Per WhatsApp, Signal oder QR-Code. Nur wer ihn hat, sieht die Aktion."],
-              ["Häuser antippen", "Gelb heißt: Flyer ist drin. Noch mal tippen macht es rückgängig."],
+              ["Häuser antippen", "Gelb heißt: Flyer ist drin. Nochmal tippen: dunkelgelb, Einwerfen nicht möglich (z. B. „Keine Werbung“). Nochmal: zurück."],
             ].map(([t, d], i) => (
               <li key={t} className="flex gap-3">
                 <span className="grid size-7 shrink-0 place-items-center rounded-full bg-ink text-xs font-semibold text-sun">
