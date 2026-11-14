@@ -1,5 +1,6 @@
 import { describe, expect, test } from "vitest";
-import { addTap, settleTaps, type PendingTap } from "./pendingTaps";
+import { addTap, cellsToWatch, settleTaps, type PendingTap } from "./pendingTaps";
+import { markCellOf } from "../../convex/cells";
 import type { HouseStatus } from "../../convex/status";
 
 const C = [7, 50];
@@ -57,4 +58,14 @@ describe("settleTaps: sobald die Zelle geladen ist", () => {
     expect(r.conflicts).toEqual([]);
     expect(r.rest.size).toBe(0);
   });
+});
+
+describe("cellsToWatch: Zellen gemerkter Tipps bleiben abonniert", () => {
+  test("auch wenn der Helfer weitergegangen ist", () => {
+    let p = addTap(empty(), "way/1", "none", [7.0005, 50.0005]);
+    p = addTap(p, "way/2", "none", [7.0006, 50.0006]);
+    p = addTap(p, "way/3", "none", [8.0005, 51.0005]);
+    expect(cellsToWatch(p).sort()).toEqual([markCellOf(7.0005, 50.0005), markCellOf(8.0005, 51.0005)].sort());
+  });
+  test("ohne gemerkte Tipps keine", () => expect(cellsToWatch(empty())).toEqual([]));
 });

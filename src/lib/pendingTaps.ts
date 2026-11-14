@@ -1,4 +1,5 @@
 import { nextStatus, type HouseStatus } from "../../convex/status";
+import { markCellOf } from "../../convex/cells";
 
 /**
  * Tipps auf Häuser, deren Markierungen noch laden. Das Haus färbt sich sofort um; abgeschickt
@@ -45,4 +46,9 @@ export function settleTaps(
     else conflicts.push(osmId);
   }
   return { send, conflicts, rest };
+}
+
+/** Zellen der gemerkten Tipps: Sie bleiben abonniert, bis die Tipps abgeschickt sind. */
+export function cellsToWatch(pending: Map<string, PendingTap>): string[] {
+  return [...new Set([...pending.values()].map((p) => markCellOf(p.center[0], p.center[1])))];
 }

@@ -116,7 +116,7 @@ export function CampaignPage({ slug, isNew }: Props) {
   );
 
   const onConflict = useCallback(
-    () => showToast("Jemand anderes hat dieses Haus gerade geändert. Sein Stand gilt, bitte nachsehen."),
+    () => showToast("Ein Haus wurde inzwischen von jemand anderem geändert. Dieser Stand gilt."),
     [showToast],
   );
 

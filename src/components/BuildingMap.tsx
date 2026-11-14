@@ -17,7 +17,7 @@ import {
 import { DOUBLE_TAP_MS, dragZoomDelta, onPress, type Press } from "../lib/taps";
 import { markCellOf, markCellsIn } from "../../convex/cells";
 import { nextStatus, statusOf, type HouseStatus, type MarkStatus } from "../../convex/status";
-import { addTap, settleTaps, type PendingTap } from "../lib/pendingTaps";
+import { addTap, cellsToWatch, settleTaps, type PendingTap } from "../lib/pendingTaps";
 import { BURST_SECONDS, createBurst, drawBurst, type Burst } from "../lib/sparks";
 
 // Ab MapLibre 6 braucht jeder Bundler den Pfad zum Worker.
@@ -218,6 +218,7 @@ export function BuildingMap({
       }
       if (r.conflicts.length) onConflictRef.current();
       syncMarks();
+      reportCells();
     }
     settleRef.current = settle;
 
@@ -265,8 +266,10 @@ export function BuildingMap({
     }
 
     function reportCells() {
-      const cells = markCellsIn(paddedView());
-      const next = cells.length > MAX_MARK_CELLS ? null : cells;
+      const view = markCellsIn(paddedView());
+      // Zellen gemerkter Tipps bleiben abonniert, sonst würden sie nach dem Weitergehen nie abgeschickt.
+      const watch = cellsToWatch(pendingTaps).filter((c) => !view.includes(c));
+      const next = view.length > MAX_MARK_CELLS ? (watch.length ? watch : null) : [...view, ...watch];
       const key = next ? next.join(",") : "-";
       if (key === lastCells) return;
       lastCells = key;
@@ -467,6 +470,7 @@ export function BuildingMap({
         next = nextStatus(pending ? pending.to : statusOf(mark));
         pendingTaps = addTap(pendingTaps, osmId, statusOf(mark), center);
         syncMarks();
+        reportCells();
         settle();
       }
       sparkle(next, at);
