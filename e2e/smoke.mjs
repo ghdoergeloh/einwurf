@@ -7,6 +7,10 @@
 import { chromium } from "playwright";
 import assert from "node:assert/strict";
 import http from "node:http";
+import { readFileSync } from "node:fs";
+
+// Schrift für die Hausnummern (Noto Sans Bold, Zeichen 0–255, SIL Open Font License), damit der Test ohne Netz läuft.
+const GLYPHS = readFileSync(new URL("./fixtures/noto-sans-bold-0-255.pbf", import.meta.url));
 
 const BASE = process.argv[2] ?? "http://localhost:5173";
 const SHOTS = process.argv[3];
@@ -58,7 +62,7 @@ async function mockOsm(ctx, { styleFails = false } = {}) {
     styleFails
       ? r.fulfill({ status: 500, body: "kaputt" })
       : r.request().url().includes("/fonts/")
-        ? r.continue() // echte Schrift, damit Hausnummern gezeichnet werden
+        ? r.fulfill({ body: GLYPHS, contentType: "application/x-protobuf" })
         : r.fulfill({
             json: {
               version: 8,
@@ -277,6 +281,27 @@ try {
   await po.waitForTimeout(1500);
   assert.equal(await statusAt(p2, tx, ty), "done", "nach dem Funkloch gespeichert, live beim anderen Helfer");
   await off.close();
+
+  // „Bewegung reduzieren“ im System: Farbe wechselt, aber keine Funken
+  const calm = await browser.newContext({ ...phone, reducedMotion: "reduce" });
+  await mockOsm(calm);
+  const pc = await calm.newPage();
+  await pc.goto(url);
+  await pc.waitForTimeout(2500);
+  const before2 = await statusAt(pc, cx - 120, cy + 120);
+  await pc.mouse.click(cx - 120, cy + 120);
+  await pc.waitForTimeout(400);
+  assert.equal(await statusAt(pc, cx - 120, cy + 120), next[before2], "Farbe wechselt auch ohne Bewegung");
+  const calmPixels = await pc.evaluate(() => {
+    const c = document.querySelector("canvas[aria-hidden]");
+    if (!c.width) return 0;
+    const d = c.getContext("2d").getImageData(0, 0, c.width, c.height).data;
+    let n = 0;
+    for (let i = 3; i < d.length; i += 4) if (d[i] > 0) n++;
+    return n;
+  });
+  assert.equal(calmPixels, 0, "keine Funken bei „Bewegung reduzieren“");
+  await calm.close();
 
   // Unbekannter Link
   await p.goto(`${BASE}/v/AAAAAAAAAAAAAAAAAAAAAA`);

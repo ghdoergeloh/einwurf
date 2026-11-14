@@ -47,6 +47,9 @@ const COLOR_MARKED = "#ffd60a";
 const COLOR_MARKED_LINE = "#c99a00";
 /** Einwerfen nicht möglich: dunkles, gräuliches Gelb (gleich --color-blocked in index.css). */
 const COLOR_BLOCKED = "#938443";
+/** Kurzes Aufblitzen beim Tipp auf „Flyer drin“. */
+const COLOR_FLASH = "#fff6c2";
+const FLASH_MS = 140;
 const COLOR_BLOCKED_LINE = "#5e5326";
 
 export interface Mark {
@@ -254,8 +257,12 @@ export function BuildingMap({
       // Nur zeichnen, solange etwas sprüht.
       if (bursts.length) frame = requestAnimationFrame(drawSparks);
     }
-    function sparkle(status: HouseStatus, at: maplibregl.LngLat) {
+    function sparkle(status: HouseStatus, at: maplibregl.LngLat, osmId: string) {
       if (reduceMotion) return;
+      if (status === "done" && buildings.has(osmId)) {
+        map.setFeatureState({ source: "buildings", id: osmId }, { flash: true });
+        setTimeout(() => !disposed && map.setFeatureState({ source: "buildings", id: osmId }, { flash: false }), FLASH_MS);
+      }
       bursts.push({ burst: createBurst(status), at, start: performance.now() });
       if (!frame) frame = requestAnimationFrame(drawSparks);
     }
@@ -368,7 +375,8 @@ export function BuildingMap({
         source: "buildings",
         minzoom: BUILDING_MIN_ZOOM - 0.5,
         paint: {
-          "fill-color": byState(COLOR_HOUSE, COLOR_MARKED, COLOR_BLOCKED),
+          // Beim Antippen blitzt das Haus kurz hell auf (feature-state „flash“, siehe sparkle).
+          "fill-color": ["case", ["boolean", ["feature-state", "flash"], false], COLOR_FLASH, byState(COLOR_HOUSE, COLOR_MARKED, COLOR_BLOCKED)],
           "fill-opacity": byState(0.9, 1, 1),
         },
       });
@@ -481,7 +489,7 @@ export function BuildingMap({
         reportCells();
         settle();
       }
-      sparkle(next, at);
+      sparkle(next, at, osmId);
       navigator.vibrate?.(next === "done" ? 12 : 6);
     }
 

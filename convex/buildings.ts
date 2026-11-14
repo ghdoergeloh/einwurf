@@ -200,9 +200,10 @@ async function askOverpass(url: string, query: string, signal: AbortSignal): Pro
 /**
  * Fragt die Server versetzt: zuerst den ersten; scheitert er oder antwortet er nicht innerhalb
  * von OVERPASS_HEDGE_MS, zusätzlich den nächsten. Die erste gültige Antwort gewinnt, die
- * anderen Abfragen werden abgebrochen.
+ * anderen Abfragen werden abgebrochen. Ohne `hedge` (Vorladen, Auffrischen: keine Eile) kommt
+ * der nächste Server nur nach einem Fehler dran.
  */
-function fetchOverpass(bbox: [number, number, number, number]): Promise<BuildingFeature[]> {
+function fetchOverpass(bbox: [number, number, number, number], { hedge = true }: { hedge?: boolean } = {}): Promise<BuildingFeature[]> {
   const urls = endpoints();
   const query = buildQuery(bbox);
   const problems: string[] = [];
@@ -224,8 +225,8 @@ function fetchOverpass(bbox: [number, number, number, number]): Promise<Building
       ctrls.push(ctrl);
       running++;
       timers.push(setTimeout(() => ctrl.abort(), OVERPASS_TIMEOUT_MS));
-      const hedge = setTimeout(launch, OVERPASS_HEDGE_MS);
-      timers.push(hedge);
+      const hedgeTimer = hedge ? setTimeout(launch, OVERPASS_HEDGE_MS) : undefined;
+      if (hedgeTimer) timers.push(hedgeTimer);
       askOverpass(url, query, ctrl.signal).then(
         (features) => {
           if (done) return;
@@ -236,7 +237,7 @@ function fetchOverpass(bbox: [number, number, number, number]): Promise<Building
           running--;
           if (done) return;
           problems.push(`${url}: ${e instanceof Error ? e.message : String(e)}`);
-          clearTimeout(hedge);
+          clearTimeout(hedgeTimer);
           if (next < urls.length) launch();
           else if (running === 0) {
             finish();
@@ -273,6 +274,41 @@ function neighbours(cells: string[]): string[] {
  * geladen wird). `rateKey` bestimmt das Kontingent pro Minute (Aktion oder Vorladen).
  * Erwartet geprüfte Kacheln. `fetched` sagt, ob Overpass gefragt wurde.
  */
+/**
+ * Holt reservierte Kacheln von Overpass, speichert sie im Cache und gibt die Sperren frei
+ * (auch bei einem Fehler). Liefert die Daten je Kachel.
+ */
+async function fetchAndStore(
+  ctx: ActionCtx,
+  toFetch: string[],
+  lockIds: Id<"cellLocks">[],
+  { hedge }: { hedge: boolean },
+): Promise<Map<string, string>> {
+  try {
+    const features = await fetchOverpass(cellsBBox(toFetch.map((c) => parseCellKey(c)!)), { hedge });
+    // Jedes Haus gehört genau zu der Kachel seines Mittelpunkts.
+    const byCell = new Map<string, BuildingFeature[]>(toFetch.map((c) => [c, []]));
+    for (const f of features) byCell.get(cellKeyOf(centerOf(f)))?.push(f);
+    const entries = [...byCell].map(([cell, fs]) => ({ cell, data: encodeBuildings(fs) }));
+    // In Häppchen speichern, damit kein Aufruf zu groß wird; übergroße Kacheln nicht cachen.
+    let batch: typeof entries = [];
+    let size = 0;
+    for (const e of entries.filter((e) => e.data.length < MAX_CACHE_BYTES)) {
+      if (size + e.data.length > 4_000_000 && batch.length) {
+        await ctx.runMutation(internal.buildings.store, { entries: batch });
+        batch = [];
+        size = 0;
+      }
+      batch.push(e);
+      size += e.data.length;
+    }
+    if (batch.length) await ctx.runMutation(internal.buildings.store, { entries: batch });
+    return new Map(entries.map((e) => [e.cell, e.data]));
+  } finally {
+    await ctx.runMutation(internal.buildings.release, { lockIds });
+  }
+}
+
 async function loadCells(
   ctx: ActionCtx,
   rateKey: string,
@@ -296,7 +332,14 @@ async function loadCells(
   // Karte: Gibt es für alles einen veralteten Eintrag (älter als 30 Tage oder ohne Hausnummern),
   // sofort den zeigen und im Hintergrund auffrischen. Overpass braucht manchmal 30 s und mehr.
   if (kind === "map" && missing.every((c) => stale.has(c))) {
-    await ctx.scheduler.runAfter(0, internal.buildings.refresh, { slug: rateKey, cells: missing });
+    // Schon jetzt reservieren: Wer dasselbe Gebiet gleich danach öffnet, sieht die Sperre
+    // und plant kein zweites Auffrischen ein. Im Kontingent des Vorladens.
+    try {
+      const r = await ctx.runMutation(internal.buildings.reserve, { slug: prefetchRateKey(rateKey), cells: missing, kind: "prefetch" });
+      if (r.toFetch.length) await ctx.scheduler.runAfter(0, internal.buildings.refresh, { slug: rateKey, cells: r.toFetch, lockIds: r.lockIds });
+    } catch {
+      // Kontingent erschöpft: beim nächsten Ansehen wieder.
+    }
     return { data: cells.map((c) => have.get(c) ?? stale.get(c)!), fetched: false };
   }
 
@@ -314,29 +357,7 @@ async function loadCells(
   const { toFetch, waitFor, lockIds } = await ctx.runMutation(internal.buildings.reserve, { slug: rateKey, cells: missing, kind, extra });
 
   if (toFetch.length > 0) {
-    try {
-      const features = await fetchOverpass(cellsBBox(toFetch.map((c) => parseCellKey(c)!)));
-      // Jedes Haus gehört genau zu der Kachel seines Mittelpunkts.
-      const byCell = new Map<string, BuildingFeature[]>(toFetch.map((c) => [c, []]));
-      for (const f of features) byCell.get(cellKeyOf(centerOf(f)))?.push(f);
-      const entries = [...byCell].map(([cell, fs]) => ({ cell, data: encodeBuildings(fs) }));
-      for (const e of entries) have.set(e.cell, e.data);
-      // In Häppchen speichern, damit kein Aufruf zu groß wird; übergroße Kacheln nicht cachen.
-      let batch: typeof entries = [];
-      let size = 0;
-      for (const e of entries.filter((e) => e.data.length < MAX_CACHE_BYTES)) {
-        if (size + e.data.length > 4_000_000 && batch.length) {
-          await ctx.runMutation(internal.buildings.store, { entries: batch });
-          batch = [];
-          size = 0;
-        }
-        batch.push(e);
-        size += e.data.length;
-      }
-      if (batch.length) await ctx.runMutation(internal.buildings.store, { entries: batch });
-    } finally {
-      await ctx.runMutation(internal.buildings.release, { lockIds });
-    }
+    for (const [cell, data] of await fetchAndStore(ctx, toFetch, lockIds, { hedge: kind === "map" })) have.set(cell, data);
   }
 
   // Kacheln, die gerade ein anderer Helfer lädt: auf seinen Cache-Eintrag warten.
@@ -382,11 +403,12 @@ export const load = action({
 
 /** Frischt veraltete Kacheln im Hintergrund auf (siehe loadCells), im Kontingent des Vorladens. */
 export const refresh = internalAction({
-  args: { slug: v.string(), cells: v.array(v.string()) },
-  handler: async (ctx, { slug, cells }) => {
+  args: { slug: v.string(), cells: v.array(v.string()), lockIds: v.optional(v.array(v.id("cellLocks"))) },
+  handler: async (ctx, { slug, cells, lockIds }) => {
     try {
-      // Kacheln, die gerade jemand lädt, überspringen statt warten.
-      await loadCells(ctx, prefetchRateKey(slug), cells, "prefetch", { wait: false });
+      // Schon reserviert (siehe loadCells): direkt laden. Sonst wie beim Vorladen, ohne zu warten.
+      if (lockIds) await fetchAndStore(ctx, cells, lockIds, { hedge: false });
+      else await loadCells(ctx, prefetchRateKey(slug), cells, "prefetch", { wait: false });
     } catch (e) {
       // Nicht schlimm: Beim nächsten Ansehen wird es wieder versucht.
       console.warn("Auffrischen fehlgeschlagen", e instanceof Error ? e.message : String(e));

@@ -362,6 +362,31 @@ describe("buildings.load", () => {
     expect(ids([res[1]])).toEqual(["way/2", "way/3"]);
   });
 
+  test("Vorladen und Auffrischen haben Zeit: kein zweiter Server, nur weil einer langsam ist", async () => {
+    vi.useFakeTimers({ toFake: ["setTimeout", "clearTimeout", "Date"] });
+    try {
+      const t = await setup();
+      vi.stubEnv("OVERPASS_URLS", "https://eins.example/api,https://zwei.example/api");
+      const fetchMock = vi.fn(() => new Promise<Response>((r) => setTimeout(() => r(overpassOk()), 50_000)));
+      vi.stubGlobal("fetch", fetchMock);
+      const pending = t.action(internal.buildings.refresh, { slug: SLUG, cells: [CELL_A] });
+      await vi.advanceTimersByTimeAsync(51_000);
+      await pending;
+      expect(fetchMock).toHaveBeenCalledTimes(1);
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
+  test("mehrere Helfer öffnen ein veraltetes Gebiet: nur ein Auffrischen", async () => {
+    const t = await setup();
+    await t.run((ctx) => ctx.db.insert("buildingCells", { cell: CELL_A, fetchedAt: Date.now(), data: '[["way/77",[]]]' }));
+    vi.stubGlobal("fetch", vi.fn(async () => overpassOk()));
+    for (let i = 0; i < 3; i++) await t.action(api.buildings.load, { slug: SLUG, cells: [CELL_A] });
+    const scheduled = await t.run((ctx) => ctx.db.system.query("_scheduled_functions").collect());
+    expect(scheduled.filter((f) => f.name.includes("refresh"))).toHaveLength(1);
+  });
+
   test("Kachel eines Punkts", () => {
     expect(cellKeyOf([(X + 0.5) * CELL_SIZE, (Y + 0.5) * CELL_SIZE])).toBe(CELL_A);
   });
