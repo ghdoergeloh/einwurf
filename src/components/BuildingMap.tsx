@@ -3,7 +3,7 @@ import * as maplibregl from "maplibre-gl";
 import "maplibre-gl/dist/maplibre-gl.css";
 import workerUrl from "maplibre-gl/dist/maplibre-gl-worker.mjs?worker&url";
 import type { CircleLayerSpecification, ExpressionSpecification, GeoJSONSource, MapGeoJSONFeature } from "maplibre-gl";
-import type { FeatureCollection, Point } from "geojson";
+import type { FeatureCollection, Point, Position } from "geojson";
 import {
   CELL_SIZE,
   MAX_CELL_SPAN,
@@ -19,7 +19,7 @@ import { DOUBLE_TAP_MS, dragZoomDelta, onPress, type Press } from "../lib/taps";
 import { markCellOf, markCellsIn } from "../../convex/cells";
 import { nextStatus, statusOf, type HouseStatus, type MarkStatus } from "../../convex/status";
 import { addTap, cellsToWatch, settleTaps, type PendingTap } from "../lib/pendingTaps";
-import { resolvePlaceholderTaps, type PlaceholderTap } from "../lib/placeholderTaps";
+import { cyclePlaceholder, resolvePlaceholderTaps, type PlaceholderTap } from "../lib/placeholderTaps";
 import { BURST_SECONDS, createBurst, drawBurst, type Burst } from "../lib/sparks";
 
 // Ab MapLibre 6 braucht jeder Bundler den Pfad zum Worker.
@@ -138,7 +138,8 @@ export function BuildingMap({
     /** Tipps auf Häuser, deren Markierungen noch laden (siehe lib/pendingTaps.ts). */
     let pendingTaps = new Map<string, PendingTap>();
     /** Tipps auf hellgraue Platzhalter, deren Haus noch von Overpass kommt (lib/placeholderTaps.ts). */
-    let placeholderTaps: PlaceholderTap[] = [];
+    let placeholderTaps = new Map<string, PlaceholderTap>();
+    let placeholderSeq = 0;
     /** Gebäude-Ebenen der Grundkarte (Platzhalter). */
     const baseBuildingLayers: string[] = [];
     /** Laufende Abrufe und ihre Kacheln; bis zu MAX_PARALLEL_LOADS gleichzeitig. */
@@ -461,18 +462,20 @@ export function BuildingMap({
         filter: ["==", ["get", "shape"], false],
         paint: pointPaint,
       });
-      // Tipps auf Platzhalter: gelber Punkt, bis das Haus geladen ist.
-      map.addSource("tap-points", { type: "geojson", data: EMPTY });
+      // Tipps auf Platzhalter: das Haus der Grundkarte vorläufig einfärben, bis das eigene geladen ist.
+      map.addSource("tap-shapes", { type: "geojson", data: EMPTY });
+      const tapColor = (done: string, blocked: string): ExpressionSpecification => ["match", ["get", "to"], "blocked", blocked, done];
       map.addLayer({
-        id: "tap-points",
-        type: "circle",
-        source: "tap-points",
-        paint: {
-          "circle-color": COLOR_MARKED,
-          "circle-radius": 7,
-          "circle-stroke-color": "#15171c",
-          "circle-stroke-width": 1.5,
-        },
+        id: "tap-shapes",
+        type: "fill",
+        source: "tap-shapes",
+        paint: { "fill-color": tapColor(COLOR_MARKED, COLOR_BLOCKED) },
+      });
+      map.addLayer({
+        id: "tap-shapes-line",
+        type: "line",
+        source: "tap-shapes",
+        paint: { "line-color": tapColor(COLOR_MARKED_LINE, COLOR_BLOCKED_LINE), "line-width": 2, "line-dasharray": [2, 1] },
       });
       setReady(true);
       syncMarks();
@@ -508,41 +511,64 @@ export function BuildingMap({
     }
 
     function showPlaceholderTaps() {
-      (map.getSource("tap-points") as GeoJSONSource | undefined)?.setData({
+      (map.getSource("tap-shapes") as GeoJSONSource | undefined)?.setData({
         type: "FeatureCollection",
-        features: placeholderTaps.map((t) => ({ type: "Feature", properties: {}, geometry: { type: "Point", coordinates: t.lngLat } })),
+        features: [...placeholderTaps].map(([id, t]) => ({
+          type: "Feature",
+          properties: { id, to: t.to },
+          geometry: { type: "MultiPolygon", coordinates: t.shape },
+        })),
       });
     }
 
-    /** Nach jedem geladenen Abruf: gemerkte Tipps auf Platzhalter ihrem Haus zuordnen. */
+    /** Gemerkte Tipps auf Platzhalter ihrem Haus zuordnen, sobald es geladen ist (lib/placeholderTaps.ts). */
     function resolvePlaceholders() {
-      if (placeholderTaps.length === 0) return;
+      if (disposed || placeholderTaps.size === 0) return;
       const houseAt = (pt: [number, number]) => {
         for (const f of buildings.values()) if (containsPoint(f, pt)) return f.properties.osmId;
         return null;
       };
-      const r = resolvePlaceholderTaps(placeholderTaps, (c) => loadedCells.has(c), houseAt);
-      placeholderTaps = r.rest;
+      const entries = [...placeholderTaps].map(([id, t]) => ({ ...t, id }));
+      const r = resolvePlaceholderTaps(entries, (c) => loadedCells.has(c), houseAt, Date.now());
+      for (const t of [...r.apply.map((a) => a.tap), ...r.dropped, ...r.expired]) placeholderTaps.delete(t.id);
       showPlaceholderTaps();
-      for (const { tap, osmId } of r.apply) toggle({ osmId, at: new maplibregl.LngLat(...tap.lngLat) }, { quiet: true });
+      if (r.apply.length) {
+        // Wie ein Tipp, solange der Stand lädt: von „offen“ aus, mit Prüfung auf fremde Änderungen.
+        const next = new Map(pendingTaps);
+        for (const { tap, osmId } of r.apply) next.set(osmId, { from: "none", to: tap.to, center: centerOf(buildings.get(osmId)!) });
+        pendingTaps = next;
+        syncMarks();
+        reportCells();
+        settle();
+      }
       if (r.dropped.length) onNoticeRef.current("An dieser Stelle gibt es kein Haus zum Markieren.");
+      else if (r.expired.length) onNoticeRef.current("Ein Haus konnte nicht geladen werden. Bitte nochmal antippen, wenn es dunkel ist.");
+    }
+    const placeholderTimer = setInterval(resolvePlaceholders, 10_000);
+
+    /** Vorläufig eingefärbter Platzhalter oder Haus der Grundkarte an der Stelle. */
+    function placeholderAt(point: maplibregl.Point): { id: string; shape: Position[][][] } | null {
+      // Erst ab der Zoomstufe, ab der Häuser geladen werden; sonst würde der Tipp nie aufgelöst.
+      if (map.getZoom() < BUILDING_MIN_ZOOM || baseBuildingLayers.length === 0) return null;
+      const tapped = map.queryRenderedFeatures(point, { layers: ["tap-shapes"] })[0];
+      if (tapped) return { id: tapped.properties.id as string, shape: [] };
+      const f = map.queryRenderedFeatures(point, { layers: baseBuildingLayers })[0];
+      if (!f) return null;
+      const g = f.geometry;
+      const shape = g.type === "Polygon" ? [g.coordinates] : g.type === "MultiPolygon" ? g.coordinates : null;
+      return shape ? { id: `p${++placeholderSeq}`, shape } : null;
     }
 
-    /** Liegt an der Stelle ein Haus der Grundkarte (Platzhalter), dessen eigene Form noch fehlt? */
-    function placeholderAt(point: maplibregl.Point): boolean {
-      if (map.getZoom() < BUILDING_MIN_ZOOM - 0.5 || baseBuildingLayers.length === 0) return false;
-      return map.queryRenderedFeatures(point, { layers: baseBuildingLayers }).length > 0;
-    }
-
-    function toggle(tap: { osmId: string | null; at: maplibregl.LngLat } | null, { quiet = false } = {}) {
+    function toggle(tap: Tap, { quiet = false } = {}) {
       if (disposed || !tap) return;
       const { at } = tap;
-      if (tap.osmId === null) {
-        // Platzhalter: sofort Rückmeldung, ausgeführt wird der Tipp, wenn das Haus da ist.
-        placeholderTaps = [...placeholderTaps, { lngLat: [at.lng, at.lat] }];
+      if (tap.placeholder) {
+        // Platzhalter: sofort färben und weiterschalten; übernommen wird, wenn das Haus da ist.
+        placeholderTaps = cyclePlaceholder(placeholderTaps, tap.placeholder.id, { lngLat: [at.lng, at.lat], shape: tap.placeholder.shape }, Date.now());
+        const to = placeholderTaps.get(tap.placeholder.id)?.to ?? "none";
         showPlaceholderTaps();
-        sparkle("done", at, "");
-        navigator.vibrate?.(12);
+        sparkle(to, at, "");
+        navigator.vibrate?.(to === "done" ? 12 : 6);
         // Ist die Gegend schon geladen (Platzhalter ohne Haus bei Overpass), gleich auflösen.
         resolvePlaceholders();
         return;
@@ -577,7 +603,10 @@ export function BuildingMap({
     // Erkennung ist dafür aus, damit es nur eine Regel gibt. Pointer-Events zählen jeden
     // Druck genau einmal, egal ob Finger oder Maus.
     map.touchZoomRotate._tapDragZoom.disable();
-    type Tap = { osmId: string | null; at: maplibregl.LngLat } | null;
+    type Tap =
+      | { osmId: string; at: maplibregl.LngLat; placeholder?: undefined }
+      | { osmId?: undefined; at: maplibregl.LngLat; placeholder: { id: string; shape: Position[][][] } }
+      | null;
     let pending: { press: Press; payload: Tap; timer: ReturnType<typeof setTimeout> } | null = null;
     let lastPress: Press | null = null;
     let doubleArmed = false;
@@ -649,7 +678,8 @@ export function BuildingMap({
       // Das Haus jetzt bestimmen, nicht erst nach der Wartezeit: Bis dahin kann die Karte
       // weitergerückt sein (Standortverfolgung, laufender Zoom).
       const osmId = osmIdAt(e.point);
-      const tap: Tap = osmId || placeholderAt(e.point) ? { osmId, at: e.lngLat } : null;
+      const ph = osmId ? null : placeholderAt(e.point);
+      const tap: Tap = osmId ? { osmId, at: e.lngLat } : ph ? { at: e.lngLat, placeholder: ph } : null;
       pending = {
         press,
         payload: tap,
@@ -669,6 +699,7 @@ export function BuildingMap({
       disposed = true;
       clearPending();
       if (frame) cancelAnimationFrame(frame);
+      clearInterval(placeholderTimer);
       settleRef.current = null;
       canvas.removeEventListener("pointerdown", onPointerDown);
       window.removeEventListener("pointermove", onPointerMove);

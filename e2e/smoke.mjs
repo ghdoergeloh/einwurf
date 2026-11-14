@@ -39,6 +39,8 @@ function fakeBuildings(body) {
     for (let j = Math.ceil((s - CENTER.lat) / GY); j <= Math.floor((n - CENTER.lat) / GY); j++) {
       const x = CENTER.lng + i * GX;
       const y = CENTER.lat + j * GY;
+      // Dieses Haus gibt es nur in der Grundkarte, nicht bei Overpass (z. B. ein Gebäudeteil).
+      if (i === FAR_I + 3 && j === 3) continue;
       const ring = houseRing(i, j);
       // Jedes zweite Haus hat eine Hausnummer am Gebäude, jedes vierte einen Adresspunkt darin.
       const tags = (i + j) % 2 === 0 ? { building: "yes", "addr:housenumber": String(80 + i) } : { building: "yes" };
@@ -91,11 +93,13 @@ async function mockOsm(ctx, { styleFails = false } = {}) {
                   type: "geojson",
                   data: {
                     type: "FeatureCollection",
-                    features: Array.from({ length: 21 * 21 }, (_, k) => ({
-                      type: "Feature",
-                      properties: {},
-                      geometry: { type: "Polygon", coordinates: [houseRing(FAR_I - 10 + (k % 21), -10 + Math.floor(k / 21))] },
-                    })),
+                    features: [
+                      ...Array.from({ length: 21 * 21 }, (_, k) => ({
+                        type: "Feature",
+                        properties: {},
+                        geometry: { type: "Polygon", coordinates: [houseRing(FAR_I - 10 + (k % 21), -10 + Math.floor(k / 21))] },
+                      })),
+                    ],
                   },
                 },
               },
@@ -330,7 +334,7 @@ try {
   assert.equal(await statusAt(p2, tx, ty), "done", "nach dem Funkloch gespeichert, live beim anderen Helfer");
   await off.close();
 
-  // Tipp auf ein Haus, das noch lädt (hellgrauer Platzhalter): sofort ein gelber Punkt, danach wird das Haus gelb
+  // Tipp auf ein Haus, das noch lädt (hellgrauer Platzhalter): färbt sich sofort, schaltet weiter wie jedes Haus
   overpassDelayMs = 5000;
   const ph = await browser.newContext(phone);
   await mockOsm(ph);
@@ -341,15 +345,34 @@ try {
   await pp.evaluate((c) => window.__einwurfMap.jumpTo({ center: [c.lng, c.lat] }), FAR);
   await pp.waitForTimeout(1200);
   assert.equal(await statusAt(pp, cx, cy), null, "Haus noch nicht geladen");
+  const tapShape = () =>
+    pp.evaluate(([x, y]) => {
+      const m = window.__einwurfMap;
+      const r = m.getCanvasContainer().getBoundingClientRect();
+      return m.queryRenderedFeatures([x - r.left, y - r.top], { layers: ["tap-shapes"] })[0]?.properties.to ?? null;
+    }, [cx, cy]);
   await pp.mouse.click(cx, cy);
   await pp.waitForTimeout(500);
-  const dotsNow = await pp.evaluate(() => window.__einwurfMap.queryRenderedFeatures({ layers: ["tap-points"] }).length);
-  assert.equal(dotsNow, 1, "gelber Punkt sofort");
+  assert.equal(await tapShape(), "done", "graues Haus sofort gelb");
   await shot(pp, "5b-platzhalter-tipp");
+  // Zweiter Tipp mit Pause: dunkelgelb, dritter: wieder offen, vierter: gelb
+  for (const want of ["blocked", null, "done"]) {
+    await pp.mouse.click(cx, cy);
+    await pp.waitForTimeout(500);
+    assert.equal(await tapShape(), want, `Platzhalter weitergeschaltet: ${want}`);
+  }
   await pp.waitForFunction(() => window.__einwurfMap.queryRenderedFeatures({ layers: ["buildings-fill"] }).length > 0, null, { timeout: 20_000 });
-  await pp.waitForTimeout(1000);
-  assert.equal(await statusAt(pp, cx, cy), "done", "nach dem Laden gelb");
-  assert.equal(await pp.evaluate(() => window.__einwurfMap.queryRenderedFeatures({ layers: ["tap-points"] }).length), 0, "Punkt weg");
+  await expectStatus(pp, cx, cy, "done", "nach dem Laden gelb");
+  assert.equal(await tapShape(), null, "vorläufige Farbe weg");
+  // Gebäude nur in der Grundkarte: Hinweis, nichts gespeichert
+  const gap = await pp.evaluate((c) => {
+    const m = window.__einwurfMap;
+    const r = m.getCanvasContainer().getBoundingClientRect();
+    const q = m.project([c.lng + 3 * 0.0004, c.lat + 3 * 0.0003]);
+    return [q.x + r.left, q.y + r.top];
+  }, FAR);
+  await pp.mouse.click(gap[0], gap[1]);
+  await pp.getByText("An dieser Stelle gibt es kein Haus zum Markieren.").waitFor({ timeout: 5000 });
   overpassDelayMs = 0;
   await ph.close();
 
