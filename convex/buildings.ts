@@ -1,4 +1,5 @@
-import { action, internalMutation, internalQuery } from "./_generated/server";
+import { action, internalAction, internalMutation, internalQuery, mutation, query, type ActionCtx, type MutationCtx } from "./_generated/server";
+import type { Id } from "./_generated/dataModel";
 import { internal } from "./_generated/api";
 import { ConvexError, v } from "convex/values";
 import {
@@ -10,6 +11,8 @@ import {
   encodeBuildings,
   parseCellKey,
   parseOverpass,
+  planPrefetch,
+  prefetchArea,
   type BuildingFeature,
 } from "./osm";
 import { SLUG_PATTERN } from "./validation";
@@ -181,6 +184,66 @@ async function fetchOverpass(bbox: [number, number, number, number]): Promise<Bu
 }
 
 /**
+ * Lädt Kacheln aus dem Cache oder von Overpass (gesperrt, damit jede Kachel nur einmal
+ * geladen wird). `rateKey` bestimmt das Kontingent pro Minute (Aktion oder Vorladen).
+ * Erwartet geprüfte Kacheln. `fetched` sagt, ob Overpass gefragt wurde.
+ */
+async function loadCells(ctx: ActionCtx, rateKey: string, cells: string[]): Promise<{ data: string[]; fetched: boolean }> {
+  const have = new Map<string, string>();
+  const readCache = async (wanted: string[]) => {
+    const now = Date.now();
+    for (const hit of await ctx.runQuery(internal.buildings.cached, { cells: wanted })) {
+      if (now - hit.fetchedAt < CACHE_TTL_MS) have.set(hit.cell, hit.data);
+    }
+  };
+  await readCache(cells);
+  const missing = cells.filter((c) => !have.has(c));
+  if (missing.length === 0) return { data: cells.map((c) => have.get(c)!), fetched: false };
+
+  const { toFetch, waitFor, lockIds } = await ctx.runMutation(internal.buildings.reserve, { slug: rateKey, cells: missing });
+
+  if (toFetch.length > 0) {
+    try {
+      const features = await fetchOverpass(cellsBBox(toFetch.map((c) => parseCellKey(c)!)));
+      // Jedes Haus gehört genau zu der Kachel seines Mittelpunkts.
+      const byCell = new Map<string, BuildingFeature[]>(toFetch.map((c) => [c, []]));
+      for (const f of features) byCell.get(cellKeyOf(centerOf(f)))?.push(f);
+      const entries = [...byCell].map(([cell, fs]) => ({ cell, data: encodeBuildings(fs) }));
+      for (const e of entries) have.set(e.cell, e.data);
+      // In Häppchen speichern, damit kein Aufruf zu groß wird; übergroße Kacheln nicht cachen.
+      let batch: typeof entries = [];
+      let size = 0;
+      for (const e of entries.filter((e) => e.data.length < MAX_CACHE_BYTES)) {
+        if (size + e.data.length > 4_000_000 && batch.length) {
+          await ctx.runMutation(internal.buildings.store, { entries: batch });
+          batch = [];
+          size = 0;
+        }
+        batch.push(e);
+        size += e.data.length;
+      }
+      if (batch.length) await ctx.runMutation(internal.buildings.store, { entries: batch });
+    } finally {
+      await ctx.runMutation(internal.buildings.release, { lockIds });
+    }
+  }
+
+  // Kacheln, die gerade ein anderer Helfer lädt: auf seinen Cache-Eintrag warten.
+  const started = Date.now();
+  let pendingCells = waitFor;
+  while (pendingCells.length > 0 && Date.now() - started < lockMs()) {
+    await new Promise((r) => setTimeout(r, WAIT_POLL_MS));
+    await readCache(pendingCells);
+    pendingCells = pendingCells.filter((c) => !have.has(c));
+  }
+  if (pendingCells.length > 0) {
+    throw new ConvexError("Die Häuser werden gerade geladen. Bitte gleich noch einmal versuchen.");
+  }
+
+  return { data: cells.map((c) => have.get(c) ?? "[]"), fetched: toFetch.length > 0 };
+}
+
+/**
  * Liefert die Häuser der angefragten Kacheln, in derselben Reihenfolge, je Kachel als
  * kompakter JSON-Text (siehe decodeBuildings).
  */
@@ -202,57 +265,125 @@ export const load = action({
       throw new ConvexError("Verteilaktion nicht gefunden");
     }
 
-    const have = new Map<string, string>();
-    const readCache = async (wanted: string[]) => {
-      const now = Date.now();
-      for (const hit of await ctx.runQuery(internal.buildings.cached, { cells: wanted })) {
-        if (now - hit.fetchedAt < CACHE_TTL_MS) have.set(hit.cell, hit.data);
+    return (await loadCells(ctx, slug, cells)).data;
+  },
+});
+
+// ---------------------------------------------------------------------------
+// Vorladen: Beim Anlegen einer Aktion (oder per Knopf) lädt Convex im Hintergrund alle
+// Häuser des gesuchten Ortes in den Cache, vom Ortsmittelpunkt nach außen, gebremst.
+// ---------------------------------------------------------------------------
+
+/** Pause zwischen zwei Overpass-Abrufen beim Vorladen (≈ 8 pro Minute). */
+const PREFETCH_PAUSE_MS = 7_000;
+/** Wartezeit nach einem Fehler, wächst mit jedem weiteren Fehler. */
+const PREFETCH_RETRY_MS = 30_000;
+const PREFETCH_MAX_FAILURES = 6;
+/** Läuft ein Auftrag so lange nicht weiter, darf er neu gestartet werden. */
+const PREFETCH_STALE_MS = 5 * 60_000;
+
+/** Eigenes Kontingent pro Minute, damit das Vorladen Helfer auf der Karte nicht ausbremst. */
+const prefetchRateKey = (slug: string) => `${slug}:vorladen`;
+
+/**
+ * Startet das Vorladen für eine Aktion, falls nicht schon eines läuft.
+ * Wird von campaigns.create und vom Knopf im Teilen-Dialog aufgerufen.
+ */
+export async function startPrefetch(ctx: MutationCtx, slug: string) {
+  const campaign = await ctx.db.query("campaigns").withIndex("by_slug", (q) => q.eq("slug", slug)).unique();
+  if (!campaign) throw new ConvexError("Verteilaktion nicht gefunden");
+  const now = Date.now();
+  const existing = await ctx.db.query("prefetchJobs").withIndex("by_slug", (q) => q.eq("slug", slug)).unique();
+  if (existing && existing.status === "running" && now - existing.updatedAt < PREFETCH_STALE_MS) return existing._id;
+
+  const batches = planPrefetch(prefetchArea(campaign), [campaign.center.lng, campaign.center.lat]);
+  const job = {
+    slug,
+    status: "running" as const,
+    batches,
+    total: batches.reduce((n, b) => n + b.length, 0),
+    done: 0,
+    failures: 0,
+    updatedAt: now,
+  };
+  let jobId: Id<"prefetchJobs">;
+  if (existing) {
+    await ctx.db.replace(existing._id, job);
+    jobId = existing._id;
+  } else {
+    jobId = await ctx.db.insert("prefetchJobs", job);
+  }
+  await ctx.scheduler.runAfter(0, internal.buildings.prefetchStep, { jobId });
+  return jobId;
+}
+
+/** Knopf „Gebiet vorladen“ im Teilen-Dialog. */
+export const prefetch = mutation({
+  args: { slug: v.string() },
+  handler: async (ctx, { slug }) => {
+    if (!SLUG_PATTERN.test(slug)) throw new ConvexError("Verteilaktion nicht gefunden");
+    await startPrefetch(ctx, slug);
+  },
+});
+
+/** Fortschritt des Vorladens, live für den Teilen-Dialog. */
+export const prefetchStatus = query({
+  args: { slug: v.string() },
+  handler: async (ctx, { slug }) => {
+    if (!SLUG_PATTERN.test(slug)) return null;
+    const job = await ctx.db.query("prefetchJobs").withIndex("by_slug", (q) => q.eq("slug", slug)).unique();
+    if (!job) return null;
+    const stale = job.status === "running" && Date.now() - job.updatedAt > PREFETCH_STALE_MS;
+    return { status: stale ? ("failed" as const) : job.status, done: job.done, total: job.total };
+  },
+});
+
+export const prefetchJob = internalQuery({
+  args: { jobId: v.id("prefetchJobs") },
+  handler: async (ctx, { jobId }) => await ctx.db.get(jobId),
+});
+
+/** Ergebnis eines Schritts festhalten und den nächsten einplanen. */
+export const prefetchAdvance = internalMutation({
+  args: { jobId: v.id("prefetchJobs"), ok: v.boolean(), fetched: v.boolean() },
+  handler: async (ctx, { jobId, ok, fetched }) => {
+    const job = await ctx.db.get(jobId);
+    if (!job || job.status !== "running") return;
+    const now = Date.now();
+    if (ok) {
+      const [first, ...rest] = job.batches;
+      const done = job.done + (first?.length ?? 0);
+      if (rest.length === 0) {
+        await ctx.db.patch(jobId, { batches: [], done, status: "done", failures: 0, updatedAt: now });
+        return;
       }
-    };
-    await readCache(cells);
-    const missing = cells.filter((c) => !have.has(c));
-    if (missing.length === 0) return cells.map((c) => have.get(c)!);
-
-    const { toFetch, waitFor, lockIds } = await ctx.runMutation(internal.buildings.reserve, { slug, cells: missing });
-
-    if (toFetch.length > 0) {
-      try {
-        const features = await fetchOverpass(cellsBBox(toFetch.map((c) => parseCellKey(c)!)));
-        // Jedes Haus gehört genau zu der Kachel seines Mittelpunkts.
-        const byCell = new Map<string, BuildingFeature[]>(toFetch.map((c) => [c, []]));
-        for (const f of features) byCell.get(cellKeyOf(centerOf(f)))?.push(f);
-        const entries = [...byCell].map(([cell, fs]) => ({ cell, data: encodeBuildings(fs) }));
-        for (const e of entries) have.set(e.cell, e.data);
-        // In Häppchen speichern, damit kein Aufruf zu groß wird; übergroße Kacheln nicht cachen.
-        let batch: typeof entries = [];
-        let size = 0;
-        for (const e of entries.filter((e) => e.data.length < MAX_CACHE_BYTES)) {
-          if (size + e.data.length > 4_000_000 && batch.length) {
-            await ctx.runMutation(internal.buildings.store, { entries: batch });
-            batch = [];
-            size = 0;
-          }
-          batch.push(e);
-          size += e.data.length;
-        }
-        if (batch.length) await ctx.runMutation(internal.buildings.store, { entries: batch });
-      } finally {
-        await ctx.runMutation(internal.buildings.release, { lockIds });
+      await ctx.db.patch(jobId, { batches: rest, done, failures: 0, updatedAt: now });
+      // Kam alles aus dem Cache, gleich weiter; sonst Overpass eine Pause gönnen.
+      await ctx.scheduler.runAfter(fetched ? PREFETCH_PAUSE_MS : 0, internal.buildings.prefetchStep, { jobId });
+    } else {
+      const failures = job.failures + 1;
+      if (failures >= PREFETCH_MAX_FAILURES) {
+        await ctx.db.patch(jobId, { status: "failed", failures, updatedAt: now });
+        return;
       }
+      await ctx.db.patch(jobId, { failures, updatedAt: now });
+      await ctx.scheduler.runAfter(PREFETCH_RETRY_MS * failures, internal.buildings.prefetchStep, { jobId });
     }
+  },
+});
 
-    // Kacheln, die gerade ein anderer Helfer lädt: auf seinen Cache-Eintrag warten.
-    const started = Date.now();
-    let pendingCells = waitFor;
-    while (pendingCells.length > 0 && Date.now() - started < lockMs()) {
-      await new Promise((r) => setTimeout(r, WAIT_POLL_MS));
-      await readCache(pendingCells);
-      pendingCells = pendingCells.filter((c) => !have.has(c));
+/** Ein Schritt: den nächsten Block laden. */
+export const prefetchStep = internalAction({
+  args: { jobId: v.id("prefetchJobs") },
+  handler: async (ctx, { jobId }) => {
+    const job = await ctx.runQuery(internal.buildings.prefetchJob, { jobId });
+    if (!job || job.status !== "running" || job.batches.length === 0) return;
+    try {
+      const { fetched } = await loadCells(ctx, prefetchRateKey(job.slug), job.batches[0]);
+      await ctx.runMutation(internal.buildings.prefetchAdvance, { jobId, ok: true, fetched });
+    } catch (e) {
+      console.warn("Vorladen: Block fehlgeschlagen", e instanceof Error ? e.message : e);
+      await ctx.runMutation(internal.buildings.prefetchAdvance, { jobId, ok: false, fetched: false });
     }
-    if (pendingCells.length > 0) {
-      throw new ConvexError("Die Häuser werden gerade geladen. Bitte gleich noch einmal versuchen.");
-    }
-
-    return cells.map((c) => have.get(c) ?? "[]");
   },
 });

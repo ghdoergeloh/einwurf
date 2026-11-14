@@ -16,6 +16,8 @@ export default defineConfig(({ command, mode }) => {
     test: {
       server: { deps: { inline: ["convex-test"] } },
       exclude: ["**/node_modules/**", "**/.pnpm-store/**", "e2e/**"],
+      // Automatisches Vorladen beim Anlegen einer Aktion in Unit-Tests aus (würde fetch aufrufen).
+      env: { PREFETCH_ON_CREATE: "off" },
     },
   };
 });

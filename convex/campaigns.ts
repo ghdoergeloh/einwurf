@@ -1,4 +1,5 @@
 import { mutation, query } from "./_generated/server";
+import { startPrefetch } from "./buildings";
 import { ConvexError, v } from "convex/values";
 import {
   MAX_CAMPAIGNS_PER_MINUTE,
@@ -53,6 +54,9 @@ export const create = mutation({
       markCount: 0,
       blockedCount: 0,
     });
+    // Häuser des Ortes im Hintergrund vorladen, damit die Helfer nicht warten.
+    // (In Unit-Tests aus, siehe vite.config.ts; dort wird es gezielt geprüft.)
+    if (process.env.PREFETCH_ON_CREATE !== "off") await startPrefetch(ctx, args.slug);
     return args.slug;
   },
 });

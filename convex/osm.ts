@@ -176,3 +176,51 @@ export function decodeBuildings(data: string): BuildingFeature[] {
     geometry: { type: "MultiPolygon", coordinates },
   }));
 }
+
+/** Höchstens so viele Kacheln lädt das Vorladen je Aktion (etwa 30–40 km² in Mitteleuropa). */
+export const MAX_PREFETCH_CELLS = 600;
+/** Ein Vorlade-Abruf umfasst einen Block von 6 × 4 Kacheln (= MAX_CELLS_PER_LOAD, Spanne < MAX_CELL_SPAN). */
+const BLOCK_W = 6;
+const BLOCK_H = 4;
+
+/**
+ * Plant das Vorladen eines Gebiets: Blöcke von Kacheln, vom Startpunkt nach außen sortiert.
+ * Ist das Gebiet zu groß, fallen die vom Startpunkt am weitesten entfernten Blöcke weg.
+ */
+export function planPrefetch(bbox: BBox, start: [number, number], maxCells = MAX_PREFETCH_CELLS): string[][] {
+  const [w, s, e, n] = bbox;
+  const x0 = Math.floor(w / CELL_SIZE);
+  const x1 = Math.floor(e / CELL_SIZE);
+  const y0 = Math.floor(s / CELL_SIZE);
+  const y1 = Math.floor(n / CELL_SIZE);
+  const blocks: { cells: string[]; dist: number }[] = [];
+  for (let bx = x0; bx <= x1; bx += BLOCK_W) {
+    for (let by = y0; by <= y1; by += BLOCK_H) {
+      const cells: string[] = [];
+      for (let x = bx; x < Math.min(bx + BLOCK_W, x1 + 1); x++)
+        for (let y = by; y < Math.min(by + BLOCK_H, y1 + 1); y++) cells.push(cellKey(x, y));
+      const cx = (bx + Math.min(BLOCK_W, x1 + 1 - bx) / 2) * CELL_SIZE;
+      const cy = (by + Math.min(BLOCK_H, y1 + 1 - by) / 2) * CELL_SIZE;
+      // Abstand in etwa gleichen Metern (Länge schrumpft mit dem Breitengrad).
+      const kx = Math.cos((start[1] * Math.PI) / 180);
+      blocks.push({ cells, dist: Math.hypot((cx - start[0]) * kx, cy - start[1]) });
+    }
+  }
+  blocks.sort((a, b) => a.dist - b.dist);
+  const out: string[][] = [];
+  let total = 0;
+  for (const b of blocks) {
+    if (total + b.cells.length > maxCells) break;
+    out.push(b.cells);
+    total += b.cells.length;
+  }
+  return out;
+}
+
+/** Ausschnitt einer Aktion fürs Vorladen: Gebiet der Ortssuche, sonst 1 km um die Mitte. */
+export function prefetchArea(campaign: { center: { lat: number; lng: number }; bbox?: number[] | null }): BBox {
+  const b = campaign.bbox;
+  if (b && b.length === 4) return [b[0], b[1], b[2], b[3]];
+  const { lat, lng } = campaign.center;
+  return [lng - 0.014, lat - 0.009, lng + 0.014, lat + 0.009];
+}

@@ -1,14 +1,17 @@
 import { useEffect, useRef, useState } from "react";
 import QRCode from "qrcode";
+import { useMutation, useQuery } from "convex/react";
+import { api } from "../../convex/_generated/api";
 
 interface Props {
+  slug: string;
   url: string;
   title: string;
   isNew: boolean;
   onClose: () => void;
 }
 
-export function ShareSheet({ url, title, isNew, onClose }: Props) {
+export function ShareSheet({ slug, url, title, isNew, onClose }: Props) {
   const [qr, setQr] = useState<string | null>(null);
   const [copied, setCopied] = useState(false);
   const dialogRef = useRef<HTMLDivElement>(null);
@@ -132,6 +135,7 @@ export function ShareSheet({ url, title, isNew, onClose }: Props) {
           </button>
           )}
         </div>
+        <PrefetchPanel slug={slug} />
         {isNew && (
           <button
             type="button"
@@ -142,6 +146,54 @@ export function ShareSheet({ url, title, isNew, onClose }: Props) {
           </button>
         )}
       </div>
+    </div>
+  );
+}
+
+/** Häuser des Gebiets vorab in den Cache laden, damit Helfer unterwegs nicht warten. */
+function PrefetchPanel({ slug }: { slug: string }) {
+  const status = useQuery(api.buildings.prefetchStatus, { slug });
+  const start = useMutation(api.buildings.prefetch);
+  const [starting, setStarting] = useState(false);
+  if (status === undefined) return null;
+  const running = status?.status === "running";
+  const pct = status && status.total > 0 ? Math.round((status.done / status.total) * 100) : 0;
+
+  return (
+    <div className="mt-4 rounded-2xl bg-paper p-4 text-sm" data-testid="prefetch">
+      {running ? (
+        <>
+          <div className="flex items-center justify-between gap-3">
+            <span className="font-medium">Häuser des Gebiets werden vorgeladen …</span>
+            <span className="tabular-nums text-muted">{pct} %</span>
+          </div>
+          <div className="mt-2 h-1.5 overflow-hidden rounded-full bg-black/10">
+            <div className="h-full rounded-full bg-sun transition-all" style={{ width: `${Math.max(3, pct)}%` }} />
+          </div>
+          <p className="mt-2 text-xs text-muted">Läuft im Hintergrund weiter, auch wenn du die Seite schließt.</p>
+        </>
+      ) : (
+        <div className="flex items-center justify-between gap-3">
+          <span className={status?.status === "done" ? "font-medium" : "text-muted"}>
+            {status?.status === "done"
+              ? "Häuser des Gebiets sind vorgeladen ✓"
+              : status?.status === "failed"
+                ? "Vorladen hat nicht geklappt (OpenStreetMap überlastet)."
+                : "Häuser vorab laden, damit unterwegs nichts wartet."}
+          </span>
+          <button
+            type="button"
+            disabled={starting}
+            onClick={() => {
+              setStarting(true);
+              start({ slug }).finally(() => setStarting(false));
+            }}
+            className="shrink-0 rounded-xl bg-ink px-3 py-2 text-xs font-medium text-white transition hover:bg-ink-2 disabled:opacity-40"
+          >
+            {status?.status === "done" ? "Erneut prüfen" : status?.status === "failed" ? "Nochmal versuchen" : "Gebiet vorladen"}
+          </button>
+        </div>
+      )}
     </div>
   );
 }

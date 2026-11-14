@@ -199,7 +199,7 @@ export function CampaignPage({ slug, isNew }: Props) {
       </div>
 
       {shareOpen && campaign && (
-        <ShareSheet url={url} title={campaign.name} isNew={welcome} onClose={() => setShareOpen(false)} />
+        <ShareSheet slug={slug} url={url} title={campaign.name} isNew={welcome} onClose={() => setShareOpen(false)} />
       )}
     </div>
   );

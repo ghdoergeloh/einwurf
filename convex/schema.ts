@@ -45,6 +45,18 @@ export default defineSchema({
   /** Kachel wird gerade von einem Aufruf geladen; andere warten auf den Cache. */
   cellLocks: defineTable({ cell: v.string(), until: v.number() }).index("by_cell", ["cell"]),
 
+  /** Vorladen der Häuser eines Gebiets je Aktion (convex/buildings.ts), mit Fortschritt. */
+  prefetchJobs: defineTable({
+    slug: v.string(),
+    status: v.union(v.literal("running"), v.literal("done"), v.literal("failed")),
+    /** Noch zu ladende Blöcke von Kacheln, der nächste zuerst. */
+    batches: v.array(v.array(v.string())),
+    total: v.number(),
+    done: v.number(),
+    failures: v.number(),
+    updatedAt: v.number(),
+  }).index("by_slug", ["slug"]),
+
   /** Protokoll der Overpass-Abrufe für die Begrenzung pro Minute. */
   overpassFetches: defineTable({ slug: v.string(), at: v.number() })
     .index("by_at", ["at"])

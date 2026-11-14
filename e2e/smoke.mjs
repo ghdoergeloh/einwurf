@@ -86,6 +86,10 @@ try {
   await p.getByRole("button", { name: /Verteilaktion starten/ }).click();
   await p.getByRole("dialog").waitFor();
   await p.waitForTimeout(500);
+  // Beim Anlegen lädt Convex die Häuser des Ortes vor; der Dialog zeigt den Fortschritt
+  await p.getByText("Häuser des Gebiets sind vorgeladen ✓").waitFor({ timeout: 30_000 });
+  const callsAfterPrefetch = overpassCalls;
+  assert.ok(callsAfterPrefetch > 0, "Vorladen hat Overpass gefragt");
   await shot(p, "2-share");
   const url = p.url();
   assert.match(url, /\/v\/[A-Za-z0-9]{22}$/, "geheimer Link ohne ?neu");
