@@ -140,7 +140,8 @@ try {
   await waitCounts(before, "wieder offen");
   log("Statistik live: gelb → dunkelgelb → offen ✓");
 
-  const relevant = errors.filter((e) => !/Failed to load resource/.test(e));
+  // Overpass-Server ohne CORS-Freigabe: Der Browser des Admins (#2) versucht dann den nächsten, das ist kein Fehler der App.
+  const relevant = errors.filter((e) => !/Failed to load resource/.test(e) && !/Access to fetch at 'https:\/\/[^']*\/(api\/)?interpreter'.*CORS policy/.test(e));
   assert.deepEqual(relevant, [], "keine Fehler in der Konsole");
   log("OK");
 } finally {
