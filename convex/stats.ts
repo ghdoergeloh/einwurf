@@ -113,27 +113,28 @@ async function addCounts(ctx: MutationCtx, rows: Doc<"areaStats">[], deltas: Map
  * Nach jeder Änderung der Gebiete einer Aktion (areas.select, Ortsteil an der Adresse): Kam ein
  * Gebiet dazu, fiel eins weg oder änderte sich die Auswahl, Zeilen neu anlegen, Markierungen neu
  * zuordnen (bei Überlappung zählt das gewählte Gebiet, für Häuser und Markierungen gleich) und
- * Häuser der Zielgebiete zählen.
+ * Häuser der Zielgebiete zählen. Liefert true, wenn neu angelegt wurde.
  */
-export async function syncAreaStats(ctx: MutationCtx, campaignId: Id<"campaigns">) {
+export async function syncAreaStats(ctx: MutationCtx, campaignId: Id<"campaigns">): Promise<boolean> {
   const docs = await areaDocs(ctx, campaignId);
-  if (docs.length === 0) return;
-  if ((await jobOf(ctx, campaignId))?.areaKey === keyOf(docs)) return;
+  if (docs.length === 0) return false;
+  if ((await jobOf(ctx, campaignId))?.areaKey === keyOf(docs)) return false;
   await resetAreaStats(ctx, campaignId);
+  return true;
 }
 
 /**
  * Zeilen neu anlegen, alle Markierungen (neu) zuordnen, Häuser zählen. Die letzte Häuserzahl je
- * Gebiet bleibt stehen, bis neu gezählt ist.
+ * Gebiet bleibt als „vorläufig“ stehen, bis neu gezählt ist.
  */
 async function resetAreaStats(ctx: MutationCtx, campaignId: Id<"campaigns">) {
   const docs = await areaDocs(ctx, campaignId);
   if (docs.length === 0) return;
   const old = await jobOf(ctx, campaignId);
   const run = (old?.run ?? 0) + 1;
-  const counted = new Map<string, { houses?: number; cellsCounted: number }>();
+  const counted = new Map<string, { houses?: number }>();
   for (const row of await ctx.db.query("areaStats").withIndex("by_campaign", (q) => q.eq("campaignId", campaignId)).collect()) {
-    if (row.houses !== undefined) counted.set(row.areaDoc, { houses: row.houses, cellsCounted: row.cellsCounted });
+    if (row.houses !== undefined) counted.set(row.areaDoc, { houses: row.houses });
     await ctx.db.delete(row._id);
   }
   for (const a of docs) {
@@ -148,7 +149,8 @@ async function resetAreaStats(ctx: MutationCtx, campaignId: Id<"campaigns">) {
       done: 0,
       blocked: 0,
       houses: counted.get(a._id)?.houses,
-      cellsCounted: counted.get(a._id)?.cellsCounted ?? 0,
+      // Übernommene Zahl gilt als vorläufig (cellsCounted 0), bis der neue Lauf gezählt hat.
+      cellsCounted: 0,
       cellsTotal: decodeCells(a.cells).length,
     });
   }
@@ -357,9 +359,10 @@ export const refresh = mutation({
   args: { slug: v.string() },
   handler: async (ctx, { slug }) => {
     const { campaign } = await requireRole(ctx, slug, "edit");
+    // Fehlt die Statistik oder passt sie nicht zu den Gebieten (älterer Stand): neu anlegen.
+    if (await syncAreaStats(ctx, campaign._id)) return;
     const job = await current(ctx, campaign._id);
-    if (!job) return await syncAreaStats(ctx, campaign._id);
-    if (job.cells !== "" || Date.now() - job.countedAt < REFRESH_MIN_MS) return;
+    if (!job || job.cells !== "" || Date.now() - job.countedAt < REFRESH_MIN_MS) return;
     await recountHouses(ctx, campaign._id);
   },
 });

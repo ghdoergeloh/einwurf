@@ -370,9 +370,26 @@ describe("Statistik je Gebiet", () => {
     await setup(t, [["w", "West", WEST]]);
     await settle(t);
     await addAreas(t, [["f", "Fern", FAR]]);
-    expect((await row(t, "w")).houses).toBe(houses.length); // vor dem Neuzählen
+    expect(await row(t, "w")).toMatchObject({ houses: houses.length, complete: false }); // vor dem Neuzählen: „vorläufig“
     await settle(t);
-    expect((await row(t, "w")).houses).toBe(houses.length);
+    expect(await row(t, "w")).toMatchObject({ houses: houses.length, complete: true });
+  });
+
+  test("refresh bringt eine Statistik aus einem älteren Stand (Fingerabdruck ohne Auswahl) auf den aktuellen", async () => {
+    const t = convexTest(schema, modules);
+    await setup(t, [["w", "West", WEST], ["e", "Ost", EAST]], ["e"]);
+    await settle(t);
+    await t.run(async (ctx) => {
+      const job = (await ctx.db.query("statsJobs").collect())[0];
+      const ids = (await ctx.db.query("areas").collect()).map((a) => a._id).sort().join(" ");
+      await ctx.db.patch(job._id, { areaKey: ids });
+      for (const r of await ctx.db.query("areaStats").collect()) await ctx.db.patch(r._id, { selected: undefined });
+    });
+    expect((await row(t, "e")).target).toBe(true); // alter Stand: falsch als Ziel
+    await t.mutation(api.stats.refresh, { slug: SLUG });
+    await settle(t);
+    expect((await row(t, "e")).target).toBe(false);
+    expect((await row(t, "w")).target).toBe(true);
   });
 
   test("Neu zählen per refresh ab Rolle edit und gebremst", async () => {
