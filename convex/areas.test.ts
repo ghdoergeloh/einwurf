@@ -275,6 +275,42 @@ describe("Laden im Browser des Admins (storeLoaded)", () => {
     expect(await nearbyNames(t, [TILE_WEST])).toEqual(before);
   });
 
+  test("was ein fremder Admin schickt, gilt nur für dessen Aktion (C11)", async () => {
+    const fetchMock = fakeOverpass();
+    vi.stubGlobal("fetch", fetchMock);
+    const t = await create();
+    // Eine zweite, fremde Aktion
+    const OTHER_ADMIN = "FremderAdminSchluessel";
+    await t.mutation(api.campaigns.create, { slug: "FremdeAktion1234567890", adminKey: OTHER_ADMIN, name: "X", placeLabel: "X", center: ROISDORF_POINT });
+    const poison = (units: { unitId: number; areas: { areaId: string; name: string; geometry: string }[] }[], tiles: { tile: string; unitIds: number[] }[]) =>
+      t.mutation(api.areas.storeLoaded, { adminKey: OTHER_ADMIN, units, tiles });
+    // 1. Kachel leer melden, 2. eine echte Gebietsnummer mit falscher Grenze, 3. eine erfundene Gemeinde
+    await poison([], [{ tile: TILE_WEST, unitIds: [] }]);
+    await poison([{ unitId: 999999, areas: [{ areaId: "relation/11", name: "Roisdorf", geometry: JSON.stringify([[box(7.5, 50.0, 7.51, 50.01)]]) }] }], []);
+    await poison([{ unitId: 888888, areas: [{ areaId: "relation/888", name: "Gefälscht", geometry: JSON.stringify([[box(7.06, 50.7, 7.07, 50.71)]]) }] }], [{ tile: TILE_EAST, unitIds: [888888] }]);
+
+    // Die eigene Aktion sieht davon nichts und lädt ganz normal
+    expect(await t.query(api.areas.nearby, { adminKey: ADMIN, tiles: [TILE_WEST, TILE_EAST] })).toEqual({ loaded: [], areas: [] });
+    await t.action(api.areas.loadTiles, { adminKey: ADMIN, tiles: [TILE_WEST, TILE_EAST] });
+    expect(fetchMock.mock.calls.length).toBeGreaterThan(0);
+    expect(await nearbyNames(t, [TILE_EAST])).toEqual(["Alfter-Ort", "Bad Godesberg", "Beuel", "Witterschlick"]);
+    await t.mutation(api.areas.select, { adminKey: ADMIN, ids: ["relation/11"], selected: true });
+    const roisdorf = (await t.query(api.areas.list, { slug: SLUG }))!.find((a) => a.id === "relation/11")!;
+    expect(roisdorf.bbox).toEqual([7.0, 50.7, 7.02, 50.71]);
+    // Die fremde Aktion sieht ihr Eigenes (für sich), aber nichts verfälscht das Gemeinsame
+    expect((await t.query(api.areas.nearby, { adminKey: OTHER_ADMIN, tiles: [TILE_WEST] })).areas.map((a) => a.name)).not.toContain("Gefälscht");
+  });
+
+  test("Speicher je Aktion begrenzt (C12)", async () => {
+    const t = await create();
+    const unit = (id: number) => ({
+      unitId: id,
+      areas: Array.from({ length: 500 }, (_, i) => ({ areaId: `relation/${id * 1000 + i}`, name: `T${i}`, geometry: JSON.stringify([[box(7 + i * 1e-4, 50.7, 7 + (i + 1) * 1e-4, 50.71)]]) })),
+    });
+    for (const id of [1, 2, 3, 4]) await t.mutation(api.areas.storeLoaded, { adminKey: ADMIN, units: [unit(id)], tiles: [] });
+    await expect(t.mutation(api.areas.storeLoaded, { adminKey: ADMIN, units: [unit(5)], tiles: [] })).rejects.toThrow(/Zu viele Ortsteile/);
+  });
+
   test("prüft, was der Browser schickt, und berechnet Ausdehnung und Kacheln selbst", async () => {
     const t = await create();
     const store = (geometry: string, areaId = "relation/5") =>

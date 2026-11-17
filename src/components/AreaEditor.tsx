@@ -5,11 +5,8 @@ import { api } from "../../convex/_generated/api";
 import { MAX_TILES_PER_LOAD, MAX_TILES_PER_VIEW, boundaryTilesIn, decodeGeometry } from "../../convex/areaGeo";
 import type { BBox } from "../../convex/osm";
 import { searchPlaces, type Place } from "../lib/geocode";
-import { computeTiles } from "../../convex/areaLoad";
 import { browserAsk } from "../lib/overpassBrowser";
-
-/** So viel Grenz-Text schickt ein Speicher-Aufruf höchstens an Convex. */
-const MAX_STORE_CHARS = 2_000_000;
+import { loadAndStore } from "../lib/areaLoading";
 import type { MapArea } from "./BuildingMap";
 
 
@@ -46,32 +43,13 @@ export function useAreaEditor({
    * Browser Overpass nicht, versucht es Convex selbst.
    */
   const load = useCallback(
-    async (key: string, batch: string[]) => {
-      try {
-        const result = await computeTiles(batch, browserAsk, (unitIds) => convex.query(api.areas.unitsInCache, { adminKey: key, unitIds }));
-        let chunk: { unitId: number; areas: { areaId: string; name: string; geometry: string }[] }[] = [];
-        let size = 0;
-        for (const u of result.units) {
-          const areas = u.areas.map((a) => ({ areaId: a.areaId, name: a.name, geometry: a.geometry }));
-          const chars = areas.reduce((n, a) => n + a.geometry.length, 0);
-          if (chunk.length && size + chars > MAX_STORE_CHARS) {
-            await storeLoaded({ adminKey: key, units: chunk, tiles: [] });
-            chunk = [];
-            size = 0;
-          }
-          chunk.push({ unitId: u.unitId, areas });
-          size += chars;
-        }
-        await storeLoaded({ adminKey: key, units: chunk, tiles: result.tiles });
-      } catch (browserError) {
-        // Ersatz: Convex fragt Overpass selbst.
-        try {
-          await loadTiles({ adminKey: key, tiles: batch });
-        } catch {
-          throw browserError;
-        }
-      }
-    },
+    (key: string, batch: string[]) =>
+      loadAndStore(batch, {
+        ask: browserAsk,
+        knownUnits: (unitIds) => convex.query(api.areas.unitsInCache, { adminKey: key, unitIds }),
+        store: (units, tiles) => storeLoaded({ adminKey: key, units, tiles }),
+        fallback: () => loadTiles({ adminKey: key, tiles: batch }),
+      }),
     [convex, loadTiles, storeLoaded],
   );
   const [loading, setLoading] = useState(false);

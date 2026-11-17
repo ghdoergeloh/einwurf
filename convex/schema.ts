@@ -83,8 +83,13 @@ export default defineSchema({
     run: v.number(),
   }),
 
-  /** Gemeinsamer Cache der Ortsteile aus OSM, für alle Aktionen (convex/areas.ts). */
+  /**
+   * Cache der Ortsteile aus OSM (convex/areas.ts). Ohne campaignId gemeinsam für alle Aktionen
+   * (von Convex selbst bei Overpass geladen); mit campaignId nur für diese Aktion (vom Browser
+   * ihres Admins geladen und geschickt, deshalb nicht für andere vertrauenswürdig).
+   */
   osmAreas: defineTable({
+    campaignId: v.optional(v.id("campaigns")),
     areaId: v.string(),
     /** OSM-Relation der Gemeinde, zu der der Ortsteil gehört. */
     unitId: v.number(),
@@ -95,17 +100,18 @@ export default defineSchema({
     cells: v.string(),
     fetchedAt: v.number(),
   })
-    .index("by_area", ["areaId"])
-    .index("by_unit", ["unitId"])
+    .index("by_scope_area", ["campaignId", "areaId"])
+    .index("by_scope_unit", ["campaignId", "unitId"])
     .index("by_fetchedAt", ["fetchedAt"]),
 
-  /** Gemeinsamer Cache: welche Gemeinden eine Grenz-Kachel (areaGeo.BOUNDARY_TILE) schneiden. */
+  /** Cache: welche Gemeinden eine Grenz-Kachel (areaGeo.BOUNDARY_TILE) schneiden; campaignId wie bei osmAreas. */
   boundaryTiles: defineTable({
+    campaignId: v.optional(v.id("campaigns")),
     tile: v.string(),
     unitIds: v.array(v.number()),
     fetchedAt: v.number(),
   })
-    .index("by_tile", ["tile"])
+    .index("by_scope_tile", ["campaignId", "tile"])
     .index("by_fetchedAt", ["fetchedAt"]),
 
   /** Notiz eines Helfers an einem Haus (convex/notes.ts); das Haus erscheint dann blau. */

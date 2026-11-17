@@ -37,19 +37,42 @@ const AREAS_DEADLINE_MS = 5 * 60_000;
 const INITIAL_ATTEMPTS = 3;
 const INITIAL_RETRY_MS = 30_000;
 
-/**
- * Ist die Grenz-Kachel vollständig und frisch im Cache: Kachel nicht abgelaufen und Ortsteile
- * jeder ihrer Gemeinden vorhanden und nicht abgelaufen (Gemeinden haben eigene Zeitstempel und
- * werden von cleanup getrennt gelöscht)? Für `nearby` und `tileStatus` gleich.
- */
-async function tileFresh(ctx: QueryCtx, tile: string, now: number): Promise<Doc<"boundaryTiles"> | null> {
-  const row = await ctx.db.query("boundaryTiles").withIndex("by_tile", (q) => q.eq("tile", tile)).unique();
-  if (!row || now - row.fetchedAt > TILE_TTL_MS) return null;
-  for (const unitId of row.unitIds) {
-    const a = await ctx.db.query("osmAreas").withIndex("by_unit", (q) => q.eq("unitId", unitId)).first();
-    if (!a || now - a.fetchedAt > TILE_TTL_MS) return null;
+// ---------------------------------------------------------------------------
+// Geltungsbereich des Caches: gemeinsam (ohne campaignId, von Convex selbst geladen und damit
+// vertrauenswürdig) oder nur für eine Aktion (vom Browser ihres Admins geschickt). Gelesen wird
+// das Gemeinsame zuerst, dann das Eigene; nie das einer anderen Aktion.
+// ---------------------------------------------------------------------------
+
+/** Eigene Aktion beim Lesen; undefined = nur gemeinsam (Convex selbst). */
+type Own = Id<"campaigns"> | undefined;
+
+const isFresh = (fetchedAt: number, now: number) => now - fetchedAt < TILE_TTL_MS;
+
+/** Frische Ortsteile einer Gemeinde: gemeinsame, sonst die der eigenen Aktion; sonst []. */
+async function unitRows(ctx: QueryCtx, unitId: number, own: Own, now: number): Promise<Doc<"osmAreas">[]> {
+  for (const scope of own ? [undefined, own] : [undefined]) {
+    const rows = await ctx.db.query("osmAreas").withIndex("by_scope_unit", (q) => q.eq("campaignId", scope).eq("unitId", unitId)).collect();
+    if (rows.length && isFresh(rows[0].fetchedAt, now)) return rows;
   }
-  return row;
+  return [];
+}
+
+const unitFresh = async (ctx: QueryCtx, unitId: number, own: Own, now: number) => (await unitRows(ctx, unitId, own, now)).length > 0;
+
+/**
+ * Die vollständige, frische Kachel (gemeinsam, sonst eigene) oder null: Kachel nicht abgelaufen
+ * und Ortsteile jeder ihrer Gemeinden frisch vorhanden (Gemeinden haben eigene Zeitstempel und
+ * werden von cleanup getrennt gelöscht). Für `nearby`, `tileStatus` und `storeLoaded` gleich.
+ */
+async function tileFresh(ctx: QueryCtx, tile: string, now: number, own: Own): Promise<Doc<"boundaryTiles"> | null> {
+  for (const scope of own ? [undefined, own] : [undefined]) {
+    const row = await ctx.db.query("boundaryTiles").withIndex("by_scope_tile", (q) => q.eq("campaignId", scope).eq("tile", tile)).unique();
+    if (!row || !isFresh(row.fetchedAt, now)) continue;
+    let complete = true;
+    for (const unitId of row.unitIds) if (!(await unitFresh(ctx, unitId, own, now))) complete = false;
+    if (complete) return row;
+  }
+  return null;
 }
 
 function assertTiles(tiles: string[], max: number) {
@@ -86,21 +109,21 @@ export const list = query({
 export const nearby = query({
   args: { adminKey: v.string(), tiles: v.array(v.string()) },
   handler: async (ctx, { adminKey, tiles }) => {
-    await requireRole(ctx, adminKey, "admin");
+    const { campaign } = await requireRole(ctx, adminKey, "admin");
     assertTiles(tiles, MAX_TILES_PER_VIEW);
     const loaded: string[] = [];
     const units = new Set<number>();
     const now = Date.now();
     for (const tile of tiles) {
       // Unvollständige oder abgelaufene Kacheln gelten als nicht geladen: Die Karte lädt sie dann neu.
-      const row = await tileFresh(ctx, tile, now);
+      const row = await tileFresh(ctx, tile, now, campaign._id);
       if (!row) continue;
       loaded.push(tile);
       row.unitIds.forEach((u) => units.add(u));
     }
     const areas = [];
     for (const unitId of units)
-      for (const a of await ctx.db.query("osmAreas").withIndex("by_unit", (q) => q.eq("unitId", unitId)).collect())
+      for (const a of await unitRows(ctx, unitId, campaign._id, now))
         areas.push({ id: a.areaId, name: a.name, geometry: a.geometry, labelAt: a.labelAt });
     return { loaded, areas };
   },
@@ -121,7 +144,10 @@ async function selectArea(ctx: MutationCtx, campaignId: Id<"campaigns">, areaId:
     return;
   }
   if (!selected) return;
-  const cached = await ctx.db.query("osmAreas").withIndex("by_area", (q) => q.eq("areaId", areaId)).first();
+  // Gemeinsam (von Convex geladen) zuerst, sonst was der Browser dieser Aktion geladen hat.
+  const cached =
+    (await ctx.db.query("osmAreas").withIndex("by_scope_area", (q) => q.eq("campaignId", undefined).eq("areaId", areaId)).first()) ??
+    (await ctx.db.query("osmAreas").withIndex("by_scope_area", (q) => q.eq("campaignId", campaignId).eq("areaId", areaId)).first());
   if (!cached) throw new ConvexError("Diesen Ortsteil gibt es nicht (mehr). Bitte die Karte neu laden.");
   await ctx.db.insert("areas", {
     campaignId,
@@ -170,25 +196,24 @@ export const adminCampaign = internalQuery({
   },
 });
 
+/** Fehlende gemeinsame Kacheln (für das Laden durch Convex selbst). */
 export const tileStatus = internalQuery({
   args: { tiles: v.array(v.string()) },
   handler: async (ctx, { tiles }) => {
     const now = Date.now();
     const missing: string[] = [];
-    for (const tile of tiles) if (!(await tileFresh(ctx, tile, now))) missing.push(tile);
+    for (const tile of tiles) if (!(await tileFresh(ctx, tile, now, undefined))) missing.push(tile);
     return missing;
   },
 });
 
+/** Gemeinden mit frischen gemeinsamen Ortsteilen (für das Laden durch Convex selbst). */
 export const knownUnits = internalQuery({
   args: { unitIds: v.array(v.number()) },
   handler: async (ctx, { unitIds }) => {
     const now = Date.now();
     const known: number[] = [];
-    for (const unitId of unitIds) {
-      const a = await ctx.db.query("osmAreas").withIndex("by_unit", (q) => q.eq("unitId", unitId)).first();
-      if (a && now - a.fetchedAt < TILE_TTL_MS) known.push(unitId);
-    }
+    for (const unitId of unitIds) if (await unitFresh(ctx, unitId, undefined, now)) known.push(unitId);
     return known;
   },
 });
@@ -208,11 +233,11 @@ const osmAreaArg = v.object({
   cells: v.string(),
 });
 
-/** Ortsteile einer Gemeinde in den Cache (ersetzt ältere). */
+/** Ortsteile einer Gemeinde in den gemeinsamen Cache (von Convex selbst geladen; ersetzt ältere). */
 export const storeUnit = internalMutation({
   args: { unitId: v.number(), areas: v.array(osmAreaArg) },
   handler: async (ctx, { unitId, areas }) => {
-    for (const old of await ctx.db.query("osmAreas").withIndex("by_unit", (q) => q.eq("unitId", unitId)).collect()) {
+    for (const old of await ctx.db.query("osmAreas").withIndex("by_scope_unit", (q) => q.eq("campaignId", undefined).eq("unitId", unitId)).collect()) {
       await ctx.db.delete(old._id);
     }
     const fetchedAt = Date.now();
@@ -225,7 +250,7 @@ export const storeTiles = internalMutation({
   handler: async (ctx, { tiles }) => {
     const fetchedAt = Date.now();
     for (const { tile, unitIds } of tiles) {
-      const row = await ctx.db.query("boundaryTiles").withIndex("by_tile", (q) => q.eq("tile", tile)).unique();
+      const row = await ctx.db.query("boundaryTiles").withIndex("by_scope_tile", (q) => q.eq("campaignId", undefined).eq("tile", tile)).unique();
       if (row) await ctx.db.patch(row._id, { unitIds, fetchedAt });
       else await ctx.db.insert("boundaryTiles", { tile, unitIds, fetchedAt });
     }
@@ -263,14 +288,11 @@ async function loadBoundaryTiles(ctx: ActionCtx, rateKey: string, tiles: string[
 export const unitsInCache = query({
   args: { adminKey: v.string(), unitIds: v.array(v.number()) },
   handler: async (ctx, { adminKey, unitIds }) => {
-    await requireRole(ctx, adminKey, "admin");
+    const { campaign } = await requireRole(ctx, adminKey, "admin");
     if (unitIds.length > MAX_UNITS_PER_STORE) throw new ConvexError("Zu viele Gemeinden");
     const now = Date.now();
     const known: number[] = [];
-    for (const unitId of unitIds) {
-      const a = await ctx.db.query("osmAreas").withIndex("by_unit", (q) => q.eq("unitId", unitId)).first();
-      if (a && now - a.fetchedAt < TILE_TTL_MS) known.push(unitId);
-    }
+    for (const unitId of unitIds) if (await unitFresh(ctx, unitId, campaign._id, now)) known.push(unitId);
     return known;
   },
 });
@@ -279,6 +301,8 @@ export const unitsInCache = query({
 const MAX_UNITS_PER_STORE = 40;
 const MAX_AREAS_PER_UNIT = 600;
 const MAX_POINTS_PER_AREA = 50_000;
+/** So viele vom Browser geladene Ortsteile speichert eine Aktion höchstens. */
+const MAX_OWN_AREAS = 2_000;
 /** Ein Ortsteil (auch eine kreisfreie Stadt als Ganzes) ist kleiner als 1° × 1°. */
 const MAX_AREA_SPAN = 1;
 const AREA_ID_PATTERN = /^relation\/\d{1,12}$/;
@@ -323,9 +347,10 @@ function checkedArea(a: { areaId: string; name: string; geometry: string }) {
 }
 
 /**
- * Speichert im Browser geladene Ortsteile und Kacheln im gemeinsamen Cache. Nur mit dem
- * Admin-Schlüssel. Überschreibt nichts, was frisch im Cache steht (so kann ein Admin die Grenzen
- * anderer Aktionen nicht ändern). Holt danach das Vorwählen an der Adresse nach.
+ * Speichert im Browser geladene Ortsteile und Kacheln, nur für die eigene Aktion: Was ein Browser
+ * schickt, kann Convex nicht gegen OSM prüfen, also gilt es nicht für andere Aktionen. Nur mit
+ * dem Admin-Schlüssel. Überschreibt nichts, was frisch da ist. Holt danach das Vorwählen an der
+ * Adresse nach.
  */
 export const storeLoaded = mutation({
   args: {
@@ -337,28 +362,30 @@ export const storeLoaded = mutation({
     const { campaign } = await requireRole(ctx, adminKey, "admin");
     if (units.length > MAX_UNITS_PER_STORE) throw new ConvexError("Zu viele Gemeinden");
     assertTiles(tiles.map((t) => t.tile), MAX_TILES_PER_LOAD);
+    const own = campaign._id;
     const now = Date.now();
-    const freshUnit = async (unitId: number) => {
-      const a = await ctx.db.query("osmAreas").withIndex("by_unit", (q) => q.eq("unitId", unitId)).first();
-      return !!a && now - a.fetchedAt < TILE_TTL_MS;
-    };
     for (const unit of units) {
       if (!Number.isInteger(unit.unitId) || unit.unitId <= 0) throw new ConvexError("Ungültige Gemeinde");
       if (unit.areas.length === 0 || unit.areas.length > MAX_AREAS_PER_UNIT) throw new ConvexError("Ungültige Gemeinde");
-      if (await freshUnit(unit.unitId)) continue;
+      // Schon frisch da (gemeinsam oder eigen): nichts überschreiben.
+      if (await unitFresh(ctx, unit.unitId, own, now)) continue;
       const rows = unit.areas.map(checkedArea);
-      for (const old of await ctx.db.query("osmAreas").withIndex("by_unit", (q) => q.eq("unitId", unit.unitId)).collect()) await ctx.db.delete(old._id);
-      for (const r of rows) await ctx.db.insert("osmAreas", { unitId: unit.unitId, fetchedAt: now, ...r });
+      const old = await ctx.db.query("osmAreas").withIndex("by_scope_unit", (q) => q.eq("campaignId", own).eq("unitId", unit.unitId)).collect();
+      for (const o of old) await ctx.db.delete(o._id);
+      // Speicher je Aktion begrenzen (jeder kann eine Aktion anlegen).
+      const stored = await ctx.db.query("osmAreas").withIndex("by_scope_unit", (q) => q.eq("campaignId", own)).take(MAX_OWN_AREAS + 1);
+      if (stored.length + rows.length > MAX_OWN_AREAS) throw new ConvexError("Zu viele Ortsteile für diese Aktion");
+      for (const r of rows) await ctx.db.insert("osmAreas", { campaignId: own, unitId: unit.unitId, fetchedAt: now, ...r });
     }
     for (const { tile, unitIds } of tiles) {
       if (unitIds.length > MAX_UNITS_PER_STORE) throw new ConvexError("Zu viele Gemeinden");
-      const row = await ctx.db.query("boundaryTiles").withIndex("by_tile", (q) => q.eq("tile", tile)).unique();
-      if (row && now - row.fetchedAt < TILE_TTL_MS) continue;
-      // Nur Gemeinden, deren Ortsteile jetzt im Cache stehen.
+      if (await tileFresh(ctx, tile, now, own)) continue;
+      // Nur Gemeinden, deren Ortsteile jetzt (für diese Aktion) im Cache stehen.
       const present: number[] = [];
-      for (const id of unitIds) if (await freshUnit(id)) present.push(id);
+      for (const id of unitIds) if (await unitFresh(ctx, id, own, now)) present.push(id);
+      const row = await ctx.db.query("boundaryTiles").withIndex("by_scope_tile", (q) => q.eq("campaignId", own).eq("tile", tile)).unique();
       if (row) await ctx.db.patch(row._id, { unitIds: present, fetchedAt: now });
-      else await ctx.db.insert("boundaryTiles", { tile, unitIds: present, fetchedAt: now });
+      else await ctx.db.insert("boundaryTiles", { campaignId: own, tile, unitIds: present, fetchedAt: now });
     }
     // Vorwählen an der Adresse nachholen (wie nach loadTiles), solange die Aktion keine Gebiete hat.
     const point = [campaign.center.lng, campaign.center.lat];
@@ -404,9 +431,10 @@ export const initialInfo = internalQuery({
 /** Wählt den Ortsteil, in dem der Punkt liegt, falls die Aktion noch keine Gebiete hat. */
 async function selectAtPoint(ctx: MutationCtx, campaignId: Id<"campaigns">, point: number[]) {
   if (await ctx.db.query("areas").withIndex("by_campaign", (q) => q.eq("campaignId", campaignId)).first()) return;
-  const tile = await ctx.db.query("boundaryTiles").withIndex("by_tile", (q) => q.eq("tile", boundaryTileOf(point[0], point[1]))).unique();
+  const now = Date.now();
+  const tile = await tileFresh(ctx, boundaryTileOf(point[0], point[1]), now, campaignId);
   for (const unitId of tile?.unitIds ?? [])
-    for (const a of await ctx.db.query("osmAreas").withIndex("by_unit", (q) => q.eq("unitId", unitId)).collect()) {
+    for (const a of await unitRows(ctx, unitId, campaignId, now)) {
       if (pointInGeometry(point, decodeGeometry(a.geometry))) {
         await selectArea(ctx, campaignId, a.areaId, true);
         const campaign = await ctx.db.get(campaignId);
