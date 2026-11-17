@@ -34,6 +34,9 @@ export const browserAsk: Ask = async (step, query, parse) => {
         // Overpass erlaubt Abfragen aus dem Browser (CORS); einen eigenen User-Agent setzt der Browser selbst.
         headers: { "Content-Type": "application/x-www-form-urlencoded" },
         body: new URLSearchParams({ data: query }).toString(),
+        // Mit Referer antwortet overpass-api.de mit 406 Not Acceptable (gemessen 2026-11, auch
+        // von der Preview aus); ohne Referer, nur mit Origin, kommt die Antwort.
+        referrerPolicy: "no-referrer",
         signal: ctrl.signal,
       });
       const text = await res.text();
