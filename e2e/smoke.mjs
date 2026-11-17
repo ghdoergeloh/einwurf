@@ -304,6 +304,10 @@ try {
   const dots = await p3.evaluate(() => window.__einwurfMap.queryRenderedFeatures({ layers: ["mark-points"] }).length);
   assert.ok(dots >= 1, "Punkte rausgezoomt");
   await p3.getByText("Heranzoomen, um Häuser zu sehen").waitFor();
+  // Rausgezoomt gibt es keine Notiz, nur einen Hinweis
+  await p3.mouse.click(cx, cy, { button: "right" });
+  await p3.getByText("Für eine Notiz näher heranzoomen.").waitFor({ timeout: 5000 });
+  assert.equal(await p3.getByRole("dialog").count(), 0);
   await shot(p3, "3b-zoomed-out");
 
   // Der zweite Helfer tippt ein gelbes Haus nochmal an: „nicht möglich“ (dunkelgelb), bei allen
@@ -322,6 +326,89 @@ try {
   await p2.mouse.click(cx, cy); // wieder gelb für die weiteren Schritte
   await p2.waitForTimeout(1200);
   assert.equal(await count(p), "2");
+
+  // Notiz: Rechtsklick auf ein Haus öffnet den Dialog, kein Kontextmenü, der Zustand bleibt
+  const nx = cx + 120, ny = cy - 120;
+  const notePainted = (page, x, y) =>
+    page.evaluate(([x, y]) => {
+      const map = window.__einwurfMap;
+      const r = map.getCanvasContainer().getBoundingClientRect();
+      const [f] = map.queryRenderedFeatures([x - r.left, y - r.top], { layers: ["buildings-fill"] });
+      return f ? Boolean(map.getFeatureState({ source: "buildings", id: f.properties.osmId }).note) : null;
+    }, [x, y]);
+  const noteStatus = await statusAt(p, nx, ny);
+  await p.evaluate(() => {
+    window.__menuShown = 0;
+    window.addEventListener("contextmenu", (e) => !e.defaultPrevented && window.__menuShown++);
+  });
+  await p.mouse.click(nx, ny, { button: "right" });
+  const dialog = p.getByRole("dialog");
+  await dialog.waitFor();
+  assert.equal(await p.evaluate(() => window.__menuShown), 0, "kein Kontextmenü des Browsers");
+  await dialog.getByLabel("Text der Notiz").fill("Briefkasten 3 und 4 haben nichts bekommen");
+  await shot(p, "4a-notiz");
+  await dialog.getByRole("button", { name: "Speichern" }).click();
+  await dialog.waitFor({ state: "hidden" });
+  assert.equal(await notePainted(p, nx, ny), true, "Haus mit Notiz blau");
+  await p.waitForTimeout(1200);
+  assert.equal(await statusAt(p, nx, ny), noteStatus, "Rechtsklick schaltet nicht weiter");
+  assert.equal(await notePainted(p2, nx, ny), true, "zweites Gerät sieht die Notiz ohne Neuladen");
+  await shot(p2, "4b-notiz-live");
+
+  // Langes Drücken beim zweiten Helfer: Notiz steht drin, ändern; der Zustand bleibt
+  await p2.mouse.move(nx, ny);
+  await p2.mouse.down();
+  await p2.waitForTimeout(800);
+  const d2 = p2.getByRole("dialog");
+  await d2.waitFor();
+  await p2.mouse.up();
+  await p2.waitForTimeout(400);
+  assert.ok(await d2.isVisible(), "Loslassen schließt den Dialog nicht");
+  assert.equal(await d2.getByLabel("Text der Notiz").inputValue(), "Briefkasten 3 und 4 haben nichts bekommen");
+  await d2.getByLabel("Text der Notiz").fill("Kiste war leer");
+  await d2.getByRole("button", { name: "Speichern" }).click();
+  await p2.waitForTimeout(1200);
+  assert.equal(await statusAt(p2, nx, ny), noteStatus, "langes Drücken schaltet nicht weiter");
+  // Ein normaler Tipp schaltet auch ein Haus mit Notiz weiter
+  await p.mouse.click(nx, ny);
+  await p.waitForTimeout(1200);
+  assert.equal(await statusAt(p2, nx, ny), next[noteStatus], "Tipp auf Haus mit Notiz schaltet weiter");
+  assert.equal(await notePainted(p2, nx, ny), true, "Notiz bleibt beim Weiterschalten");
+  const dot = await p2.evaluate(() => window.__einwurfMap.queryRenderedFeatures({ layers: ["note-points-near"] }).length);
+  assert.equal(dot, next[noteStatus] === "none" ? 0 : 1, "blauer Punkt auf markiertem Haus");
+  await shot(p2, "4c-notiz-markiert");
+
+  // Gedrückt halten und dabei schieben: kein Dialog, kein Zustandswechsel
+  const zPan = await zoom(p);
+  const sPan = await statusAt(p, cx - 120, cy + 120);
+  await p.mouse.move(cx - 120, cy + 120);
+  await p.mouse.down();
+  await p.mouse.move(cx - 60, cy + 120, { steps: 5 });
+  await p.waitForTimeout(800);
+  await p.mouse.up();
+  await p.waitForTimeout(800);
+  assert.equal(await p.getByRole("dialog").count(), 0, "Schieben öffnet keine Notiz");
+  await p.evaluate(() => window.__einwurfMap.panBy([60, 0], { duration: 0 }));
+  await p.waitForTimeout(400);
+  assert.equal(await statusAt(p, cx - 120, cy + 120), sPan, "Schieben schaltet nicht weiter");
+  assert.equal(await zoom(p), zPan);
+
+  // Löschen beim ersten Helfer: Haus nicht mehr blau, auch beim zweiten
+  await p.mouse.click(nx, ny, { button: "right" });
+  await dialog.waitFor();
+  assert.equal(await dialog.getByLabel("Text der Notiz").inputValue(), "Kiste war leer", "Änderung live angekommen");
+  await dialog.getByRole("button", { name: "Notiz löschen" }).click();
+  await p.waitForTimeout(1200);
+  assert.equal(await notePainted(p, nx, ny), false);
+  assert.equal(await notePainted(p2, nx, ny), false, "gelöscht auch beim zweiten Helfer");
+  // Zustand wie vorher, damit die Zähler der folgenden Schritte stimmen
+  for (let i = 0; i < 2; i++) {
+    await p.mouse.click(nx, ny);
+    await p.waitForTimeout(1200);
+  }
+  assert.equal(await statusAt(p, nx, ny), noteStatus);
+  assert.equal(await count(p), "2");
+
 
   // Zwei Tipps mit 350 ms Pause sind zwei einzelne Tipps (offen → gelb → dunkelgelb), kein Zoom
   const z0 = await zoom(p);
@@ -443,6 +530,10 @@ try {
     const q = m.project([c.lng + 3 * 0.0004, c.lat + 3 * 0.0003]);
     return [q.x + r.left, q.y + r.top];
   }, FAR);
+  // Notiz an einem hellgrauen Platzhalter: Hinweis statt Dialog
+  await pp.mouse.click(gap[0], gap[1], { button: "right" });
+  await pp.getByText("Dieses Haus lädt noch.", { exact: false }).waitFor({ timeout: 5000 });
+  assert.equal(await pp.getByRole("dialog").count(), 0, "kein Notiz-Dialog auf Platzhalter");
   await pp.mouse.click(gap[0], gap[1]);
   await pp.getByText("An dieser Stelle gibt es kein Haus zum Markieren.").waitFor({ timeout: 5000 });
   overpassDelayMs = 0;

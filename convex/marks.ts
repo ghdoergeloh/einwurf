@@ -7,7 +7,7 @@ import {
   MAX_MARKS_PER_CAMPAIGN,
   SLUG_PATTERN,
   assertCell,
-  assertLatLng,
+  assertCenter,
   assertOsmId,
   assertSlug,
 } from "./validation";
@@ -51,8 +51,7 @@ export const set = mutation({
   handler: async (ctx, { slug, osmId, status, marked, center }) => {
     assertSlug(slug);
     assertOsmId(osmId);
-    if (center.length !== 2) throw new ConvexError("Ungültige Koordinaten");
-    assertLatLng(center[1], center[0]);
+    assertCenter(center);
     const target: HouseStatus | undefined = status ?? (marked === undefined ? undefined : marked ? "done" : "none");
     if (!target) throw new ConvexError("Zustand fehlt");
     const campaign = await campaignForEdit(ctx, slug);
