@@ -9,15 +9,34 @@ import { BuildingMap, type LoadState, type MapControls, type Mark, type Note, ty
 import { NoteSheet } from "./NoteSheet";
 import { ShareSheet } from "./ShareSheet";
 import { LogoMark } from "./Logo";
-import { campaignPath, navigate } from "../lib/router";
+import { campaignPath, navigate, viewPath } from "../lib/router";
+import { loadViewMode, saveViewMode, type ViewMode } from "../lib/viewMode";
 
 interface Props {
+  /** Schlüssel aus dem Link: Bearbeiten-Schlüssel (`/v/…`) oder Ansehen-Schlüssel (`/a/…`). */
   slug: string;
   isNew: boolean;
+  /** Geöffnet über den Ansehen-Link `/a/…`. */
+  viewLink: boolean;
 }
 
-export function CampaignPage({ slug, isNew }: Props) {
+type Toast = { text: string; tone: "error" | "info" };
+
+export function CampaignPage({ slug, isNew, viewLink }: Props) {
   const campaign = useQuery(api.campaigns.get, { slug });
+  // Nur ansehen: Ansehen-Link, oder ein Ansehen-Schlüssel in einem /v/-Link (das Backend
+  // entscheidet über die Rechte, die Oberfläche folgt ihm nur).
+  const viewOnly = viewLink || campaign?.role === "view";
+  // Umschalter für Helfer mit dem Bearbeiten-Link, je Gerät und Aktion gemerkt.
+  const [mode, setModeState] = useState<ViewMode>(() => (viewLink ? "edit" : loadViewMode(slug)));
+  const setMode = useCallback(
+    (m: ViewMode) => {
+      setModeState(m);
+      saveViewMode(slug, m);
+    },
+    [slug],
+  );
+  const readOnly = viewOnly || mode === "view";
   // Nur die sichtbaren Zellen abonnieren: Ein Tipp schickt allen nur seine Zelle neu.
   const [cells, setCells] = useState<string[] | null>([]);
   const cellResults = useQueries(
@@ -54,7 +73,7 @@ export function CampaignPage({ slug, isNew }: Props) {
   const [welcome] = useState(isNew);
   const [shareOpen, setShareOpen] = useState(isNew);
   const [loadState, setLoadState] = useState<LoadState>("idle");
-  const [toast, setToast] = useState<string | null>(null);
+  const [toast, setToast] = useState<Toast | null>(null);
   const toastTimer = useRef<ReturnType<typeof setTimeout> | null>(null);
   const controls = useRef<MapControls | null>(null);
   const [noteTarget, setNoteTarget] = useState<NoteTarget | null>(null);
@@ -124,11 +143,26 @@ export function CampaignPage({ slug, isNew }: Props) {
     [loadAction, slug],
   );
 
-  const showToast = useCallback((text: string) => {
+  const showToast = useCallback((text: string, tone: Toast["tone"] = "error") => {
     if (toastTimer.current) clearTimeout(toastTimer.current);
-    setToast(text);
-    toastTimer.current = setTimeout(() => setToast(null), 4000);
+    setToast({ text, tone });
+    toastTimer.current = setTimeout(() => setToast(null), tone === "info" ? 2500 : 4000);
   }, []);
+
+  // Ein Tipp im Ansehen-Modus markiert nichts; ein kurzer Hinweis sagt, wie es geht.
+  // Beim Ansehen-Link genügt der feste Hinweis „Nur ansehen“.
+  const onReadOnlyTap = useCallback(
+    (kind: "tap" | "note") => {
+      if (viewOnly) return;
+      showToast(
+        kind === "note"
+          ? "Ansehen-Modus – für Notizen auf Bearbeiten wechseln"
+          : "Ansehen-Modus – zum Markieren auf Bearbeiten wechseln",
+        "info",
+      );
+    },
+    [viewOnly, showToast],
+  );
 
   const onToggle = useCallback(
     (osmId: string, status: HouseStatus, center: number[]) => {
@@ -160,7 +194,12 @@ export function CampaignPage({ slug, isNew }: Props) {
 
   if (campaign === null) return <NotFound />;
 
-  const url = `${location.origin}${campaignPath(slug)}`;
+  // Weitergegeben wird immer der Bearbeiten-Link, auch mit dem Admin-Link (#2). Mit dem
+  // Ansehen-Schlüssel kennt die Seite den Bearbeiten-Schlüssel gar nicht; der eigene
+  // Schlüssel ist dann der Ansehen-Schlüssel.
+  const editUrl = !viewOnly && campaign && "slug" in campaign ? `${location.origin}${campaignPath(campaign.slug)}` : null;
+  const viewKey = campaign?.role === "view" ? slug : (campaign?.viewKey ?? null);
+  const viewUrl = viewKey ? `${location.origin}${viewPath(viewKey)}` : null;
   const count = campaign?.markCount ?? 0;
   const blocked = campaign?.blockedCount ?? 0;
 
@@ -177,6 +216,8 @@ export function CampaignPage({ slug, isNew }: Props) {
           onToggle={onToggle}
           onConflict={onConflict}
           onNotice={showToast}
+          readOnly={readOnly}
+          onReadOnlyTap={onReadOnlyTap}
           onLoadState={setLoadState}
           loadBuildings={loadBuildings}
           loadedMarkCells={loadedMarkCells}
@@ -192,7 +233,10 @@ export function CampaignPage({ slug, isNew }: Props) {
           </a>
           <div className="min-w-0 flex-1">
             <h1 className="truncate text-[15px] font-semibold leading-tight">{campaign?.name ?? " "}</h1>
-            <p className="truncate text-xs text-white/55">{campaign?.placeLabel ?? "Lädt …"}</p>
+            <p className="truncate text-xs text-white/55">
+              {viewOnly && <span className="font-semibold text-white/80">Nur ansehen · </span>}
+              {campaign?.placeLabel ?? "Lädt …"}
+            </p>
           </div>
           <div
             className="flex shrink-0 items-center gap-1.5 rounded-xl bg-sun px-2.5 py-1.5 text-ink"
@@ -226,8 +270,9 @@ export function CampaignPage({ slug, isNew }: Props) {
           <button
             type="button"
             onClick={() => setShareOpen(true)}
+            hidden={viewOnly && !viewUrl}
             className="grid size-10 shrink-0 place-items-center rounded-xl bg-white/10 transition hover:bg-white/20"
-            aria-label="Link teilen"
+            aria-label={viewOnly ? "Ansicht teilen" : "Link teilen"}
           >
             <svg viewBox="0 0 24 24" className="size-5" fill="none" stroke="currentColor" strokeWidth="2" aria-hidden="true">
               <circle cx="18" cy="5" r="2.5" />
@@ -237,17 +282,30 @@ export function CampaignPage({ slug, isNew }: Props) {
             </svg>
           </button>
         </div>
+        {campaign && !viewOnly && (
+          <div className="mx-auto mt-2 flex max-w-3xl justify-end">
+            <ModeSwitch mode={mode} onChange={setMode} />
+          </div>
+        )}
       </div>
 
       {/* Hinweis unten */}
       {/* Rechts unten bleibt Platz für Zoom- und Standort-Knöpfe. */}
       <div className="pointer-events-none absolute bottom-0 left-0 right-16 z-10 flex justify-start p-3 pb-[max(0.75rem,env(safe-area-inset-bottom))] sm:justify-center">
-        <StatusPill state={loadState} toast={toast} offline={offline} onRetry={() => controls.current?.retry()} />
+        <StatusPill
+          state={loadState}
+          toast={toast}
+          offline={offline}
+          onRetry={() => controls.current?.retry()}
+          readOnly={viewOnly ? "link" : mode === "view" ? "mode" : null}
+          onEdit={() => setMode("edit")}
+        />
       </div>
 
       {noteTarget && (
         <NoteSheet
           key={noteTarget.osmId}
+          readOnly={viewOnly ? "link" : mode === "view" ? "mode" : false}
           houseNumber={noteTarget.houseNumber}
           note={openNote ? { text: openNote.text, updatedAt: openNote.updatedAt, pending: openNote.pending } : null}
           onSave={(text, expectedUpdatedAt) => {
@@ -265,7 +323,15 @@ export function CampaignPage({ slug, isNew }: Props) {
       )}
 
       {shareOpen && campaign && (
-        <ShareSheet slug={slug} url={url} title={campaign.name} isNew={welcome} onClose={() => setShareOpen(false)} />
+        <ShareSheet
+          slug={viewOnly ? null : slug}
+          editUrl={editUrl}
+          viewUrl={viewUrl}
+          title={campaign.name}
+          isNew={welcome}
+          showPrefetch={!readOnly}
+          onClose={() => setShareOpen(false)}
+        />
       )}
     </div>
   );
@@ -273,16 +339,68 @@ export function CampaignPage({ slug, isNew }: Props) {
 
 const SLOW_LOADING_MS = 6_000;
 
+/** Umschalter „Bearbeiten / Ansehen“ für Helfer mit dem Bearbeiten-Link. */
+function ModeSwitch({ mode, onChange }: { mode: ViewMode; onChange: (m: ViewMode) => void }) {
+  const item = (m: ViewMode, label: string, icon: React.ReactNode) => (
+    <button
+      type="button"
+      aria-pressed={mode === m}
+      onClick={() => onChange(m)}
+      className={`flex items-center gap-1.5 rounded-lg px-3 py-1.5 text-[13px] font-medium transition ${
+        mode === m ? "bg-white text-ink shadow-sm" : "text-white/70 hover:text-white"
+      }`}
+    >
+      {icon}
+      {label}
+    </button>
+  );
+  return (
+    <div
+      role="group"
+      aria-label="Modus"
+      data-testid="mode-switch"
+      className="pointer-events-auto flex gap-0.5 rounded-xl bg-ink/90 p-1 shadow-[0_10px_24px_-10px_rgba(0,0,0,0.5)] backdrop-blur"
+    >
+      {item(
+        "edit",
+        "Bearbeiten",
+        <svg viewBox="0 0 24 24" className="size-4" fill="none" stroke="currentColor" strokeWidth="2" aria-hidden="true">
+          <path d="M4 20h4L19 9l-4-4L4 16v4Z" strokeLinejoin="round" />
+        </svg>,
+      )}
+      {item(
+        "view",
+        "Ansehen",
+        <EyeIcon className="size-4" />,
+      )}
+    </div>
+  );
+}
+
+function EyeIcon({ className }: { className?: string }) {
+  return (
+    <svg viewBox="0 0 24 24" className={className} fill="none" stroke="currentColor" strokeWidth="2" aria-hidden="true">
+      <path d="M2 12s3.6-7 10-7 10 7 10 7-3.6 7-10 7S2 12 2 12Z" strokeLinejoin="round" />
+      <circle cx="12" cy="12" r="3" />
+    </svg>
+  );
+}
+
 function StatusPill({
   state,
   toast,
   offline,
   onRetry,
+  readOnly,
+  onEdit,
 }: {
   state: LoadState;
-  toast: string | null;
+  toast: Toast | null;
   offline: boolean;
   onRetry: () => void;
+  /** „link“: Ansehen-Link, „mode“: Ansehen-Modus mit dem Bearbeiten-Link. */
+  readOnly: "link" | "mode" | null;
+  onEdit: () => void;
 }) {
   // Overpass braucht manchmal eine halbe Minute; dann sagen, dass es weitergeht.
   const [slow, setSlow] = useState(false);
@@ -295,16 +413,23 @@ function StatusPill({
   const base =
     "flex max-w-full items-center gap-2.5 rounded-2xl px-4 py-2.5 text-[13px] font-medium leading-snug shadow-[0_10px_30px_-10px_rgba(0,0,0,0.45)] sm:text-sm";
   if (toast)
-    return (
+    return toast.tone === "info" ? (
+      <div role="status" className={`${base} bg-white text-ink`}>
+        <EyeIcon className="size-4 shrink-0" />
+        {toast.text}
+      </div>
+    ) : (
       <div role="alert" className={`${base} bg-red-600 text-white`}>
-        {toast}
+        {toast.text}
       </div>
     );
   if (offline)
     return (
       <div role="status" className={`${base} bg-orange-100 text-orange-950`}>
         <span className="size-2.5 shrink-0 animate-pulse rounded-full bg-orange-500" />
-        Offline. Deine Häuser werden gespeichert, sobald wieder Netz da ist.
+        {readOnly
+          ? "Offline. Der Stand wird aktualisiert, sobald wieder Netz da ist."
+          : "Offline. Deine Häuser werden gespeichert, sobald wieder Netz da ist."}
       </div>
     );
   if (state === "mapError")
@@ -345,6 +470,29 @@ function StatusPill({
             <span className="block text-muted">OpenStreetMap ist gerade langsam, das kann eine Weile dauern.</span>
           )}
         </span>
+      </div>
+    );
+  if (readOnly === "link")
+    return (
+      <div role="status" data-testid="view-only" className={`${base} bg-ink/90 text-white backdrop-blur`}>
+        <EyeIcon className="size-5 shrink-0" />
+        <span>
+          Nur ansehen
+          <span className="block text-white/60">Gelb: Flyer drin. Dunkelgelb: nicht möglich. Blau: Notiz, antippen zum Lesen. Der Stand ist live.</span>
+        </span>
+      </div>
+    );
+  if (readOnly === "mode")
+    return (
+      <div role="status" data-testid="view-only" className={`${base} pointer-events-auto bg-ink/90 text-white backdrop-blur`}>
+        <EyeIcon className="size-5 shrink-0" />
+        <span>
+          Ansehen-Modus
+          <span className="block text-white/60">Antippen markiert nichts, blaue Häuser zeigen ihre Notiz.</span>
+        </span>
+        <button type="button" onClick={onEdit} className="shrink-0 rounded-full bg-sun px-3 py-1 text-xs font-semibold text-ink">
+          Bearbeiten
+        </button>
       </div>
     );
   return (

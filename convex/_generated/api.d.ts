@@ -8,6 +8,7 @@
  * @module
  */
 
+import type * as access from "../access.js";
 import type * as buildings from "../buildings.js";
 import type * as campaigns from "../campaigns.js";
 import type * as cells from "../cells.js";
@@ -25,6 +26,7 @@ import type {
 } from "convex/server";
 
 declare const fullApi: ApiFromModules<{
+  access: typeof access;
   buildings: typeof buildings;
   campaigns: typeof campaigns;
   cells: typeof cells;

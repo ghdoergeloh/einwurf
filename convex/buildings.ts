@@ -17,6 +17,7 @@ import {
   type BuildingFeature,
 } from "./osm";
 import { SLUG_PATTERN } from "./validation";
+import { campaignByKey, hasRole, requireRole } from "./access";
 
 /**
  * Häuser aus OpenStreetMap, serverseitig über Overpass geladen und je Kachel für alle
@@ -68,10 +69,13 @@ const MAX_FETCH_CELLS = 30;
 const NEIGHBOUR_RING = 2;
 const WAIT_POLL_MS = 1_000;
 
-export const campaignExists = internalQuery({
+/**
+ * Bearbeiten-Schlüssel der Aktion zu einem Schlüssel beliebiger Rolle, oder null.
+ * Nur intern: Er dient als Schlüssel des Kontingents, damit alle Links dasselbe teilen.
+ */
+export const rateKeyOf = internalQuery({
   args: { slug: v.string() },
-  handler: async (ctx, { slug }) =>
-    !!(await ctx.db.query("campaigns").withIndex("by_slug", (q) => q.eq("slug", slug)).unique()),
+  handler: async (ctx, { slug }) => (await campaignByKey(ctx, slug))?.campaign.slug ?? null,
 });
 
 export const cached = internalQuery({
@@ -409,7 +413,8 @@ async function loadCells(
 
 /**
  * Liefert die Häuser der angefragten Kacheln, in derselben Reihenfolge, je Kachel als
- * kompakter JSON-Text (siehe decodeBuildings).
+ * kompakter JSON-Text (siehe decodeBuildings). Mit jedem Schlüssel, alle im Kontingent
+ * der Aktion.
  */
 export const load = action({
   args: { slug: v.string(), cells: v.array(v.string()) },
@@ -425,11 +430,10 @@ export const load = action({
       throw new ConvexError("Ausschnitt zu groß");
     }
     // Kein offener Proxy für Overpass: nur für bestehende Aktionen.
-    if (!SLUG_PATTERN.test(slug) || !(await ctx.runQuery(internal.buildings.campaignExists, { slug }))) {
-      throw new ConvexError("Verteilaktion nicht gefunden");
-    }
+    const rateKey = SLUG_PATTERN.test(slug) ? await ctx.runQuery(internal.buildings.rateKeyOf, { slug }) : null;
+    if (!rateKey) throw new ConvexError("Verteilaktion nicht gefunden");
 
-    return (await loadCells(ctx, slug, cells)).data;
+    return (await loadCells(ctx, rateKey, cells)).data;
   },
 });
 
@@ -505,20 +509,22 @@ export async function startPrefetch(ctx: MutationCtx, slug: string) {
   return jobId;
 }
 
-/** Knopf „Gebiet vorladen“ im Teilen-Dialog. */
+/** Knopf „Gebiet vorladen“ im Teilen-Dialog, ab Rolle edit. */
 export const prefetch = mutation({
   args: { slug: v.string() },
   handler: async (ctx, { slug }) => {
-    if (!SLUG_PATTERN.test(slug)) throw new ConvexError("Verteilaktion nicht gefunden");
-    await startPrefetch(ctx, slug);
+    const { campaign } = await requireRole(ctx, slug, "edit");
+    await startPrefetch(ctx, campaign.slug);
   },
 });
 
-/** Fortschritt des Vorladens, live für den Teilen-Dialog. */
+/** Fortschritt des Vorladens, live für den Teilen-Dialog, ab Rolle edit. */
 export const prefetchStatus = query({
   args: { slug: v.string() },
-  handler: async (ctx, { slug }) => {
-    if (!SLUG_PATTERN.test(slug)) return null;
+  handler: async (ctx, { slug: key }) => {
+    const found = await campaignByKey(ctx, key);
+    if (!found || !hasRole(found.role, "edit")) return null;
+    const slug = found.campaign.slug;
     const job = await ctx.db.query("prefetchJobs").withIndex("by_slug", (q) => q.eq("slug", slug)).unique();
     if (!job) return null;
     // Ob ein Auftrag hängt, entscheidet der Browser anhand von updatedAt (eine Query wird

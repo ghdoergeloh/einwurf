@@ -3,8 +3,18 @@ import { v } from "convex/values";
 
 export default defineSchema({
   campaigns: defineTable({
-    /** Geheimer, zufälliger Schlüssel im Link. Wer ihn kennt, darf alles. */
+    /** Geheimer, zufälliger Bearbeiten-Schlüssel im Link `/v/…`. Erlaubt alles außer der Gebietsauswahl (admin). */
     slug: v.string(),
+    /**
+     * Geheimer, zufälliger Ansehen-Schlüssel im Link `/a/…`, unabhängig vom slug (siehe access.ts).
+     * Fehlt bei älteren Aktionen, bis jemand mit Bearbeiten-Link den Teilen-Dialog öffnet.
+     */
+    viewKey: v.optional(v.string()),
+    /**
+     * Geheimer Admin-Schlüssel (Gebietsauswahl, siehe #2 und access.ts). Wird über den
+     * Bearbeiten- und den Ansehen-Link nie herausgegeben.
+     */
+    adminKey: v.optional(v.string()),
     name: v.string(),
     placeLabel: v.string(),
     center: v.object({ lat: v.number(), lng: v.number() }),
@@ -17,7 +27,9 @@ export default defineSchema({
     /** Anzahl Notizen an Häusern, für die Obergrenze MAX_NOTES_PER_CAMPAIGN. */
     noteCount: v.optional(v.number()),
   })
-    .index("by_slug", ["slug"]),
+    .index("by_slug", ["slug"])
+    .index("by_viewKey", ["viewKey"])
+    .index("by_adminKey", ["adminKey"]),
 
   marks: defineTable({
     campaignId: v.id("campaigns"),

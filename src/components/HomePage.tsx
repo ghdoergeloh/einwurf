@@ -43,6 +43,7 @@ export function HomePage() {
     try {
       const slug = await create({
         slug: generateSlug(),
+        viewKey: generateSlug(),
         name: name.trim() || `Verteilaktion ${place.short}`,
         placeLabel: place.label,
         center: { lat: place.lat, lng: place.lng },

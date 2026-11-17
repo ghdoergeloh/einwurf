@@ -114,6 +114,13 @@ interface Props {
   onConflict: () => void;
   /** Kurzer Hinweis für den Helfer. */
   onNotice: (text: string) => void;
+  /**
+   * Nur ansehen (Ansehen-Link oder Ansehen-Modus): Tippen markiert nichts. Schieben, Zoomen,
+   * Doppeltipp und Standort bleiben. Ein Tipp auf ein Haus meldet nur `onReadOnlyTap`.
+   */
+  readOnly?: boolean;
+  /** „tap“: Tipp (Markieren), „note“: langes Drücken oder Rechtsklick (Notiz). */
+  onReadOnlyTap?: (kind: "tap" | "note") => void;
   onLoadState: (s: LoadState) => void;
   /** Lädt die Häuser der Kacheln ("x:y"), über Convex mit gemeinsamem Cache. */
   loadBuildings: (cells: string[]) => Promise<BuildingFeature[]>;
@@ -132,6 +139,8 @@ export function BuildingMap({
   onToggle,
   onConflict,
   onNotice,
+  readOnly = false,
+  onReadOnlyTap,
   onLoadState,
   loadBuildings,
   loadedMarkCells,
@@ -160,6 +169,10 @@ export function BuildingMap({
   onConflictRef.current = onConflict;
   const onNoticeRef = useRef(onNotice);
   onNoticeRef.current = onNotice;
+  const readOnlyRef = useRef(readOnly);
+  readOnlyRef.current = readOnly;
+  const onReadOnlyTapRef = useRef(onReadOnlyTap);
+  onReadOnlyTapRef.current = onReadOnlyTap;
   onLoadStateRef.current = onLoadState;
   onCellsChangeRef.current = onCellsChange;
 
@@ -205,7 +218,9 @@ export function BuildingMap({
     map.touchZoomRotate.disableRotation();
     map.keyboard.disableRotation();
     mapRef.current = map;
-    if (import.meta.env.DEV) (window as unknown as { __einwurfMap?: maplibregl.Map }).__einwurfMap = map;
+    // Für Browser-Tests: lokal und in Vercel-Previews (e2e/preview.mjs), nicht in Produktion.
+    if (import.meta.env.DEV || import.meta.env.VITE_VERCEL_ENV === "preview")
+      (window as unknown as { __einwurfMap?: maplibregl.Map }).__einwurfMap = map;
 
     if (bbox && bbox.length === 4) {
       // Kleiner Ort (Straße, Ortsteil): ganz zeigen, aber nie weiter weg als Straßenansicht,
@@ -690,6 +705,11 @@ export function BuildingMap({
       const request = onNoteRequestRef.current;
       if (disposed || !request) return;
       const osmId = osmIdAt(point);
+      if (readOnlyRef.current) {
+        // Nur ansehen: vorhandene Notiz zum Lesen zeigen, sonst nichts anlegen.
+        if (!showNoteReadOnly(osmId)) onReadOnlyTapRef.current?.("note");
+        return;
+      }
       const center = osmId && centerFor(osmId);
       if (osmId && center) {
         navigator.vibrate?.(20);
@@ -704,8 +724,21 @@ export function BuildingMap({
     const longPress = new LongPress(({ x, y }) => openNoteAt(new maplibregl.Point(x, y)));
     let lastPointerType = "";
 
+    /** Nur ansehen: öffnet die Notiz des Hauses zum Lesen, falls es eine hat. */
+    function showNoteReadOnly(osmId: string | null | undefined) {
+      const note = osmId ? notesRef.current.get(osmId) : undefined;
+      if (!osmId || !note || !onNoteRequestRef.current) return false;
+      onNoteRequestRef.current({ osmId, center: note.center, houseNumber: buildings.get(osmId)?.properties.hn ?? null });
+      return true;
+    }
+
     function toggle(tap: Tap, { quiet = false } = {}) {
       if (disposed || !tap) return;
+      if (readOnlyRef.current) {
+        // Nur ansehen: Ein Tipp auf ein blaues Haus zeigt seine Notiz, sonst ändert er nichts.
+        if (!showNoteReadOnly(tap.osmId)) onReadOnlyTapRef.current?.("tap");
+        return;
+      }
       const { at } = tap;
       if (tap.placeholder) {
         // Platzhalter: sofort färben und weiterschalten; übernommen wird, wenn das Haus da ist.
@@ -862,7 +895,9 @@ export function BuildingMap({
     });
 
     map.on("mousemove", (e) => {
-      const hit = map.getZoom() >= BUILDING_MIN_ZOOM - 0.5 && pick(e.point);
+      // Beim Ansehen sind nur Häuser mit Notiz anklickbar (sie zeigen die Notiz).
+      const f = map.getZoom() >= BUILDING_MIN_ZOOM - 0.5 ? pick(e.point) : undefined;
+      const hit = f && (!readOnlyRef.current || notesRef.current.has(f.properties?.osmId as string));
       map.getCanvas().style.cursor = hit ? "pointer" : "";
     });
 
