@@ -5,6 +5,8 @@ import { ConvexError, v } from "convex/values";
 import {
   BOUNDARY_TILE_PATTERN,
   MAX_CANDIDATES,
+  MAX_TILES_PER_LOAD,
+  MAX_TILES_PER_VIEW,
   areasOfUnit,
   bboxOf,
   boundaryTileBBox,
@@ -39,10 +41,6 @@ import { isSelected } from "./areaStore";
 
 /** Grenzen ändern sich selten; nach 90 Tagen wird eine Kachel neu geladen. */
 const TILE_TTL_MS = 90 * 24 * 60 * 60 * 1000;
-/** So viele Grenz-Kacheln lädt ein Aufruf höchstens (Größe der Antwort, Zeit). */
-export const MAX_TILES_PER_LOAD = 4;
-/** So viele Kacheln zeigt die Karte im Bearbeiten-Modus höchstens auf einmal an. */
-export const MAX_TILES_PER_VIEW = 12;
 /** Mehr Gebiete wählt niemand für eine Aktion. */
 const MAX_AREAS = 500;
 const FAILURE = "Die Ortsteile (OpenStreetMap) sind gerade nicht erreichbar.";
@@ -177,9 +175,21 @@ export const tileStatus = internalQuery({
   handler: async (ctx, { tiles }) => {
     const now = Date.now();
     const missing: string[] = [];
-    for (const tile of tiles) {
+    tiles: for (const tile of tiles) {
       const row = await ctx.db.query("boundaryTiles").withIndex("by_tile", (q) => q.eq("tile", tile)).unique();
-      if (!row || now - row.fetchedAt > TILE_TTL_MS) missing.push(tile);
+      if (!row || now - row.fetchedAt > TILE_TTL_MS) {
+        missing.push(tile);
+        continue;
+      }
+      // Kachel noch frisch, aber Ortsteile einer ihrer Gemeinden schon abgelaufen (eigener
+      // Zeitstempel, siehe cleanup): neu laden, sonst fehlten sie bis zum Ablauf der Kachel.
+      for (const unitId of row.unitIds) {
+        const a = await ctx.db.query("osmAreas").withIndex("by_unit", (q) => q.eq("unitId", unitId)).first();
+        if (!a || now - a.fetchedAt > TILE_TTL_MS) {
+          missing.push(tile);
+          continue tiles;
+        }
+      }
     }
     return missing;
   },
@@ -268,6 +278,7 @@ async function loadBoundaryTiles(ctx: ActionCtx, rateKey: string, tiles: string[
   const units = chooseUnits(await ask("Gemeinden", unitQuery(union(tileBoxes)), parseCandidates));
   const known = new Set(await ctx.runQuery(internal.areas.knownUnits, { unitIds: units.map((u) => u.id) }));
   const fresh = units.filter((u) => !known.has(u.id));
+  let deferred: number[] = [];
 
   if (fresh.length > 0) {
     const candidates = await ask(
@@ -276,9 +287,19 @@ async function loadBoundaryTiles(ctx: ActionCtx, rateKey: string, tiles: string[
       parseCandidates,
     );
     const perUnit = new Map<number, ParentCandidate[]>(fresh.map((u) => [u.id, preselect(u, candidates)]));
-    const ids = [...new Set([...fresh.map((u) => u.id), ...[...perUnit.values()].flat().map((c) => c.id)])].slice(0, MAX_CANDIDATES);
-    const boundaries = await ask("Ortsteile (Grenzen)", geometryQuery(ids), parseBoundaries);
+    // Höchstens MAX_CANDIDATES Grenzen je Abruf, aber nie eine Gemeinde nur zum Teil: Was nicht
+    // mehr passt, bleibt für den nächsten Abruf (die Kacheln gelten dann noch als fehlend).
+    const ids = new Set<number>();
+    const batch: ParentCandidate[] = [];
     for (const unit of fresh) {
+      const own = [unit.id, ...perUnit.get(unit.id)!.map((c) => c.id)].filter((id) => !ids.has(id));
+      if (batch.length > 0 && ids.size + own.length > MAX_CANDIDATES) continue;
+      own.forEach((id) => ids.add(id));
+      batch.push(unit);
+    }
+    deferred = fresh.filter((u) => !batch.includes(u)).map((u) => u.id);
+    const boundaries = await ask("Ortsteile (Grenzen)", geometryQuery([...ids]), parseBoundaries);
+    for (const unit of batch) {
       const own = boundaries.find((b) => b.id === unit.id);
       if (!own) continue;
       const mine = new Set(perUnit.get(unit.id)!.map((c) => c.id));
@@ -291,8 +312,10 @@ async function loadBoundaryTiles(ctx: ActionCtx, rateKey: string, tiles: string[
       await ctx.runMutation(internal.areas.storeUnit, { unitId: unit.id, areas: rows });
     }
   }
+  const tileUnits = missing.map((tile, i) => ({ tile, unitIds: units.filter((u) => intersects(u.bbox, tileBoxes[i])).map((u) => u.id) }));
   await ctx.runMutation(internal.areas.storeTiles, {
-    tiles: missing.map((tile, i) => ({ tile, unitIds: units.filter((u) => intersects(u.bbox, tileBoxes[i])).map((u) => u.id) })),
+    // Kacheln mit noch nicht geladenen Gemeinden nicht als fertig speichern.
+    tiles: tileUnits.filter((t) => !t.unitIds.some((id) => deferred.includes(id))),
   });
 }
 

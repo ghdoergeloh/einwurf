@@ -140,6 +140,47 @@ describe("Angebot an Ortsteilen je Grenz-Kachel", () => {
     expect(geometryQuery).not.toMatch(/\b200\b/);
   });
 
+  test("Kachel noch frisch, ihre Gemeinde im Cache abgelaufen: wird neu geladen (C2)", async () => {
+    vi.stubGlobal("fetch", fakeOverpass());
+    const t = await create();
+    const day = 24 * 60 * 60 * 1000;
+    await t.action(api.areas.loadTiles, { adminKey: ADMIN, tiles: [TILE_WEST] }); // Tag 0: Bornheim, Alfter
+    vi.setSystemTime(Date.now() + 60 * day);
+    await t.action(api.areas.loadTiles, { adminKey: ADMIN, tiles: [TILE_EAST] }); // Tag 60: Alfter bekannt, Bonn neu
+    vi.setSystemTime(Date.now() + 31 * day);
+    await t.mutation(internal.areas.cleanup, {}); // Tag 91: Alfters Ortsteile gelöscht
+    expect(await nearbyNames(t, [TILE_EAST])).toEqual(["Bad Godesberg", "Beuel"]);
+    await t.action(api.areas.loadTiles, { adminKey: ADMIN, tiles: [TILE_EAST] });
+    expect(await nearbyNames(t, [TILE_EAST])).toEqual(["Alfter-Ort", "Bad Godesberg", "Beuel", "Witterschlick"]);
+  });
+
+  test("mehr Kandidaten als ein Abruf fasst: keine Gemeinde nur zum Teil, der Rest kommt beim nächsten Abruf (C7)", async () => {
+    // Zwei Gemeinden mit je 250 schmalen Ortsteilen (zusammen über MAX_CANDIDATES = 400)
+    const strips = (unitId: number, w: number, e: number) => {
+      const out = [rel(unitId, `Gemeinde ${unitId}`, 8, box(w, 50.7, e, 50.72))];
+      for (let i = 0; i < 250; i++) {
+        const x = w + ((e - w) * i) / 250;
+        out.push(rel(unitId * 1000 + i, `Teil ${unitId}-${i}`, 10, box(x, 50.7, x + (e - w) / 250, 50.72)));
+      }
+      return out;
+    };
+    const fetchMock = fakeOverpass([...strips(1, 7.0, 7.02), ...strips(2, 7.02, 7.04)]);
+    vi.stubGlobal("fetch", fetchMock);
+    const t = await create();
+    await t.action(api.areas.loadTiles, { adminKey: ADMIN, tiles: [TILE_WEST] });
+    const first = await t.query(api.areas.nearby, { adminKey: ADMIN, tiles: [TILE_WEST] });
+    expect(first.loaded).toEqual([]); // noch nicht fertig
+    await t.action(api.areas.loadTiles, { adminKey: ADMIN, tiles: [TILE_WEST] });
+    const second = await t.query(api.areas.nearby, { adminKey: ADMIN, tiles: [TILE_WEST] });
+    expect(second.loaded).toEqual([TILE_WEST]);
+    expect(second.areas).toHaveLength(500);
+    for (const call of fetchMock.mock.calls) {
+      const q = new URLSearchParams(String((call[1] as RequestInit).body)).get("data")!;
+      const ids = q.match(/rel\(id:([\d,]+)\)/);
+      if (ids) expect(ids[1].split(",").length).toBeLessThanOrEqual(400);
+    }
+  });
+
   test("Overpass überlastet: Fehler mit der Antwort der Server, nur Hostnamen", async () => {
     vi.stubEnv("OVERPASS_URLS", "https://eins.example/api?key=GEHEIM,https://zwei.example/api");
     vi.stubGlobal("fetch", vi.fn(async () => new Response("busy", { status: 504 })));

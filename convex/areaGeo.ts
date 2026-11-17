@@ -54,10 +54,15 @@ export function boundaryTileBBox(tile: string): BBox {
   return [x * BOUNDARY_TILE, y * BOUNDARY_TILE, (x + 1) * BOUNDARY_TILE, (y + 1) * BOUNDARY_TILE];
 }
 
+/** So viele Grenz-Kacheln lädt ein Aufruf höchstens (Größe der Antwort, Zeit). */
+export const MAX_TILES_PER_LOAD = 4;
+/** So viele Grenz-Kacheln zeigt die Karte im Bearbeiten-Modus höchstens auf einmal an. */
+export const MAX_TILES_PER_VIEW = 12;
+
 /** Zoomstufe zum Bearbeiten der Gebiete: so weit heraus wie möglich, höchstens Zoomstufe 12. */
 const OVERVIEW_ZOOM = 12;
 /** Höchstens so viele Grenz-Kacheln soll die Übersicht zeigen (= MAX_TILES_PER_VIEW in convex/areas.ts und src/components/AreaEditor.tsx). */
-const OVERVIEW_MAX_TILES = 12;
+const OVERVIEW_MAX_TILES = MAX_TILES_PER_VIEW;
 
 /**
  * Zoomstufe der Übersicht für dieses Fenster: höchstens 12, aber so nah, dass der Ausschnitt

@@ -2,15 +2,11 @@ import { useCallback, useEffect, useMemo, useRef, useState, type FormEvent } fro
 import { useAction, useMutation, useQuery } from "convex/react";
 import { ConvexError } from "convex/values";
 import { api } from "../../convex/_generated/api";
-import { boundaryTilesIn, decodeGeometry } from "../../convex/areaGeo";
+import { MAX_TILES_PER_LOAD, MAX_TILES_PER_VIEW, boundaryTilesIn, decodeGeometry } from "../../convex/areaGeo";
 import type { BBox } from "../../convex/osm";
 import { searchPlaces, type Place } from "../lib/geocode";
 import type { MapArea } from "./BuildingMap";
 
-/** So viele Grenz-Kacheln lädt die Karte höchstens auf einmal (= MAX_TILES_PER_LOAD in convex/areas.ts). */
-const TILES_PER_LOAD = 4;
-/** Mehr Kacheln im Ausschnitt: erst heranzoomen (= MAX_TILES_PER_VIEW). */
-const MAX_TILES_PER_VIEW = 12;
 
 type Campaign = { id: string; name: string; geometry: string; labelAt: number[]; cells: string; selected: boolean; bbox: number[] };
 
@@ -53,7 +49,7 @@ export function useAreaEditor({
     if (!active || !adminKey || busy.current || missing.length === 0) return;
     busy.current = true;
     setLoading(true);
-    const batch = missing.slice(0, TILES_PER_LOAD);
+    const batch = missing.slice(0, MAX_TILES_PER_LOAD);
     loadTiles({ adminKey, tiles: batch })
       .then(() => setError(null))
       .catch((e: unknown) => {
@@ -126,10 +122,14 @@ export function useAreaEditor({
     [adminKey, areas, select],
   );
 
+  // Alle Kacheln geladen, aber kein Angebot: OSM kennt hier keine Gemeinden mit Grenzen.
+  const empty = !!nearby && tiles.length > 0 && nearby.loaded.length === tiles.length && nearby.areas.length === 0;
+
   return {
     areas,
     toggle,
     tooFar,
+    empty,
     loading: loading || (tiles.length > 0 && nearby === undefined),
     error: saveError ?? error,
     retry,
@@ -143,6 +143,7 @@ export function AreaEditBar({
   placeLabel,
   loading,
   tooFar,
+  empty,
   error,
   onRetry,
   onChangePlace,
@@ -152,6 +153,7 @@ export function AreaEditBar({
   placeLabel: string;
   loading: boolean;
   tooFar: boolean;
+  empty: boolean;
   error: string | null;
   onRetry: () => void;
   onChangePlace: () => void;
@@ -179,7 +181,7 @@ export function AreaEditBar({
           Ändern
         </button>
       </div>
-      {(tooFar || loading || error) && (
+      {(tooFar || loading || error || empty) && (
         <div className="mt-2 flex items-center gap-2 rounded-xl bg-paper px-3 py-2 text-xs" role={error ? "alert" : "status"}>
           {error ? (
             <>
@@ -192,6 +194,8 @@ export function AreaEditBar({
             </>
           ) : tooFar ? (
             "Heranzoomen, um Ortsteile zu sehen"
+          ) : empty ? (
+            "Hier kennt OpenStreetMap keine Gemeinden mit Grenzen. Ohne gewählte Gebiete gilt der ganze Ort."
           ) : (
             <>
               <span className="size-3 shrink-0 animate-spin rounded-full border-2 border-ink/20 border-t-ink" />

@@ -356,6 +356,7 @@ export function CampaignPage({ slug, isNew, viewLink, adminKey }: Props) {
             placeLabel={campaign.placeLabel}
             loading={editor.loading}
             tooFar={editor.tooFar}
+            empty={editor.empty}
             error={editor.error}
             onRetry={editor.retry}
             onChangePlace={() => setPlaceOpen(true)}
