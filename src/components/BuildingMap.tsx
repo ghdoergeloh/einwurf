@@ -16,6 +16,7 @@ import {
   type BuildingFeature,
 } from "../lib/overpass";
 import { DOUBLE_TAP_MS, dragZoomDelta, onPress, type Press } from "../lib/taps";
+import { LongPress } from "../lib/longPress";
 import { markCellOf, markCellsIn } from "../../convex/cells";
 import { nextStatus, statusOf, type HouseStatus, type MarkStatus } from "../../convex/status";
 import { addTap, cellsToWatch, settleTaps, type PendingTap } from "../lib/pendingTaps";
@@ -57,12 +58,33 @@ const COLOR_PLACEHOLDER_LINE = "#b9b7af";
 const COLOR_FLASH = "#fff6c2";
 const FLASH_MS = 140;
 const COLOR_BLOCKED_LINE = "#5e5326";
+/** Haus mit Notiz: blau (gleich --color-note in index.css). Offene Häuser ganz, markierte mit Rand und Punkt. */
+const COLOR_NOTE = "#2f6fed";
+const COLOR_NOTE_LINE = "#1846a8";
 
 export interface Mark {
   osmId: string;
   /** [lng, lat] */
   center: number[];
   status: MarkStatus;
+}
+
+export interface Note {
+  osmId: string;
+  /** [lng, lat] */
+  center: number[];
+  text: string;
+  updatedAt: number;
+  /** Eigene Änderung, vom Server noch nicht bestätigt (optimistisch); updatedAt ist dann die Uhr des Handys. */
+  pending?: boolean;
+}
+
+/** Haus, zu dem die Notiz geöffnet werden soll. */
+export interface NoteTarget {
+  osmId: string;
+  center: number[];
+  /** Hausnummer, falls bekannt (für die Überschrift des Dialogs). */
+  houseNumber: string | null;
 }
 
 export interface MapControls {
@@ -81,6 +103,13 @@ interface Props {
   bbox: number[] | null;
   /** Markierungen der zuletzt gemeldeten Zellen. */
   marks: Mark[];
+  /** Notizen der zuletzt gemeldeten Zellen; Häuser mit Notiz sind blau. */
+  notes: Note[];
+  /**
+   * Langes Drücken oder Rechtsklick auf ein Haus: Notiz öffnen. Fehlt es, gibt es keine
+   * Notizen zum Bearbeiten (das Kontextmenü des Browsers bleibt trotzdem aus).
+   */
+  onNoteRequest?: (house: NoteTarget) => void;
   /** Markierungs-Zellen, deren Daten schon da sind. */
   loadedMarkCells: Set<string>;
   /** Sichtbare Markierungs-Zellen; null = zu weit herausgezoomt. */
@@ -114,6 +143,8 @@ export function BuildingMap({
   center,
   bbox,
   marks,
+  notes,
+  onNoteRequest,
   onCellsChange,
   onToggle,
   onConflict,
@@ -133,6 +164,9 @@ export function BuildingMap({
   const [ready, setReady] = useState(false);
   // In Refs, damit die Karten-Callbacks immer den aktuellen Stand sehen.
   const marksRef = useRef<Map<string, Mark>>(new Map());
+  const notesRef = useRef<Map<string, Note>>(new Map());
+  const onNoteRequestRef = useRef(onNoteRequest);
+  onNoteRequestRef.current = onNoteRequest;
   const onToggleRef = useRef(onToggle);
   const onLoadStateRef = useRef(onLoadState);
   const onCellsChangeRef = useRef(onCellsChange);
@@ -161,6 +195,8 @@ export function BuildingMap({
     const loadedCells = new Set<string>();
     /** osmIds, die gerade als markiert eingefärbt sind (feature-state). */
     const painted = new Map<string, MarkStatus>();
+    /** osmIds, die gerade als „hat Notiz“ eingefärbt sind (feature-state „note“). */
+    const paintedNotes = new Set<string>();
     /** Tipps auf Häuser, deren Markierungen noch laden (siehe lib/pendingTaps.ts). */
     let pendingTaps = new Map<string, PendingTap>();
     /** Tipps auf hellgraue Platzhalter, deren Haus noch von Overpass kommt (lib/placeholderTaps.ts). */
@@ -249,6 +285,32 @@ export function BuildingMap({
         })),
       };
       (map.getSource("mark-points") as GeoJSONSource | undefined)?.setData(points);
+      syncNotes(current);
+    }
+
+    /** Häuser mit Notiz: feature-state „note“ und blaue Punkte (rausgezoomt, auf markierten Häusern, ohne Umriss). */
+    function syncNotes(current: Map<string, Mark>) {
+      const notes = notesRef.current;
+      for (const id of [...paintedNotes]) {
+        if (!notes.has(id)) {
+          map.setFeatureState({ source: "buildings", id }, { note: false });
+          paintedNotes.delete(id);
+        }
+      }
+      for (const id of notes.keys()) {
+        if (!paintedNotes.has(id)) {
+          map.setFeatureState({ source: "buildings", id }, { note: true });
+          paintedNotes.add(id);
+        }
+      }
+      (map.getSource("note-points") as GeoJSONSource | undefined)?.setData({
+        type: "FeatureCollection",
+        features: [...notes.values()].map((n) => ({
+          type: "Feature",
+          properties: { osmId: n.osmId, shape: buildings.has(n.osmId), status: current.get(n.osmId)?.status ?? "none" },
+          geometry: { type: "Point", coordinates: n.center },
+        })),
+      });
     }
     syncMarksRef.current = syncMarks;
 
@@ -513,6 +575,9 @@ export function BuildingMap({
       const state: ExpressionSpecification = ["coalesce", ["feature-state", "status"], "none"];
       const byState = (none: string | number, done: string | number, blocked: string | number): ExpressionSpecification =>
         ["match", state, "done", done, "blocked", blocked, none];
+      const hasNote: ExpressionSpecification = ["boolean", ["feature-state", "note"], false];
+      /** Offenes Haus mit Notiz: ganz blau. Markierte behalten ihre Farbe und bekommen blauen Rand und Punkt. */
+      const openWithNote: ExpressionSpecification = ["all", hasNote, ["==", state, "none"]];
       map.addLayer({
         id: "buildings-fill",
         type: "fill",
@@ -520,8 +585,15 @@ export function BuildingMap({
         minzoom: BUILDING_MIN_ZOOM - 0.5,
         paint: {
           // Beim Antippen blitzt das Haus kurz hell auf (feature-state „flash“, siehe sparkle).
-          "fill-color": ["case", ["boolean", ["feature-state", "flash"], false], COLOR_FLASH, byState(COLOR_HOUSE, COLOR_MARKED, COLOR_BLOCKED)],
-          "fill-opacity": byState(0.9, 1, 1),
+          "fill-color": [
+            "case",
+            ["boolean", ["feature-state", "flash"], false],
+            COLOR_FLASH,
+            openWithNote,
+            COLOR_NOTE,
+            byState(COLOR_HOUSE, COLOR_MARKED, COLOR_BLOCKED),
+          ],
+          "fill-opacity": ["case", hasNote, 1, byState(0.9, 1, 1)],
         },
       });
       map.addLayer({
@@ -530,8 +602,16 @@ export function BuildingMap({
         source: "buildings",
         minzoom: BUILDING_MIN_ZOOM - 0.5,
         paint: {
-          "line-color": byState(COLOR_HOUSE_LINE, COLOR_MARKED_LINE, COLOR_BLOCKED_LINE),
-          "line-width": ["interpolate", ["linear"], ["zoom"], 15, 0.6, 18, byState(0.8, 2, 2)],
+          "line-color": ["case", hasNote, COLOR_NOTE_LINE, byState(COLOR_HOUSE_LINE, COLOR_MARKED_LINE, COLOR_BLOCKED_LINE)],
+          "line-width": [
+            "interpolate",
+            ["linear"],
+            ["zoom"],
+            15,
+            ["case", hasNote, 1.5, 0.6],
+            18,
+            ["case", hasNote, 3, byState(0.8, 2, 2)],
+          ],
         },
       });
       // Hausnummern: auf dem Haus, hell auf dunkel, dunkel auf gelb. Schrift aus dem Stil der Grundkarte.
@@ -552,7 +632,7 @@ export function BuildingMap({
             "text-padding": 1,
           },
           paint: {
-            "text-color": byState("#d4d7de", "#3a2f00", "#f3ecd0"),
+            "text-color": ["case", openWithNote, "#eef3ff", byState("#d4d7de", "#3a2f00", "#f3ecd0")],
           },
         });
       }
@@ -578,6 +658,44 @@ export function BuildingMap({
         minzoom: BUILDING_MIN_ZOOM - 0.5,
         filter: ["==", ["get", "shape"], false],
         paint: pointPaint,
+      });
+      // Notizen: blaue Punkte. Rausgezoomt alle (auf einem gelben Punkt als blauer Kern), nah dran nur
+      // auf markierten Häusern (deren Fläche gelb bleibt) und auf Häusern ohne Umriss.
+      map.addSource("note-points", { type: "geojson", data: EMPTY });
+      const notePaint = (r: ExpressionSpecification): CircleLayerSpecification["paint"] => ({
+        "circle-color": COLOR_NOTE,
+        "circle-radius": r,
+        "circle-stroke-color": "#ffffff",
+        "circle-stroke-width": 1.5,
+      });
+      map.addLayer({
+        id: "note-points",
+        type: "circle",
+        source: "note-points",
+        maxzoom: BUILDING_MIN_ZOOM - 0.5,
+        paint: notePaint(["interpolate", ["linear"], ["zoom"], 10, 1.5, 14, 3]),
+      });
+      const nearRadius: ExpressionSpecification = ["interpolate", ["linear"], ["zoom"], 15, 3, 18, 6];
+      // Ohne Umriss (noch nicht geladen): Punkt in der Mitte, antippbar wie mark-points-noshape.
+      map.addLayer({
+        id: "note-points-noshape",
+        type: "circle",
+        source: "note-points",
+        minzoom: BUILDING_MIN_ZOOM - 0.5,
+        filter: ["==", ["get", "shape"], false],
+        paint: notePaint(nearRadius),
+      });
+      map.addLayer({
+        id: "note-points-near",
+        type: "circle",
+        source: "note-points",
+        minzoom: BUILDING_MIN_ZOOM - 0.5,
+        filter: ["all", ["==", ["get", "shape"], true], ["!=", ["get", "status"], "none"]],
+        paint: {
+          ...notePaint(nearRadius),
+          // Ab Zoomstufe 17 stehen Hausnummern in der Mitte; der Punkt rückt dann darüber.
+          "circle-translate": ["interpolate", ["linear"], ["zoom"], 16.5, ["literal", [0, 0]], 17, ["literal", [0, -12]]],
+        },
       });
       // Namen der Gebiete, gewählte kräftig, andere (nur im Admin-Link) blass.
       if (map.getStyle().glyphs && font) {
@@ -629,7 +747,8 @@ export function BuildingMap({
     // ---------- Antippen ----------
 
     function pick(point: maplibregl.Point): MapGeoJSONFeature | undefined {
-      const layers = ["buildings-fill", "mark-points-noshape"];
+      // Der blaue Punkt auf markierten Häusern zählt nicht: Ab Zoomstufe 17 ragt er über das Haus hinaus.
+      const layers = ["buildings-fill", "mark-points-noshape", "note-points-noshape"];
       const exact = map.queryRenderedFeatures(point, { layers });
       if (exact.length) return exact[0];
       // Etwas Toleranz für Finger: nächstes Haus im Umkreis von 8 px.
@@ -703,6 +822,32 @@ export function BuildingMap({
       return shape ? { id: `p${++placeholderSeq}`, shape } : null;
     }
 
+    function centerFor(osmId: string): number[] | null {
+      const b = buildings.get(osmId);
+      return marksRef.current.get(osmId)?.center ?? (b ? centerOf(b) : null) ?? notesRef.current.get(osmId)?.center ?? null;
+    }
+
+    // ---------- Notiz: langes Drücken oder Rechtsklick ----------
+
+    /** Öffnet die Notiz des Hauses an diesem Punkt der Karte (Pixel relativ zur Karte). */
+    function openNoteAt(point: maplibregl.Point) {
+      const request = onNoteRequestRef.current;
+      if (disposed || !request) return;
+      const osmId = osmIdAt(point);
+      const center = osmId && centerFor(osmId);
+      if (osmId && center) {
+        navigator.vibrate?.(20);
+        request({ osmId, center, houseNumber: buildings.get(osmId)?.properties.hn ?? null });
+      } else if (placeholderAt(point)) {
+        // Notizen gibt es nur an geladenen Häusern; Text lässt sich nicht sinnvoll vormerken wie ein Tipp.
+        onNoticeRef.current("Dieses Haus lädt noch. Für eine Notiz kurz warten, bis es dunkel ist.");
+      } else if (map.getZoom() < BUILDING_MIN_ZOOM) {
+        onNoticeRef.current("Für eine Notiz näher heranzoomen.");
+      }
+    }
+    const longPress = new LongPress(({ x, y }) => openNoteAt(new maplibregl.Point(x, y)));
+    let lastPointerType = "";
+
     function toggle(tap: Tap, { quiet = false } = {}) {
       if (disposed || !tap) return;
       const { at } = tap;
@@ -719,7 +864,7 @@ export function BuildingMap({
       }
       const osmId = tap.osmId;
       const mark = marksRef.current.get(osmId);
-      const center = mark?.center ?? (buildings.has(osmId) ? centerOf(buildings.get(osmId)!) : null);
+      const center = centerFor(osmId);
       if (!center) return;
       const known = loadedMarkCellsRef.current.has(markCellOf(center[0], center[1]));
       let next: HouseStatus;
@@ -768,8 +913,12 @@ export function BuildingMap({
     };
     const canvas = map.getCanvasContainer();
     const onPointerDown = (e: PointerEvent) => {
+      lastPointerType = e.pointerType;
+      // Rechte (und mittlere) Maustaste: kein Tipp; die Notiz öffnet das contextmenu-Ereignis.
+      if (e.pointerType === "mouse" && e.button !== 0) return;
       if (!e.isPrimary) {
-        // Zweiter Finger (Pinch): kein Tipp.
+        // Zweiter Finger (Pinch): kein Tipp, kein langes Drücken.
+        longPress.down(e.pointerId, 0, 0, { primary: false });
         clearPending();
         doubleArmed = false;
         endDragZoom();
@@ -796,8 +945,11 @@ export function BuildingMap({
         clearPending();
         toggle(action.previous);
       }
+      longPress.down(e.pointerId, press.x, press.y, { double: action.kind === "double" });
     };
     const onPointerMove = (e: PointerEvent) => {
+      const r = canvas.getBoundingClientRect();
+      longPress.move(e.pointerId, e.clientX - r.left, e.clientY - r.top);
       if (!dragZoom || e.pointerId !== dragZoom.pointerId) return;
       const delta = dragZoomDelta(e.clientY - dragZoom.startY);
       if (delta === 0 && !dragZoom.moved) return;
@@ -805,12 +957,31 @@ export function BuildingMap({
       const zoom = Math.max(map.getMinZoom(), Math.min(map.getMaxZoom(), dragZoom.startZoom + delta));
       map.easeTo({ zoom, around: dragZoom.around, duration: 0 });
     };
+    const onPointerUp = (e: PointerEvent) => {
+      longPress.up(e.pointerId);
+      endDragZoom();
+    };
+    const onPointerCancel = () => {
+      longPress.cancel();
+      endDragZoom();
+    };
+    // Kein Kontextmenü des Browsers auf der Karte. Mit der Maus (Rechtsklick) öffnet es die Notiz;
+    // meldet der Browser ein langes Drücken mit dem Finger selbst (Android), gilt es sofort.
+    const onContextMenu = (e: MouseEvent) => {
+      e.preventDefault();
+      if (longPress.fireNow() || lastPointerType !== "mouse") return;
+      const r = canvas.getBoundingClientRect();
+      openNoteAt(new maplibregl.Point(e.clientX - r.left, e.clientY - r.top));
+    };
     canvas.addEventListener("pointerdown", onPointerDown);
+    canvas.addEventListener("contextmenu", onContextMenu);
     window.addEventListener("pointermove", onPointerMove);
-    window.addEventListener("pointerup", endDragZoom);
-    window.addEventListener("pointercancel", endDragZoom);
+    window.addEventListener("pointerup", onPointerUp);
+    window.addEventListener("pointercancel", onPointerCancel);
 
     map.on("click", (e) => {
+      // Loslassen nach langem Drücken: Die Notiz ist offen, der Zustand bleibt.
+      if (longPress.consumeFired()) return;
       if (doubleArmed) {
         // Zweiter Tipp eines Doppeltipps: hineinzoomen, nichts markieren.
         doubleArmed = false;
@@ -845,10 +1016,12 @@ export function BuildingMap({
       if (frame) cancelAnimationFrame(frame);
       clearInterval(placeholderTimer);
       settleRef.current = null;
+      longPress.cancel();
       canvas.removeEventListener("pointerdown", onPointerDown);
+      canvas.removeEventListener("contextmenu", onContextMenu);
       window.removeEventListener("pointermove", onPointerMove);
-      window.removeEventListener("pointerup", endDragZoom);
-      window.removeEventListener("pointercancel", endDragZoom);
+      window.removeEventListener("pointerup", onPointerUp);
+      window.removeEventListener("pointercancel", onPointerCancel);
       if (controlsRef) controlsRef.current = null;
       syncMarksRef.current = null;
       syncAreasRef.current = null;
@@ -862,11 +1035,12 @@ export function BuildingMap({
 
   useEffect(() => {
     marksRef.current = new Map(marks.map((m) => [m.osmId, m]));
+    notesRef.current = new Map(notes.map((n) => [n.osmId, n]));
     if (ready) {
       syncMarksRef.current?.();
       settleRef.current?.();
     }
-  }, [marks, loadedMarkCells, ready]);
+  }, [marks, notes, loadedMarkCells, ready]);
 
   useEffect(() => {
     areasRef.current = { ...areasRef.current, areas, showAll: showAllAreas };

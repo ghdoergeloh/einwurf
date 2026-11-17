@@ -6,7 +6,8 @@ import { markCellOf } from "../../convex/cells";
 import { countDelta, statusOf, type HouseStatus } from "../../convex/status";
 import { decodeBuildings } from "../../convex/osm";
 import { toAreas } from "../../convex/areaGeo";
-import { BuildingMap, type LoadState, type MapArea, type MapControls, type Mark } from "./BuildingMap";
+import { BuildingMap, type LoadState, type MapArea, type MapControls, type Mark, type Note, type NoteTarget } from "./BuildingMap";
+import { NoteSheet } from "./NoteSheet";
 import { ShareSheet } from "./ShareSheet";
 import { AreaSheet } from "./AreaSheet";
 import { StatsSheet } from "./StatsSheet";
@@ -55,6 +56,14 @@ export function CampaignPage({ slug, isNew, adminKey }: Props) {
       [cells, slug],
     ),
   );
+  // Notizen ebenso je Zelle, getrennt abonniert: Eine neue Notiz schickt die Markierungen nicht neu.
+  const noteResults = useQueries(
+    useMemo(
+      () =>
+        Object.fromEntries((cells ?? []).map((cell) => [cell, { query: api.notes.inCell, args: { slug, cell } }])),
+      [cells, slug],
+    ),
+  );
   const loadedMarkCells = useMemo(
     () => new Set(Object.entries(cellResults).filter(([, r]) => Array.isArray(r)).map(([cell]) => cell)),
     [cellResults],
@@ -62,6 +71,10 @@ export function CampaignPage({ slug, isNew, adminKey }: Props) {
   const marks = useMemo<Mark[]>(
     () => Object.values(cellResults).flatMap((r) => (Array.isArray(r) ? (r as Mark[]) : [])),
     [cellResults],
+  );
+  const notes = useMemo<Note[]>(
+    () => Object.values(noteResults).flatMap((r) => (Array.isArray(r) ? (r as Note[]) : [])),
+    [noteResults],
   );
   const connection = useConvexConnectionState();
   const offline = connection.hasEverConnected && !connection.isWebSocketConnected;
@@ -75,6 +88,7 @@ export function CampaignPage({ slug, isNew, adminKey }: Props) {
   const [toast, setToast] = useState<string | null>(null);
   const toastTimer = useRef<ReturnType<typeof setTimeout> | null>(null);
   const controls = useRef<MapControls | null>(null);
+  const [noteTarget, setNoteTarget] = useState<NoteTarget | null>(null);
 
   const setMark = useMutation(api.marks.set).withOptimisticUpdate((store, args) => {
     const cell = markCellOf(args.center[0], args.center[1]);
@@ -96,6 +110,20 @@ export function CampaignPage({ slug, isNew, adminKey }: Props) {
         markCount: Math.max(0, c.markCount + d.done),
         blockedCount: Math.max(0, c.blockedCount + d.blocked),
       });
+  });
+
+  const setNoteMutation = useMutation(api.notes.set).withOptimisticUpdate((store, args) => {
+    const cell = markCellOf(args.center[0], args.center[1]);
+    const list = store.getQuery(api.notes.inCell, { slug: args.slug, cell });
+    if (list === undefined) return;
+    const note = { osmId: args.osmId, center: args.center, text: args.text.trim(), updatedAt: Date.now(), pending: true };
+    store.setQuery(api.notes.inCell, { slug: args.slug, cell }, [...list.filter((n) => n.osmId !== args.osmId), note]);
+  });
+  const removeNoteMutation = useMutation(api.notes.remove).withOptimisticUpdate((store, args) => {
+    for (const { args: q, value } of store.getAllQueries(api.notes.inCell)) {
+      if (q.slug !== args.slug || !value?.some((n) => n.osmId === args.osmId)) continue;
+      store.setQuery(api.notes.inCell, q, value.filter((n) => n.osmId !== args.osmId));
+    }
   });
 
   useEffect(() => {
@@ -146,6 +174,16 @@ export function CampaignPage({ slug, isNew, adminKey }: Props) {
     [setMark, slug, showToast],
   );
 
+  const saveFailed = useCallback(
+    (err: unknown) =>
+      showToast(
+        err instanceof ConvexError && typeof err.data === "string" ? err.data : "Notiz konnte nicht gespeichert werden.",
+      ),
+    [showToast],
+  );
+  const closeNote = useCallback(() => setNoteTarget(null), []);
+  const openNote = noteTarget && notes.find((n) => n.osmId === noteTarget.osmId);
+
   const onConflict = useCallback(
     () => showToast("Ein Haus wurde inzwischen von jemand anderem geändert. Dieser Stand gilt."),
     [showToast],
@@ -170,6 +208,8 @@ export function CampaignPage({ slug, isNew, adminKey }: Props) {
           center={campaign.center}
           bbox={campaign.bbox}
           marks={marks}
+          notes={notes}
+          onNoteRequest={setNoteTarget}
           onCellsChange={setCells}
           onToggle={onToggle}
           onConflict={onConflict}
@@ -263,6 +303,25 @@ export function CampaignPage({ slug, isNew, adminKey }: Props) {
       <div className="pointer-events-none absolute bottom-0 left-0 right-16 z-10 flex justify-start p-3 pb-[max(0.75rem,env(safe-area-inset-bottom))] sm:justify-center">
         <StatusPill state={loadState} toast={toast} offline={offline} onRetry={() => controls.current?.retry()} />
       </div>
+
+      {noteTarget && (
+        <NoteSheet
+          key={noteTarget.osmId}
+          houseNumber={noteTarget.houseNumber}
+          note={openNote ? { text: openNote.text, updatedAt: openNote.updatedAt, pending: openNote.pending } : null}
+          onSave={(text, expectedUpdatedAt) => {
+            setNoteMutation({ slug, osmId: noteTarget.osmId, center: noteTarget.center, text, expectedUpdatedAt }).catch(
+              saveFailed,
+            );
+            closeNote();
+          }}
+          onDelete={(expectedUpdatedAt) => {
+            removeNoteMutation({ slug, osmId: noteTarget.osmId, expectedUpdatedAt }).catch(saveFailed);
+            closeNote();
+          }}
+          onClose={closeNote}
+        />
+      )}
 
       {shareOpen && campaign && (
         <ShareSheet
@@ -390,12 +449,14 @@ function StatusPill({
       <span className="flex shrink-0 flex-col gap-1" aria-hidden="true">
         <span className="size-3 rounded-[3px] bg-sun" />
         <span className="size-3 rounded-[3px] bg-blocked" />
+        <span className="size-3 rounded-[3px] bg-note" />
       </span>
       <span>
         Haus antippen, wenn der Flyer drin ist.
         <span className="block text-white/60">
           Kurz danach nochmal: nicht möglich (z. B. „Keine Werbung“). Nochmal: wieder offen.
         </span>
+        <span className="block text-white/60">Lange drücken oder Rechtsklick: Notiz (Haus wird blau).</span>
       </span>
     </div>
   );
