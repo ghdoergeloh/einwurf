@@ -22,7 +22,7 @@ import { nextStatus, statusOf, type HouseStatus, type MarkStatus } from "../../c
 import { addTap, cellsToWatch, settleTaps, type PendingTap } from "../lib/pendingTaps";
 import { cyclePlaceholder, resolvePlaceholderTaps, type PlaceholderTap } from "../lib/placeholderTaps";
 import { BURST_SECONDS, createBurst, drawBurst, type Burst } from "../lib/sparks";
-import { selectionOf, visibleIn, type AreaWithCells, type Selection } from "../../convex/areaGeo";
+import { areaAt, selectionOf, visibleIn, type AreaWithCells, type Selection } from "../../convex/areaGeo";
 
 // Ab MapLibre 6 braucht jeder Bundler den Pfad zum Worker.
 maplibregl.setWorkerUrl(workerUrl);
@@ -91,6 +91,10 @@ export interface MapControls {
   retry: () => void;
   /** Ausschnitt zeigen, z. B. ein Gebiet aus der Liste. */
   showBBox: (bbox: number[]) => void;
+  /** Zum Bearbeiten der Gebiete herauszoomen (Ortsteile ringsum sehen). */
+  overview: () => void;
+  /** An einen Punkt fliegen (neuer Mittelpunkt). */
+  flyTo: (center: { lat: number; lng: number }) => void;
 }
 
 /** Gebiet für die Karte: Grenze, Name, Auswahl und Punkt für die Beschriftung. */
@@ -138,10 +142,20 @@ interface Props {
   areas?: MapArea[];
   /** Admin-Link: auch nicht gewählte Gebiete mit Grenze und Namen zeigen (zum Auswählen). */
   showAllAreas?: boolean;
+  /**
+   * Modus „Gebiete bearbeiten“: Alle Gebiete sind zu sehen, gewählte gelb; ein Tipp auf eine
+   * Fläche meldet `onAreaTap`. Häuser markieren und Notizen gibt es in dem Modus nicht.
+   */
+  editAreas?: boolean;
+  onAreaTap?: (areaId: string) => void;
+  /** Sichtbarer Ausschnitt nach jedem Verschieben [west, süd, ost, nord] und Zoomstufe. */
+  onViewChange?: (bbox: BBox, zoom: number) => void;
 }
 
 const EMPTY: FeatureCollection = { type: "FeatureCollection", features: [] };
 const NO_AREAS: MapArea[] = [];
+/** Zoomstufe zum Bearbeiten der Gebiete: Ortsteile ringsum sind zu sehen. */
+const OVERVIEW_ZOOM = 12;
 /** Außerhalb der gewählten Gebiete: Grundkarte dezent abgedunkelt. */
 const COLOR_AREA_MASK = "#15171c";
 const COLOR_AREA_LINE = "#3a3e47";
@@ -164,6 +178,9 @@ export function BuildingMap({
   controlsRef,
   areas = NO_AREAS,
   showAllAreas = false,
+  editAreas = false,
+  onAreaTap,
+  onViewChange,
 }: Props) {
   const container = useRef<HTMLDivElement>(null);
   const mapRef = useRef<maplibregl.Map | null>(null);
@@ -194,6 +211,12 @@ export function BuildingMap({
   onReadOnlyTapRef.current = onReadOnlyTap;
   onLoadStateRef.current = onLoadState;
   onCellsChangeRef.current = onCellsChange;
+  const editRef = useRef(editAreas);
+  editRef.current = editAreas;
+  const onAreaTapRef = useRef(onAreaTap);
+  onAreaTapRef.current = onAreaTap;
+  const onViewChangeRef = useRef(onViewChange);
+  onViewChangeRef.current = onViewChange;
   const areasRef = useRef<{ areas: MapArea[]; showAll: boolean; selection: Selection | null; selectionKey: string }>({
     areas,
     showAll: showAllAreas,
@@ -485,7 +508,14 @@ export function BuildingMap({
       controlsRef.current = {
         retry: () => void loadVisible(true),
         showBBox: ([w, s, e, n]) => map.fitBounds([w, s, e, n], { padding: 40, maxZoom: 16, duration: 600 }),
+        overview: () => map.getZoom() > OVERVIEW_ZOOM && map.easeTo({ zoom: OVERVIEW_ZOOM, duration: 600 }),
+        flyTo: ({ lat, lng }) => map.flyTo({ center: [lng, lat], duration: 900 }),
       };
+
+    function reportView() {
+      const b = map.getBounds();
+      onViewChangeRef.current?.([b.getWest(), b.getSouth(), b.getEast(), b.getNorth()], map.getZoom());
+    }
 
     // ---------- Gebiete ----------
 
@@ -498,7 +528,9 @@ export function BuildingMap({
       const selectionKey = selection ? list.filter((a) => a.selected).map((a) => a.id).join(",") : "";
       areasRef.current.selection = selection;
       areasRef.current.selectionKey = selectionKey;
-      const shown = list.filter((a) => a.selected || showAll || !selection);
+      const edit = editRef.current;
+      const shown = list.filter((a) => a.selected || showAll || edit || !selection);
+      map.setLayoutProperty("area-fill", "visibility", edit ? "visible" : "none");
       (map.getSource("areas") as GeoJSONSource).setData({
         type: "FeatureCollection",
         features: shown.map((a) => ({
@@ -572,6 +604,15 @@ export function BuildingMap({
       map.addSource("area-labels", { type: "geojson", data: EMPTY });
       // Über der Grundkarte (auch ihren hellgrauen Häusern), unter unseren Häusern.
       map.addLayer({ id: "area-mask", type: "fill", source: "area-mask", paint: { "fill-color": COLOR_AREA_MASK, "fill-opacity": 0.22 } });
+      // Im Bearbeiten-Modus: gewählte Gebiete gelb hinterlegt.
+      map.addLayer({
+        id: "area-fill",
+        type: "fill",
+        source: "areas",
+        filter: ["==", ["get", "selected"], true],
+        layout: { visibility: "none" },
+        paint: { "fill-color": COLOR_MARKED, "fill-opacity": 0.28 },
+      });
       map.addLayer({
         id: "area-lines",
         type: "line",
@@ -750,13 +791,20 @@ export function BuildingMap({
       syncAreas();
       syncMarks();
       reportCells();
+      reportView();
       void loadVisible();
     });
 
     map.on("moveend", () => {
       reportCells();
+      reportView();
       void loadVisible();
     });
+
+    /** Gebiet an einem Punkt der Karte (im Bearbeiten-Modus alle angebotenen). */
+    function areaIdAt(lngLat: maplibregl.LngLat): string | null {
+      return areaAt([lngLat.lng, lngLat.lat], areasRef.current.areas)?.id ?? null;
+    }
 
     // ---------- Antippen ----------
 
@@ -846,7 +894,7 @@ export function BuildingMap({
     /** Öffnet die Notiz des Hauses an diesem Punkt der Karte (Pixel relativ zur Karte). */
     function openNoteAt(point: maplibregl.Point) {
       const request = onNoteRequestRef.current;
-      if (disposed || !request) return;
+      if (disposed || !request || editRef.current) return;
       const osmId = osmIdAt(point);
       if (readOnlyRef.current) {
         // Nur ansehen: vorhandene Notiz zum Lesen zeigen, sonst nichts anlegen.
@@ -1022,6 +1070,19 @@ export function BuildingMap({
       }
       const press = lastPress ?? { x: e.point.x, y: e.point.y, t: performance.now() };
       clearPending();
+      if (editRef.current) {
+        // Gebiete bearbeiten: Tipp wählt das Gebiet an oder ab (nach der Doppeltipp-Wartezeit).
+        const areaId = areaIdAt(e.lngLat);
+        pending = {
+          press,
+          payload: null,
+          timer: setTimeout(() => {
+            pending = null;
+            if (areaId && !disposed) onAreaTapRef.current?.(areaId);
+          }, DOUBLE_TAP_MS),
+        };
+        return;
+      }
       // Das Haus jetzt bestimmen, nicht erst nach der Wartezeit: Bis dahin kann die Karte
       // weitergerückt sein (Standortverfolgung, laufender Zoom).
       const osmId = osmIdAt(e.point);
@@ -1039,6 +1100,10 @@ export function BuildingMap({
 
     map.on("mousemove", (e) => {
       // Beim Ansehen sind nur Häuser mit Notiz anklickbar (sie zeigen die Notiz).
+      if (editRef.current) {
+        map.getCanvas().style.cursor = areaIdAt(e.lngLat) ? "pointer" : "";
+        return;
+      }
       const f = map.getZoom() >= BUILDING_MIN_ZOOM - 0.5 ? pick(e.point) : undefined;
       const hit = f && (!readOnlyRef.current || notesRef.current.has(f.properties?.osmId as string));
       map.getCanvas().style.cursor = hit ? "pointer" : "";
@@ -1079,7 +1144,7 @@ export function BuildingMap({
   useEffect(() => {
     areasRef.current = { ...areasRef.current, areas, showAll: showAllAreas };
     if (ready) syncAreasRef.current?.();
-  }, [areas, showAllAreas, ready]);
+  }, [areas, showAllAreas, editAreas, ready]);
 
   // MapLibre setzt am Container position: relative; deshalb ein eigener Rahmen außen.
   return (

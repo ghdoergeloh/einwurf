@@ -168,10 +168,16 @@ const MUTATIONS_REJECTING_VIEW_KEY: Record<string, (t: T) => Promise<unknown>> =
   "notes:remove": (t) => t.mutation(api.notes.remove, { slug: VIEW, osmId: "way/1" }),
 };
 /** Öffentliche Mutationen nur für den Admin-Schlüssel (Gebiete, #2), je mit einem anderen Schlüssel aufgerufen. */
-const ADMIN_MUTATIONS: Record<string, (t: T, key: string) => Promise<unknown>> = {
-  "areas:select": (t, key) => t.mutation(api.areas.select, { adminKey: key, ids: ["ort"], selected: false }),
-  "areas:load": (t, key) => t.mutation(api.areas.load, { adminKey: key }),
+const ADMIN_ONLY: Record<string, { kind: "mutation" | "action" | "query"; call: (t: T, key: string) => Promise<unknown> }> = {
+  "areas:select": { kind: "mutation", call: (t, key) => t.mutation(api.areas.select, { adminKey: key, ids: ["relation/1"], selected: true }) },
+  "areas:loadTiles": { kind: "action", call: (t, key) => t.action(api.areas.loadTiles, { adminKey: key, tiles: ["140:1014"] }) },
+  "areas:nearby": { kind: "query", call: (t, key) => t.query(api.areas.nearby, { adminKey: key, tiles: ["140:1014"] }) },
+  "campaigns:setPlace": {
+    kind: "mutation",
+    call: (t, key) => t.mutation(api.campaigns.setPlace, { adminKey: key, placeLabel: "Woanders", center: { lat: 51, lng: 7 } }),
+  },
 };
+const adminOnly = (kind: "mutation" | "action" | "query") => Object.keys(ADMIN_ONLY).filter((k) => ADMIN_ONLY[k].kind === kind);
 /** Öffentliche Mutationen, die keine bestehende Aktion ändern. */
 const MUTATIONS_WITHOUT_CAMPAIGN = ["campaigns:create"];
 /** Öffentliche Actions, die mit dem Ansehen-Schlüssel erlaubt sind (nur lesen, siehe Tests oben). */
@@ -183,7 +189,6 @@ const QUERIES: Record<string, (t: T, key: string) => Promise<unknown>> = {
   "notes:inCell": (t, key) => t.query(api.notes.inCell, { slug: key, cell: CELL }),
   "buildings:prefetchStatus": (t, key) => t.query(api.buildings.prefetchStatus, { slug: key }),
   "areas:list": (t, key) => t.query(api.areas.list, { slug: key }),
-  "areas:status": (t, key) => t.query(api.areas.status, { slug: key }),
 };
 
 /** Alles, was ein Ansehen-Schlüssel ändern könnte, als Abzug der Datenbank. */
@@ -195,7 +200,7 @@ const snapshot = (t: T) =>
       await ctx.db.query("notes").collect(),
       await ctx.db.query("prefetchJobs").collect(),
       await ctx.db.query("areas").collect(),
-      await ctx.db.query("areaSets").collect(),
+      await ctx.db.query("osmAreas").collect(),
     ]),
   );
 
@@ -214,10 +219,10 @@ describe("Rechte aller öffentlichen Funktionen", () => {
       }
     }
     expect(found.mutation.sort()).toEqual(
-      [...Object.keys(MUTATIONS_REJECTING_VIEW_KEY), ...Object.keys(ADMIN_MUTATIONS), ...MUTATIONS_WITHOUT_CAMPAIGN].sort(),
+      [...Object.keys(MUTATIONS_REJECTING_VIEW_KEY), ...adminOnly("mutation"), ...MUTATIONS_WITHOUT_CAMPAIGN].sort(),
     );
-    expect(found.action.sort()).toEqual([...ACTIONS_READ_ONLY].sort());
-    expect(found.query.sort()).toEqual(Object.keys(QUERIES).sort());
+    expect(found.action.sort()).toEqual([...ACTIONS_READ_ONLY, ...adminOnly("action")].sort());
+    expect(found.query.sort()).toEqual([...Object.keys(QUERIES), ...adminOnly("query")].sort());
   });
 
   for (const [name, call] of Object.entries(MUTATIONS_REJECTING_VIEW_KEY)) {
@@ -229,15 +234,14 @@ describe("Rechte aller öffentlichen Funktionen", () => {
     });
   }
 
-  for (const [name, call] of Object.entries(ADMIN_MUTATIONS)) {
+  for (const [name, { call }] of Object.entries(ADMIN_ONLY)) {
     test(`${name} lehnt Bearbeiten- und Ansehen-Schlüssel ab und ändert nichts`, async () => {
       const t = await setupWithAdmin();
-      // Gebiete geladen (ganzer Ort), damit eine Auswahl überhaupt möglich wäre.
+      // Ein Ortsteil im Cache, damit eine Auswahl überhaupt möglich wäre.
       await t.run(async (ctx) => {
-        const c = (await ctx.db.query("campaigns").first())!;
-        await ctx.db.insert("areas", { campaignId: c._id, areaId: "ort", name: "Ort", geometry: "[]", bbox: [0, 0, 1, 1], labelAt: [0, 0], cells: "" });
-        await ctx.db.insert("areaSets", { campaignId: c._id, status: "failed", unselected: [], failures: 3, updatedAt: 0, run: 1 });
+        await ctx.db.insert("osmAreas", { areaId: "relation/1", unitId: 9, name: "Ort", geometry: "[]", bbox: [0, 0, 1, 1], labelAt: [0, 0], cells: "", fetchedAt: Date.now() });
       });
+      vi.stubGlobal("fetch", vi.fn(async () => new Response(JSON.stringify({ elements: [] }))));
       const before = await snapshot(t);
       for (const key of [SLUG, VIEW]) await expect(call(t, key)).rejects.toThrow(/Admin-Link/);
       expect(await snapshot(t)).toBe(before);

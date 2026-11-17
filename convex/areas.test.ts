@@ -5,94 +5,76 @@ import { api, internal } from "./_generated/api";
 import schema from "./schema";
 import { CELL_SIZE, decodeBuildings } from "./osm";
 import { campaignAreas } from "./areaStore";
-import { areaAt } from "./areaGeo";
-import { AREAS_STALE_MS } from "./areas";
+import { areaAt, boundaryTileOf, touchedCells } from "./areaGeo";
+import { markCellOf } from "./cells";
 
 const modules = import.meta.glob("./**/*.ts");
 const SLUG = "AbCdEfGhIjKlMnOpQrStUv";
 const ADMIN = "AdminSchluessel1234567";
+const VIEW = "AnsehenSchluessel12345";
 
 type Ring = [number, number][];
 const box = (w: number, s: number, e: number, n: number): Ring => [[w, s], [e, s], [e, n], [w, n], [w, s]];
 /** Grenze als Relation mit Geometrie, Außenring in zwei Teilstücken (wie oft in OSM). */
-function rel(id: number, name: string, tags: Record<string, string>, ring: Ring, hole?: Ring) {
+function rel(id: number, name: string, level: number, ring: Ring, hole?: Ring) {
   const half = Math.ceil(ring.length / 2);
   const way = (pts: Ring, role: string) => ({ type: "way", role, geometry: pts.map(([lon, lat]) => ({ lat, lon })) });
   const members = [way(ring.slice(0, half), "outer"), way(ring.slice(half - 1), "outer")];
   if (hole) members.push(way(hole, "inner"));
-  return { type: "relation", id, tags: { name, ...tags }, members };
+  return { type: "relation", id, tags: { name, boundary: "administrative", admin_level: String(level) }, members };
 }
-const admin = (level: number) => ({ boundary: "administrative", admin_level: String(level) });
-const parent = (id: number, name: string, level: number, [w, s, e, n]: number[]) => ({
-  type: "relation", id, tags: { name, ...admin(level) }, bounds: { minlon: w, minlat: s, maxlon: e, maxlat: n },
-});
 
 /**
- * Ort A, gegliedert wie Bornheim: Stadt (Stufe 8) mit vier Ortsteilen (Stufe 10), dazu ein
- * Nachbarort, dessen Ortsteil nur die Grenze berührt.
+ * Drei Gemeinden nebeneinander (Grenz-Kacheln sind 0,05° breit, 7,00–7,05 und 7,05–7,10):
+ *  - Bornheim (Stufe 8) mit vier Ortsteilen (Stufe 10),
+ *  - Alfter (Stufe 8) mit zwei Ortsteilen (Stufe 9),
+ *  - Bonn, kreisfreie Stadt (Stufe 6), mit zwei Bezirken (Stufe 9).
+ * Dazu der Kreis (Stufe 6), der Bornheim und Alfter enthält und selbst kein Angebot ist.
  */
-const A = {
-  bbox: [7.0, 50.7, 7.04, 50.72],
-  center: { lng: 7.005, lat: 50.705 },
-  parents: [parent(1, "NRW", 4, [6, 50, 9, 52]), parent(2, "Kreis", 6, [6.8, 50.5, 7.4, 51]), parent(100, "Bornheim", 8, [7.0, 50.7, 7.04, 50.72])],
-  boundaries: [
-    rel(100, "Bornheim", admin(8), box(7.0, 50.7, 7.04, 50.72)),
-    rel(11, "Roisdorf", admin(10), box(7.0, 50.7, 7.02, 50.71)),
-    rel(12, "Hersel", admin(10), box(7.02, 50.7, 7.04, 50.71)),
-    rel(13, "Brenig", admin(10), box(7.0, 50.71, 7.02, 50.72)),
-    rel(14, "Sechtem", admin(10), box(7.02, 50.71, 7.04, 50.72)),
-    rel(99, "Nachbardorf", admin(10), box(7.04, 50.7, 7.06, 50.72)),
-  ],
-};
+const REGION = [
+  rel(1, "Rhein-Sieg-Kreis", 6, box(6.99, 50.69, 7.081, 50.73)),
+  rel(100, "Bornheim", 8, box(7.0, 50.7, 7.04, 50.72)),
+  rel(11, "Roisdorf", 10, box(7.0, 50.7, 7.02, 50.71)),
+  rel(12, "Hersel", 10, box(7.02, 50.7, 7.04, 50.71)),
+  rel(13, "Brenig", 10, box(7.0, 50.71, 7.02, 50.72)),
+  rel(14, "Sechtem", 10, box(7.02, 50.71, 7.04, 50.72)),
+  rel(200, "Alfter", 8, box(7.04, 50.7, 7.08, 50.72)),
+  rel(21, "Alfter-Ort", 9, box(7.04, 50.7, 7.06, 50.72)),
+  rel(22, "Witterschlick", 9, box(7.06, 50.7, 7.08, 50.72)),
+  rel(300, "Bonn", 6, box(7.08, 50.7, 7.12, 50.72)),
+  rel(31, "Beuel", 9, box(7.08, 50.7, 7.1, 50.72)),
+  rel(32, "Bad Godesberg", 9, box(7.1, 50.7, 7.12, 50.72)),
+];
+const ROISDORF_POINT = { lng: 7.005, lat: 50.705 };
+const TILE_WEST = boundaryTileOf(7.01, 50.71); // 7,00–7,05: Bornheim und Teil von Alfter
+const TILE_EAST = boundaryTileOf(7.07, 50.71); // 7,05–7,10: Alfter und Teil von Bonn
 
-/**
- * Ort B, eine Großstadt: kreisfreie Stadt (Stufe 6) mit zwei Stadtbezirken (Stufe 9), die sie
- * ganz teilen; Stadtteile (Stufe 10) sind nur für einen Bezirk erfasst. Ein Bezirk hat ein Loch
- * (Enklave), in dem der andere liegt. Erwartet: die Stadtbezirke.
- */
-const B = {
-  bbox: [8.0, 51.0, 8.1, 51.1],
-  center: { lng: 8.05, lat: 51.05 },
-  parents: [parent(3, "Land", 4, [7, 50, 10, 53]), parent(200, "Großstadt", 6, [8.0, 51.0, 8.1, 51.1])],
-  boundaries: [
-    rel(200, "Großstadt", admin(6), box(8.0, 51.0, 8.1, 51.1)),
-    rel(21, "Außenbezirk", admin(9), box(8.0, 51.0, 8.1, 51.1), box(8.04, 51.04, 8.06, 51.06)),
-    rel(22, "Innenstadt", admin(9), box(8.04, 51.04, 8.06, 51.06)),
-    rel(31, "Altstadt-Nord", admin(10), box(8.04, 51.05, 8.06, 51.06)),
-    rel(32, "Altstadt-Süd", admin(10), box(8.04, 51.04, 8.06, 51.05)),
-  ],
-};
-
-/** Ein Dorf, das OSM nicht unterteilt. */
-const C = {
-  bbox: [9.0, 52.0, 9.01, 52.01],
-  center: { lng: 9.005, lat: 52.005 },
-  parents: [parent(300, "Kleindorf", 8, [9.0, 52.0, 9.01, 52.01])],
-  boundaries: [rel(300, "Kleindorf", admin(8), box(9.0, 52.0, 9.01, 52.01))],
-};
-
-type Place = typeof A | typeof C;
-/** Wie Overpass „out tags bb“: Tags und Ausdehnung, ohne Geometrie. */
-function withBounds(r: ReturnType<typeof rel>) {
+function bounds(r: ReturnType<typeof rel>) {
   const pts = r.members.flatMap((m) => m.geometry);
   const lons = pts.map((p) => p.lon);
   const lats = pts.map((p) => p.lat);
-  return {
-    type: "relation", id: r.id, tags: r.tags,
-    bounds: { minlon: Math.min(...lons), minlat: Math.min(...lats), maxlon: Math.max(...lons), maxlat: Math.max(...lats) },
-  };
+  return { minlon: Math.min(...lons), minlat: Math.min(...lats), maxlon: Math.max(...lons), maxlat: Math.max(...lats) };
 }
-function overpassFor(place: Place) {
+
+/** Overpass wie echt: „out tags bb“ nach Stufen und Ausschnitt, „rel(id:…)“ mit Geometrie, sonst Häuser. */
+function fakeOverpass(relations = REGION) {
   return vi.fn(async (_url: string, init?: RequestInit) => {
     const q = new URLSearchParams(String(init?.body)).get("data") ?? "";
-    if (q.includes("is_in")) return Response.json({ elements: place.parents });
-    if (q.includes("out tags bb")) return Response.json({ elements: place.boundaries.map(withBounds) });
     const ids = q.match(/rel\(id:([\d,]+)\)/);
     if (ids) {
       const wanted = new Set(ids[1].split(",").map(Number));
-      return Response.json({ elements: place.boundaries.filter((b) => wanted.has(b.id)) });
+      return Response.json({ elements: relations.filter((r) => wanted.has(r.id)) });
     }
-    // Gebäude: ein Haus in jeder Kachel-Mitte des Ausschnitts
+    if (q.includes("out tags bb")) {
+      const levels = new Set((q.match(/admin_level~"\^\(([\d|]+)\)\$"/)?.[1] ?? "").split("|"));
+      const [s, w, n, e] = q.match(/\(([-\d.]+),([-\d.]+),([-\d.]+),([-\d.]+)\)/)!.slice(1).map(Number);
+      const elements = relations
+        .map((r) => ({ r, b: bounds(r) }))
+        .filter(({ r, b }) => levels.has(r.tags.admin_level) && b.minlon <= e && b.maxlon >= w && b.minlat <= n && b.maxlat >= s)
+        .map(({ r, b }) => ({ type: "relation", id: r.id, tags: r.tags, bounds: b }));
+      return Response.json({ elements });
+    }
+    // Häuser: eins in jeder Kachel-Mitte des Ausschnitts
     const [s, w, n, e] = q.match(/\(([-\d.]+),([-\d.]+),([-\d.]+),([-\d.]+)\)/)!.slice(1).map(Number);
     const elements = [];
     let id = 1;
@@ -112,139 +94,157 @@ afterEach(() => {
   vi.unstubAllEnvs();
 });
 
-async function create(place: Place, { loadAreas = true } = {}) {
-  vi.stubEnv("AREAS_ON_CREATE", loadAreas ? "on" : "off");
+async function create({ initial = false } = {}) {
+  vi.stubEnv("AREAS_ON_CREATE", initial ? "on" : "off");
   const t = convexTest(schema, modules);
   await t.mutation(api.campaigns.create, {
-    slug: SLUG, adminKey: ADMIN, name: "Test", placeLabel: "Ort, Kreis", center: place.center, bbox: place.bbox,
+    slug: SLUG, adminKey: ADMIN, viewKey: VIEW, name: "Test", placeLabel: "EFB, Bornheim", center: ROISDORF_POINT,
   });
   await t.finishAllScheduledFunctions(vi.runAllTimers);
   return t;
 }
-const names = async (t: ReturnType<typeof convexTest>) => (await t.query(api.areas.list, { slug: SLUG }))!.map((a) => a.name);
+const nearbyNames = async (t: ReturnType<typeof convexTest>, tiles: string[]) =>
+  (await t.query(api.areas.nearby, { adminKey: ADMIN, tiles })).areas.map((a) => a.name).sort();
+const selected = async (t: ReturnType<typeof convexTest>) =>
+  (await t.query(api.areas.list, { slug: SLUG }))!.filter((a) => a.selected).map((a) => a.name).sort();
 
-describe("Gebiete ermitteln", () => {
-  test("Ort wie Bornheim: die Ortsteile, ohne Nachbarort", async () => {
-    vi.stubGlobal("fetch", overpassFor(A));
-    const t = await create(A);
-    expect(await names(t)).toEqual(["Brenig", "Hersel", "Roisdorf", "Sechtem"]);
-    expect(await t.query(api.areas.status, { slug: SLUG })).toMatchObject({ status: "done", whole: false, unselected: [] });
-    const list = (await t.query(api.areas.list, { slug: SLUG }))!;
-    expect(list.find((a) => a.name === "Hersel")).toMatchObject({ id: "relation/12", bbox: [7.02, 50.7, 7.04, 50.71] });
+describe("Angebot an Ortsteilen je Grenz-Kachel", () => {
+  test("über Gemeindegrenzen hinweg, je Gemeinde ihre Ortsteile; der Kreis ist kein Angebot", async () => {
+    vi.stubGlobal("fetch", fakeOverpass());
+    const t = await create();
+    expect(await t.query(api.areas.nearby, { adminKey: ADMIN, tiles: [TILE_WEST] })).toEqual({ loaded: [], areas: [] });
+    await t.action(api.areas.loadTiles, { adminKey: ADMIN, tiles: [TILE_WEST] });
+    // Westkachel: Bornheim ganz, Alfter ragt hinein
+    expect(await nearbyNames(t, [TILE_WEST])).toEqual(["Alfter-Ort", "Brenig", "Hersel", "Roisdorf", "Sechtem", "Witterschlick"]);
+    // Ostkachel: Alfter und die kreisfreie Stadt Bonn mit ihren Bezirken
+    await t.action(api.areas.loadTiles, { adminKey: ADMIN, tiles: [TILE_EAST] });
+    expect(await nearbyNames(t, [TILE_EAST])).toEqual(["Alfter-Ort", "Bad Godesberg", "Beuel", "Witterschlick"]);
   });
 
-  test("Großstadt: die Stadtbezirke (lückenlos), nicht die nur teilweise erfassten Stadtteile", async () => {
-    vi.stubGlobal("fetch", overpassFor(B));
-    const t = await create(B);
-    expect(await names(t)).toEqual(["Außenbezirk", "Innenstadt"]);
-    // Die Enklave gehört zur Innenstadt, nicht zum Außenbezirk.
-    const areas = await t.run(async (ctx) => campaignAreas(ctx, (await ctx.db.query("campaigns").first())!._id));
-    expect(areaAt([8.05, 51.05], areas!)?.name).toBe("Innenstadt");
-    expect(areaAt([8.01, 51.01], areas!)?.name).toBe("Außenbezirk");
+  test("Cache für alle Aktionen: eine geladene Kachel und bekannte Gemeinden werden nicht neu abgefragt", async () => {
+    const fetchMock = fakeOverpass();
+    vi.stubGlobal("fetch", fetchMock);
+    const t = await create();
+    await t.action(api.areas.loadTiles, { adminKey: ADMIN, tiles: [TILE_WEST] });
+    const calls = fetchMock.mock.calls.length;
+    expect(calls).toBe(3); // Gemeinden, Ortsteil-Liste, Grenzen
+    await t.action(api.areas.loadTiles, { adminKey: ADMIN, tiles: [TILE_WEST] });
+    expect(fetchMock.mock.calls.length).toBe(calls);
+    // Ostkachel: Alfter ist bekannt, nur Bonn wird mit Grenzen geladen
+    await t.action(api.areas.loadTiles, { adminKey: ADMIN, tiles: [TILE_EAST] });
+    const geometryQuery = fetchMock.mock.calls
+      .map((c) => new URLSearchParams(String((c[1] as RequestInit).body)).get("data")!)
+      .filter((q) => q.includes("rel(id:"))
+      .at(-1)!;
+    expect(geometryQuery).toContain("300");
+    expect(geometryQuery).not.toMatch(/\b200\b/);
   });
 
-  test("keine Unterteilung: der ganze Ort ist ein Gebiet, mit Hinweis", async () => {
-    vi.stubGlobal("fetch", overpassFor(C));
-    const t = await create(C);
-    expect(await t.query(api.areas.list, { slug: SLUG })).toEqual([expect.objectContaining({ id: "ort", name: "Kleindorf" })]);
-    expect(await t.query(api.areas.status, { slug: SLUG })).toMatchObject({ status: "done", whole: true });
-  });
-
-  test("Overpass überlastet: Ersatz-Server, dann mehrere Versuche, dann „failed“ und erneut versuchen", async () => {
+  test("Overpass überlastet: Fehler mit der Antwort der Server, nur Hostnamen", async () => {
     vi.stubEnv("OVERPASS_URLS", "https://eins.example/api?key=GEHEIM,https://zwei.example/api");
-    const good = overpassFor(A);
-    const busy = vi.fn(async (url: string, init?: RequestInit) =>
-      url.startsWith("https://eins") ? new Response("busy", { status: 429 }) : good(url, init),
-    );
-    vi.stubGlobal("fetch", busy);
-    const t = await create(A);
-    expect(await names(t)).toHaveLength(4);
-    expect(busy.mock.calls.some((c) => String(c[0]).startsWith("https://zwei"))).toBe(true);
-
-    const down = vi.fn(async () => new Response("busy", { status: 504 }));
-    vi.stubGlobal("fetch", down);
-    const t2 = await create(A);
-    const failed = (await t2.query(api.areas.status, { slug: SLUG }))!;
-    expect(failed).toMatchObject({ status: "failed" });
-    // Die Antwort der Server steht für die Diagnose im Panel.
-    expect(failed.lastError).toMatch(/^Grenzen am Mittelpunkt: /);
-    expect(failed.lastError).toContain("eins.example: HTTP 504");
-    expect(failed.lastError).toContain("zwei.example: HTTP 504");
-    // Nur Hosts, keine vollständigen URLs (könnten Zugangsschlüssel enthalten)
-    expect(failed.lastError).not.toContain("https://");
-    expect(failed.lastError).not.toContain("GEHEIM");
-    expect(await t2.query(api.areas.list, { slug: SLUG })).toEqual([]);
-    vi.stubGlobal("fetch", overpassFor(A));
-    await t2.mutation(api.areas.load, { adminKey: ADMIN });
-    await t2.finishAllScheduledFunctions(vi.runAllTimers);
-    expect(await names(t2)).toHaveLength(4);
-    expect((await t2.query(api.areas.status, { slug: SLUG }))!.lastError).toBeNull();
+    vi.stubGlobal("fetch", vi.fn(async () => new Response("busy", { status: 504 })));
+    const t = await create();
+    const err = await t.action(api.areas.loadTiles, { adminKey: ADMIN, tiles: [TILE_WEST] }).catch((e: Error) => e);
+    expect(String(err)).toContain("Gemeinden");
+    expect(String(err)).toContain("eins.example: HTTP 504");
+    expect(String(err)).toContain("zwei.example: HTTP 504");
+    expect(String(err)).not.toContain("GEHEIM");
+    expect(await t.query(api.areas.nearby, { adminKey: ADMIN, tiles: [TILE_WEST] })).toEqual({ loaded: [], areas: [] });
   });
-});
 
-describe("zu große Antwort", () => {
-  test("wird vor dem Parsen verworfen und im Panel genannt", async () => {
+  test("zu große Antwort wird vor dem Parsen verworfen", async () => {
     vi.stubEnv("OVERPASS_URLS", "https://gross.example/api");
     const huge = "x".repeat(40_000_001);
     vi.stubGlobal("fetch", vi.fn(async () => new Response(huge)));
-    const t = await create(A);
-    const s = (await t.query(api.areas.status, { slug: SLUG }))!;
-    expect(s.status).toBe("failed");
-    expect(s.lastError).toContain("gross.example: Antwort zu groß (40 MB)");
+    const t = await create();
+    const err = await t.action(api.areas.loadTiles, { adminKey: ADMIN, tiles: [TILE_WEST] }).catch((e: Error) => e);
+    expect(String(err)).toContain("gross.example: Antwort zu groß (40 MB)");
   });
 });
 
-describe("hängender Ladevorgang", () => {
-  test("gilt erst nach Ablauf eines ganzen Versuchs als hängend, dann startet „Erneut versuchen“ neu", async () => {
-    // Ein Lauf, der nie antwortet (Action abgebrochen): Zustand bleibt „loading“.
-    vi.stubGlobal("fetch", vi.fn(() => new Promise<Response>(() => {})));
-    vi.stubEnv("AREAS_ON_CREATE", "on");
-    const t = convexTest(schema, modules);
-    await t.mutation(api.campaigns.create, { slug: SLUG, adminKey: ADMIN, name: "T", placeLabel: "Ort", center: A.center, bbox: A.bbox });
-    const run = async () => (await t.run(async (ctx) => (await ctx.db.query("areaSets").first())!)).run;
-    const before = await run();
-    expect(AREAS_STALE_MS).toBeGreaterThan(7 * 60_000);
-    vi.advanceTimersByTime(6 * 60_000);
-    await t.mutation(api.areas.load, { adminKey: ADMIN });
-    expect(await run()).toBe(before); // läuft womöglich noch: nicht doppelt starten
-    vi.advanceTimersByTime(AREAS_STALE_MS);
-    await t.mutation(api.areas.load, { adminKey: ADMIN });
-    expect(await run()).toBe(before + 1);
-    expect((await t.query(api.areas.status, { slug: SLUG }))!.staleAfterMs).toBe(AREAS_STALE_MS);
+describe("Auswahl", () => {
+  test("beim Anlegen: der Ortsteil an der Adresse ist gewählt", async () => {
+    vi.stubGlobal("fetch", fakeOverpass());
+    const t = await create({ initial: true });
+    expect(await selected(t)).toEqual(["Roisdorf"]);
+  });
+
+  test("Ortsteile verschiedener Gemeinden wählen; abwählen behält die Daten", async () => {
+    vi.stubGlobal("fetch", fakeOverpass());
+    const t = await create({ initial: true });
+    await t.action(api.areas.loadTiles, { adminKey: ADMIN, tiles: [TILE_WEST, TILE_EAST] });
+    await t.mutation(api.areas.select, { adminKey: ADMIN, ids: ["relation/22", "relation/31"], selected: true });
+    expect(await selected(t)).toEqual(["Beuel", "Roisdorf", "Witterschlick"]);
+
+    // Eine Markierung in Roisdorf, dann Roisdorf abwählen: Gebiet und Markierung bleiben gespeichert
+    const house = [7.005, 50.705];
+    await t.mutation(api.marks.set, { slug: SLUG, osmId: "way/1", status: "done", center: house });
+    await t.mutation(api.areas.select, { adminKey: ADMIN, ids: ["relation/11"], selected: false });
+    expect(await selected(t)).toEqual(["Beuel", "Witterschlick"]);
+    const list = (await t.query(api.areas.list, { slug: SLUG }))!;
+    expect(list.find((a) => a.name === "Roisdorf")).toMatchObject({ selected: false });
+    expect(await t.query(api.marks.inCell, { slug: SLUG, cell: markCellOf(house[0], house[1]) })).toHaveLength(1);
+    // Wieder anwählen geht ohne Overpass
+    await t.mutation(api.areas.select, { adminKey: ADMIN, ids: ["relation/11"], selected: true });
+    expect(await selected(t)).toContain("Roisdorf");
+
+    // Schnittstelle für die Statistik (#4): alle Gebiete mit Auswahl, Zuordnung per Punkt
+    const areas = await t.run(async (ctx) => campaignAreas(ctx, (await ctx.db.query("campaigns").first())!._id));
+    expect(areaAt([7.07, 50.71], areas!)?.name).toBe("Witterschlick");
+    expect(areas!.map((a) => [a.name, a.selected])).toEqual([["Beuel", true], ["Roisdorf", true], ["Witterschlick", true]]);
+  });
+
+  test("unbekannter Ortsteil wird abgelehnt", async () => {
+    vi.stubGlobal("fetch", fakeOverpass());
+    const t = await create();
+    await expect(t.mutation(api.areas.select, { adminKey: ADMIN, ids: ["relation/999"], selected: true })).rejects.toThrow(/gibt es nicht/);
   });
 });
 
 describe("Admin-Link", () => {
-  test("nur der Admin-Schlüssel ändert die Auswahl; der Bearbeiten-Schlüssel wird abgelehnt", async () => {
-    vi.stubGlobal("fetch", overpassFor(A));
-    const t = await create(A);
-    await expect(t.mutation(api.areas.select, { adminKey: SLUG, ids: ["relation/12"], selected: false })).rejects.toThrow();
-    await expect(t.mutation(api.areas.load, { adminKey: SLUG })).rejects.toThrow();
-    await t.mutation(api.areas.select, { adminKey: ADMIN, ids: ["relation/12", "gibtsnicht"], selected: false });
-    expect((await t.query(api.areas.status, { slug: SLUG }))!.unselected).toEqual(["relation/12"]);
-    await t.mutation(api.areas.select, { adminKey: ADMIN, ids: ["relation/11", "relation/12", "relation/13", "relation/14"], selected: true });
-    expect((await t.query(api.areas.status, { slug: SLUG }))!.unselected).toEqual([]);
+  test("nur der Admin-Schlüssel lädt, sieht das Angebot und wählt; andere Schlüssel werden abgelehnt", async () => {
+    vi.stubGlobal("fetch", fakeOverpass());
+    const t = await create();
+    await t.action(api.areas.loadTiles, { adminKey: ADMIN, tiles: [TILE_WEST] });
+    for (const key of [SLUG, VIEW]) {
+      await expect(t.action(api.areas.loadTiles, { adminKey: key, tiles: [TILE_WEST] })).rejects.toThrow(/Admin-Link/);
+      await expect(t.query(api.areas.nearby, { adminKey: key, tiles: [TILE_WEST] })).rejects.toThrow(/Admin-Link/);
+      await expect(t.mutation(api.areas.select, { adminKey: key, ids: ["relation/11"], selected: true })).rejects.toThrow(/Admin-Link/);
+      await expect(
+        t.mutation(api.campaigns.setPlace, { adminKey: key, placeLabel: "X", center: { lat: 50, lng: 7 } }),
+      ).rejects.toThrow(/Admin-Link/);
+    }
+    expect(await selected(t)).toEqual([]);
+  });
+
+  test("Mittelpunkt nachträglich ändern", async () => {
+    const t = await create();
+    await t.mutation(api.campaigns.setPlace, {
+      adminKey: ADMIN, placeLabel: "Neuer Treffpunkt, Alfter", center: { lat: 50.71, lng: 7.05 }, bbox: [7.049, 50.709, 7.051, 50.711],
+    });
+    expect(await t.query(api.campaigns.get, { slug: SLUG })).toMatchObject({
+      placeLabel: "Neuer Treffpunkt, Alfter", center: { lat: 50.71, lng: 7.05 }, bbox: [7.049, 50.709, 7.051, 50.711],
+    });
+    await expect(t.mutation(api.campaigns.setPlace, { adminKey: ADMIN, placeLabel: "X", center: { lat: 99, lng: 7 } })).rejects.toThrow();
   });
 
   test("der Admin-Schlüssel ist über den Bearbeiten-Link nicht zu erfahren", async () => {
-    vi.stubGlobal("fetch", overpassFor(A));
-    const t = await create(A);
+    vi.stubGlobal("fetch", fakeOverpass());
+    const t = await create({ initial: true });
     const results = [
       await t.query(api.campaigns.get, { slug: SLUG }),
       await t.query(api.areas.list, { slug: SLUG }),
-      await t.query(api.areas.status, { slug: SLUG }),
       await t.query(api.buildings.prefetchStatus, { slug: SLUG }),
     ];
     for (const r of results) expect(JSON.stringify(r)).not.toContain(ADMIN);
     expect(await t.query(api.campaigns.get, { slug: SLUG })).toMatchObject({ role: "edit", slug: SLUG });
-    // Mit dem Admin-Schlüssel: Rolle admin und der Bearbeiten-Schlüssel zum Weitergeben
     expect(await t.query(api.campaigns.get, { slug: ADMIN })).toMatchObject({ role: "admin", slug: SLUG });
   });
 
   test("Schlüssel dürfen nicht doppelt vergeben werden", async () => {
-    const t = await create(A, { loadAreas: false });
-    const base = { name: "X", placeLabel: "X", center: A.center };
-    await expect(t.mutation(api.campaigns.create, { ...base, slug: "NeuerSchluessel12345678".slice(0, 22), adminKey: ADMIN })).rejects.toThrow();
+    const t = await create();
+    const base = { name: "X", placeLabel: "X", center: ROISDORF_POINT };
+    await expect(t.mutation(api.campaigns.create, { ...base, slug: "NeuerSchluessel1234567", adminKey: ADMIN })).rejects.toThrow();
     await expect(t.mutation(api.campaigns.create, { ...base, slug: ADMIN, adminKey: "NeuerSchluessel1234567" })).rejects.toThrow();
     await expect(t.mutation(api.campaigns.create, { ...base, slug: "NeuerSchluessel1234567", adminKey: "NeuerSchluessel1234567" })).rejects.toThrow();
   });
@@ -252,8 +252,8 @@ describe("Admin-Link", () => {
   test("Migration: ältere Aktionen bekommen einen eigenen Admin-Schlüssel", async () => {
     vi.useRealTimers();
     const t = convexTest(schema, modules);
-    await t.mutation(api.campaigns.create, { slug: SLUG, name: "Alt", placeLabel: "Ort", center: A.center });
-    await t.mutation(api.campaigns.create, { slug: "ZweiteAktion1234567890", name: "Alt 2", placeLabel: "Ort", center: A.center });
+    await t.mutation(api.campaigns.create, { slug: SLUG, name: "Alt", placeLabel: "Ort", center: ROISDORF_POINT });
+    await t.mutation(api.campaigns.create, { slug: "ZweiteAktion1234567890", name: "Alt 2", placeLabel: "Ort", center: ROISDORF_POINT });
     expect(await t.action(internal.migrations.addAdminKeys, {})).toBe(2);
     expect(await t.action(internal.migrations.addAdminKeys, {})).toBe(0);
     const keys = await t.run(async (ctx) => (await ctx.db.query("campaigns").collect()).map((c) => c.adminKey));
@@ -264,56 +264,50 @@ describe("Admin-Link", () => {
 });
 
 describe("nur gewählte Gebiete", () => {
-  // Kacheln: Roisdorf (7.00–7.02 / 50.70–50.71) und Hersel (7.02–7.04 / 50.70–50.71)
   const cellAt = (lng: number, lat: number) => `${Math.floor(lng / CELL_SIZE)}:${Math.floor(lat / CELL_SIZE)}`;
   const ROISDORF = cellAt(7.0075, 50.7025);
   const HERSEL = cellAt(7.0325, 50.7025);
+  const WITTERSCHLICK = cellAt(7.0675, 50.7025);
 
-  test("Häuser außerhalb werden weder von Overpass geladen noch ausgeliefert", async () => {
+  test("Häuser außerhalb werden weder von Overpass geladen noch ausgeliefert, über Gemeindegrenzen hinweg", async () => {
     vi.useRealTimers();
-    const fetchMock = overpassFor(A);
+    const fetchMock = fakeOverpass();
     vi.stubGlobal("fetch", fetchMock);
-    vi.stubEnv("AREAS_ON_CREATE", "on");
+    vi.stubEnv("AREAS_ON_CREATE", "off");
     const t = convexTest(schema, modules);
-    await t.mutation(api.campaigns.create, { slug: SLUG, adminKey: ADMIN, name: "T", placeLabel: "Ort", center: A.center, bbox: A.bbox });
-    await t.finishAllScheduledFunctions(() => {});
-    // Alles gewählt: beide Häuser
+    await t.mutation(api.campaigns.create, { slug: SLUG, adminKey: ADMIN, name: "T", placeLabel: "Ort", center: ROISDORF_POINT });
+    // Noch nichts gewählt: der ganze Ort wie bisher
     let res = await t.action(api.buildings.load, { slug: SLUG, cells: [ROISDORF, HERSEL] });
     expect(res.map((d) => decodeBuildings(d).length)).toEqual([1, 1]);
 
-    await t.mutation(api.areas.select, { adminKey: ADMIN, ids: ["relation/12"], selected: false });
+    await t.action(api.areas.loadTiles, { adminKey: ADMIN, tiles: [TILE_WEST, TILE_EAST] });
+    await t.mutation(api.areas.select, { adminKey: ADMIN, ids: ["relation/11", "relation/22"], selected: true });
     res = await t.action(api.buildings.load, { slug: SLUG, cells: [ROISDORF, HERSEL] });
     expect(res.map((d) => decodeBuildings(d).length)).toEqual([1, 0]);
+    res = await t.action(api.buildings.load, { slug: SLUG, cells: [WITTERSCHLICK] });
+    expect(res.map((d) => decodeBuildings(d).length)).toEqual([1]);
 
-    // Nichts gewählt: wieder der ganze Ort, alle Häuser
-    await t.mutation(api.areas.select, { adminKey: ADMIN, ids: ["relation/11", "relation/12", "relation/13", "relation/14"], selected: false });
-    res = await t.action(api.buildings.load, { slug: SLUG, cells: [ROISDORF, HERSEL] });
-    expect(res.map((d) => decodeBuildings(d).length)).toEqual([1, 1]);
-    await t.mutation(api.areas.select, { adminKey: ADMIN, ids: ["relation/11", "relation/13"], selected: true });
-
-    // Eine Kachel nur in abgewählten Gebieten: Overpass wird gar nicht gefragt.
+    // Eine Kachel nur in nicht gewählten Gebieten: Overpass wird gar nicht gefragt.
     const before = fetchMock.mock.calls.length;
-    const far = cellAt(7.0375, 50.7075); // Sechtem, noch nicht im Cache
-    await t.mutation(api.areas.select, { adminKey: ADMIN, ids: ["relation/14"], selected: false });
-    expect(await t.action(api.buildings.load, { slug: SLUG, cells: [far] })).toEqual(["[]"]);
+    expect(await t.action(api.buildings.load, { slug: SLUG, cells: [cellAt(7.0375, 50.7175)] })).toEqual(["[]"]);
     expect(fetchMock.mock.calls.length).toBe(before);
   });
 
   test("Vorladen nur für Kacheln der gewählten Gebiete, neu geplant bei geänderter Auswahl", async () => {
     vi.stubEnv("PREFETCH_ON_CREATE", "on");
-    const fetchMock = overpassFor(A);
-    vi.stubGlobal("fetch", fetchMock);
-    const t = await create(A);
-    const all = (await t.query(api.buildings.prefetchStatus, { slug: SLUG }))!;
-    expect(all.status).toBe("done");
-
-    // Nur Roisdorf: 4 × 2 Kacheln (Ränder genau auf Kachelgrenzen; Nachbarkacheln berühren nur)
-    await t.mutation(api.areas.select, { adminKey: ADMIN, ids: ["relation/12", "relation/13", "relation/14"], selected: false });
+    vi.stubGlobal("fetch", fakeOverpass());
+    const t = await create({ initial: true });
+    expect(await t.query(api.buildings.prefetchStatus, { slug: SLUG })).toMatchObject({ status: "done" });
+    const planned = async () => (await t.run(async (ctx) => (await ctx.db.query("prefetchJobs").first())!)).total;
+    // Roisdorf: 4 × 2 Kacheln, dazu die, deren Kante seine Grenze berührt
+    const cellsOf = (w: number, s: number, e: number, n: number) => touchedCells([[box(w, s, e, n)]]).length;
+    expect(await planned()).toBe(cellsOf(7.0, 50.7, 7.02, 50.71));
+    await t.action(api.areas.loadTiles, { adminKey: ADMIN, tiles: [TILE_EAST] });
+    await t.mutation(api.areas.select, { adminKey: ADMIN, ids: ["relation/22"], selected: true });
     const job = await t.run(async (ctx) => (await ctx.db.query("prefetchJobs").first())!);
-    const planned = job.batches.flat();
-    expect(planned).toContain(ROISDORF);
-    expect(planned).not.toContain(HERSEL);
-    expect(job.total).toBeLessThan(all.total);
+    expect(job.total).toBe(new Set([...touchedCells([[box(7.0, 50.7, 7.02, 50.71)]]), ...touchedCells([[box(7.06, 50.7, 7.08, 50.72)]])]).size);
+    expect(job.batches.flat()).toContain(WITTERSCHLICK);
+    expect(job.batches.flat()).not.toContain(HERSEL);
     await t.finishAllScheduledFunctions(vi.runAllTimers);
     expect(await t.query(api.buildings.prefetchStatus, { slug: SLUG })).toMatchObject({ status: "done" });
   });

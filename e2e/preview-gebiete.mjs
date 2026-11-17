@@ -1,108 +1,90 @@
 // Browser-Test der Gebiete gegen ein Preview-Deployment (Vercel + Convex-Preview-Backend), mit
-// echten Daten: Convex fragt Overpass in der Cloud. Prüft Bornheim (Rheinland) und eine Großstadt
-// mit anderer Gliederung. Nominatim und Kartenkacheln kommen echt, außer mit --mock-osm.
-// Aufruf: node e2e/preview-gebiete.mjs <preview-url> [ordner-für-screenshots] [--mock-osm]
+// echten Daten: Convex fragt Overpass in der Cloud. Legt eine Aktion an einer Adresse in
+// Bornheim an, prüft den vorgewählten Ortsteil und wählt auf der Karte einen Ortsteil der
+// Nachbargemeinde Alfter dazu. Ortssuche und Kartenkacheln kommen echt.
+// Aufruf: node e2e/preview-gebiete.mjs <preview-url> [ordner-für-screenshots]
+// (Den Header gegen die Vercel-Anmeldung setzt in der Sandbox der Proxy.)
 import { chromium } from "playwright";
 import assert from "node:assert/strict";
 
-const args = process.argv.slice(2);
-const MOCK = args.includes("--mock-osm");
-const [BASE, SHOTS] = args.filter((a) => !a.startsWith("--"));
-if (!BASE) throw new Error("Aufruf: node e2e/preview-gebiete.mjs <preview-url> [screenshots] [--mock-osm]");
-
-// Ergebnisse der Ortssuche, falls Nominatim nachgebildet wird (Ausdehnung wie bei Nominatim).
-const PLACES = {
-  Bornheim: { display_name: "Bornheim, Rhein-Sieg-Kreis, Nordrhein-Westfalen, Deutschland", name: "Bornheim", lat: "50.7592", lon: "6.9985", boundingbox: ["50.7090", "50.8080", "6.8925", "7.0640"] },
-  Bonn: { display_name: "Bonn, Nordrhein-Westfalen, Deutschland", name: "Bonn", lat: "50.7354", lon: "7.1007", boundingbox: ["50.6326", "50.7744", "7.0225", "7.2111"] },
-};
-const MIN_STYLE = { version: 8, sources: {}, layers: [{ id: "bg", type: "background", paint: { "background-color": "#ebe8e1" } }] };
+const [BASE, SHOTS] = process.argv.slice(2);
+if (!BASE) throw new Error("Aufruf: node e2e/preview-gebiete.mjs <preview-url> [screenshots]");
+const ADDRESS = "Rathausstraße 2, Bornheim";
+/** Ein Punkt in Alfter (Nachbargemeinde im Süden). */
+const IN_ALFTER = { lat: 50.7356, lng: 7.0086 };
 
 const browser = await chromium.launch({ args: ["--use-gl=swiftshader", "--enable-unsafe-swiftshader"] });
 const phone = { viewport: { width: 390, height: 844 }, deviceScaleFactor: 2, isMobile: true, hasTouch: true };
 const errors = [];
 const shot = (page, name) => SHOTS && page.screenshot({ path: `${SHOTS}/${name}.png` });
+const track = (p, who) => p.on("pageerror", (e) => errors.push(`${who}: ${e.message}`));
 
-async function context() {
-  const ctx = await browser.newContext(phone);
-  if (MOCK) {
-    await ctx.route("https://nominatim.openstreetmap.org/**", (r) => {
-      const q = new URL(r.request().url()).searchParams.get("q") ?? "";
-      const hit = Object.entries(PLACES).find(([k]) => q.includes(k));
-      return r.fulfill({ json: hit ? [hit[1]] : [] });
-    });
-    await ctx.route("https://tiles.openfreemap.org/**", (r) => r.fulfill({ json: MIN_STYLE }));
-  }
-  return ctx;
-}
-
-/** Legt eine Aktion für den Ort an und liefert Admin-Seite, Bearbeiten-Link und Namen der Gebiete. */
-async function createAndLoadAreas(query) {
-  const ctx = await context();
-  const p = await ctx.newPage();
-  p.on("pageerror", (e) => errors.push(`${query}: ${e.message}`));
-  await p.goto(BASE);
-  await p.fill("#place", query);
-  await p.getByRole("button", { name: "Suchen" }).click();
-  await p.locator("fieldset label").first().click();
-  await p.getByRole("button", { name: /Verteilaktion starten/ }).click();
-  await p.getByRole("dialog").waitFor();
-  await p.waitForURL(/\/admin\/[A-Za-z0-9]{22}$/);
-  const editUrl = await p.getByLabel("Link zum Mitmachen").inputValue();
-  assert.match(editUrl, /\/v\/[A-Za-z0-9]{22}$/);
-  await p.getByRole("button", { name: /Ortsteile festlegen/ }).click();
-  const sheet = p.getByTestId("areas-sheet");
-  // Overpass in der Cloud: bis zu drei Versuche mit Pausen; großzügig warten.
-  const started = Date.now();
-  // Bis zu drei Versuche über alle Server (je bis 7 min) mit Pausen: höchstens etwa 23 Minuten.
-  await sheet.getByRole("checkbox").first().or(sheet.getByText("konnten nicht geladen werden")).waitFor({ timeout: 1_500_000 });
-  if (await sheet.getByText("konnten nicht geladen werden").count()) {
-    const why = (await sheet.getByTestId("areas-error").count()) ? await sheet.getByTestId("areas-error").innerText() : "(keine Angabe)";
-    throw new Error(`${query}: Gebiete nicht geladen. Antwort der Overpass-Server: ${why}`);
-  }
-  const names = await sheet.locator("li label span").allTextContents();
-  console.log(`${query}: ${names.length} Gebiete nach ${Math.round((Date.now() - started) / 1000)} s:`, names.join(", "));
-  const whole = await sheet.getByText("keine Ortsteile eingetragen").count();
-  await shot(p, `${query}-gebiete`);
-  return { ctx, p, sheet, editUrl, names, whole };
+/** Bildschirmpunkt eines Orts bei bekannter Kartenmitte und Zoomstufe (Web-Mercator, 512-px-Kacheln wie MapLibre). */
+function project(center, zoom, point, box) {
+  const world = 512 * 2 ** zoom;
+  const x = (lng) => ((lng + 180) / 360) * world;
+  const y = (lat) => ((1 - Math.log(Math.tan((lat * Math.PI) / 180) + 1 / Math.cos((lat * Math.PI) / 180)) / Math.PI) / 2) * world;
+  return [box.x + box.width / 2 + x(point.lng) - x(center.lng), box.y + box.height / 2 + y(point.lat) - y(center.lat)];
 }
 
 try {
-  // Bornheim: Ortsteile wie im Issue
-  const b = await createAndLoadAreas("Bornheim, Rhein-Sieg-Kreis");
-  for (const n of ["Brenig", "Hersel", "Roisdorf", "Sechtem", "Walberberg", "Widdig"]) {
-    assert.ok(b.names.some((x) => x.includes(n)), `Bornheim: Ortsteil ${n} fehlt`);
-  }
-  assert.equal(b.whole, 0, "Bornheim ist unterteilt");
+  const ctx = await browser.newContext(phone);
+  const p = await ctx.newPage();
+  track(p, "Admin");
+  // Ergebnis der Ortssuche mitlesen (Mittelpunkt der Karte)
+  let center = null;
+  p.on("response", async (r) => {
+    if (r.url().startsWith("https://nominatim.openstreetmap.org/")) {
+      const [first] = await r.json().catch(() => []);
+      if (first) center = { lat: Number(first.lat), lng: Number(first.lon) };
+    }
+  });
+  await p.goto(BASE);
+  await p.fill("#place", ADDRESS);
+  await p.getByRole("button", { name: "Suchen" }).click();
+  await p.locator("fieldset label").first().click();
+  await p.getByRole("button", { name: /Verteilaktion starten/ }).click();
+  await p.waitForURL(/\/admin\/[A-Za-z0-9]{22}$/);
+  const editUrl = await p.getByLabel("Link zum Mitmachen").inputValue();
+  assert.match(editUrl, /\/v\/[A-Za-z0-9]{22}$/);
+  await p.getByText("Diesen Link für dich behalten").waitFor();
+  await p.getByRole("button", { name: /Ortsteile festlegen/ }).click();
+  const bar = p.getByTestId("area-edit-bar");
+  await bar.waitFor();
 
-  // Auswahl live beim Helfer: nur Roisdorf
-  const helperCtx = await context();
-  const h = await helperCtx.newPage();
-  h.on("pageerror", (e) => errors.push(`Helfer: ${e.message}`));
-  await h.goto(b.editUrl);
-  await h.waitForTimeout(3000);
-  assert.equal(await h.getByRole("button", { name: "Gebiete" }).count(), 0, "keine Gebietsauswahl im Bearbeiten-Link");
-  await b.sheet.getByRole("button", { name: "Keine" }).click();
-  await b.sheet.getByLabel("Roisdorf").check();
-  await b.sheet.getByRole("button", { name: "Fertig" }).click();
-  await h.evaluate(() => window.__einwurfMap?.jumpTo({ zoom: 12 }));
-  const labels = () =>
-    h.evaluate(() => window.__einwurfMap?.queryRenderedFeatures({ layers: ["area-labels"] }).map((f) => f.properties.name) ?? null);
-  let seen = null;
-  for (let i = 0; i < 20 && !(seen && seen.length === 1); i++) {
-    await h.waitForTimeout(500);
-    seen = await labels();
+  // Angebot und Vorauswahl: Bis Overpass geantwortet hat, kann es dauern (öffentliche Server).
+  const started = Date.now();
+  const status = async () => (await bar.innerText()).replace(/\s+/g, " ");
+  for (;;) {
+    const s = await status();
+    if (/Erneut versuchen/.test(s)) throw new Error(`Ortsteile nicht geladen: ${s}`);
+    if (!/werden aus OpenStreetMap geladen/.test(s) && /\d+ gewählt/.test(s)) break;
+    if (Date.now() - started > 900_000) throw new Error(`Zeitüberschreitung: ${s}`);
+    await p.waitForTimeout(5000);
   }
-  // In Produktionsbuilds gibt es window.__einwurfMap nicht; dann nur Bildschirmfotos.
-  if (seen !== null) assert.deepEqual(seen, ["Roisdorf"], "Helfer sieht live nur das gewählte Gebiet");
-  await shot(h, "Bornheim-helfer-roisdorf");
-  await helperCtx.close();
-  await b.ctx.close();
+  console.log(`Geladen nach ${Math.round((Date.now() - started) / 1000)} s:`, await status());
+  assert.match(await status(), /1 gewählt/, "Ortsteil an der Adresse vorgewählt");
+  await p.waitForTimeout(1500);
+  await shot(p, "1-bearbeiten");
 
-  // Großstadt mit anderer Gliederung (Stadtbezirke/Ortsteile)
-  const c = await createAndLoadAreas("Bonn");
-  assert.ok(c.names.length >= 2, "Bonn ist unterteilt");
-  assert.equal(c.whole, 0);
-  await c.ctx.close();
+  // Ortsteil in Alfter antippen: kommt dazu (Angebot über die Gemeindegrenze hinweg)
+  assert.ok(center, "Mittelpunkt aus der Ortssuche");
+  const box = await p.getByTestId("map").boundingBox();
+  const [ax, ay] = project(center, 12, IN_ALFTER, box);
+  assert.ok(ay > 260 && ay < box.height - 80, `Punkt in Alfter liegt sichtbar auf der Karte (${Math.round(ax)}, ${Math.round(ay)})`);
+  await p.mouse.click(ax, ay);
+  await bar.getByText("2 gewählt").waitFor({ timeout: 20_000 });
+  await p.waitForTimeout(1500);
+  await shot(p, "2-alfter-dazu");
+  await bar.getByRole("button", { name: "Fertig" }).click();
+
+  // Helfer: keine Gebietsauswahl, Karte mit den gewählten Gebieten
+  const h = await (await browser.newContext(phone)).newPage();
+  track(h, "Helfer");
+  await h.goto(editUrl);
+  await h.waitForTimeout(4000);
+  assert.equal(await h.getByRole("button", { name: "Gebiete bearbeiten" }).count(), 0, "keine Gebietsauswahl im Bearbeiten-Link");
+  await shot(h, "3-helfer");
 
   assert.deepEqual(errors, [], "keine Fehler auf der Seite");
   console.log("OK");

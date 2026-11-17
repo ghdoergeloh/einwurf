@@ -3,14 +3,18 @@ import { readFileSync } from "node:fs";
 import type { Position } from "geojson";
 import {
   areaAt,
-  chooseParent,
+  chooseUnits,
+  boundaryTileOf,
+  boundaryTilesIn,
+  boundaryTileBBox,
+  unitQuery,
+  areasOfUnit,
   chooseSubdivision,
   compactGeometry,
   decodeGeometry,
   geometryArea,
   interiorPoint,
   parseBoundaries,
-  parseParents,
   pointInGeometry,
   relationGeometry,
   simplifyRing,
@@ -60,7 +64,6 @@ describe("parse", () => {
       ],
     });
     expect(list.map((c) => [c.id, c.level])).toEqual([[1, 10], [2, 99]]);
-    expect(parseParents({ elements: [{ type: "relation", id: 2, tags: { boundary: "place", name: "B" }, bounds }] })).toEqual([]);
   });
 
   test("Vorauswahl: nur feinere Grenzen, deren Ausdehnung im Ort liegt", () => {
@@ -83,11 +86,12 @@ describe("parse", () => {
     expect(list.map((b) => [b.id, b.level])).toEqual([[1, 10], [3, 99]]);
   });
 
-  test("Kandidaten für den Ort mit Ausdehnung", () => {
-    const parents = parseParents({
+  test("Gemeinden mit Ausdehnung", () => {
+    const list = parseCandidates({
       elements: [{ type: "relation", id: 7, tags: { boundary: "administrative", admin_level: "8", name: "Bornheim" }, bounds: { minlat: 50.7, minlon: 6.9, maxlat: 50.8, maxlon: 7.0 } }],
     });
-    expect(parents).toEqual([{ id: 7, name: "Bornheim", level: 8, bbox: [6.9, 50.7, 7.0, 50.8] }]);
+    expect(list).toEqual([{ id: 7, name: "Bornheim", level: 8, bbox: [6.9, 50.7, 7.0, 50.8] }]);
+    expect(unitQuery([6.9, 50.7, 7.0, 50.8])).toContain('admin_level~"^(6|7|8)$"](50.7,6.9,50.8,7);out tags bb;');
   });
 
   test("Abfrage der Teilgebiete nur feiner als der Ort", () => {
@@ -96,25 +100,6 @@ describe("parse", () => {
     expect(q).toContain("out tags bb");
     expect(q).not.toContain("geom");
     expect(geometryQuery([42, 7])).toContain("rel(id:42,7);out geom;");
-  });
-});
-
-describe("chooseParent", () => {
-  const land = { id: 1, name: "NRW", level: 4, bbox: [5, 50, 10, 52] as [number, number, number, number] };
-  const kreis = { id: 2, name: "Rhein-Sieg-Kreis", level: 6, bbox: [6.8, 50.5, 7.6, 51] as [number, number, number, number] };
-  const stadt = { id: 3, name: "Bornheim", level: 8, bbox: [6.9, 50.7, 7.0, 50.8] as [number, number, number, number] };
-  const teil = { id: 4, name: "Roisdorf", level: 10, bbox: [6.97, 50.74, 6.99, 50.76] as [number, number, number, number] };
-
-  test("nimmt die Grenze, die zum Ausschnitt der Ortssuche passt", () => {
-    expect(chooseParent([land, kreis, stadt, teil], [6.9, 50.7, 7.0, 50.8])?.id).toBe(3);
-    expect(chooseParent([land, kreis, stadt, teil], [6.97, 50.74, 6.99, 50.76])?.id).toBe(4);
-  });
-  test("Straße gesucht (kleiner Ausschnitt): die Gemeinde", () => {
-    expect(chooseParent([land, kreis, stadt, teil], [6.98, 50.75, 6.981, 50.751])?.id).toBe(3);
-    expect(chooseParent([land, kreis, stadt, teil], null)?.id).toBe(3);
-  });
-  test("nichts Brauchbares", () => {
-    expect(chooseParent([land], [6.9, 50.7, 7.0, 50.8])).toBeNull();
   });
 });
 
@@ -177,10 +162,10 @@ describe("Geometrie", () => {
 describe("Zuordnung", () => {
   test("areaAt und toAreas", () => {
     const list = [
-      { id: "relation/1", name: "West", geometry: JSON.stringify([[box(0, 0, 2, 2)]]), cells: "0:0 1:0" },
-      { id: "relation/2", name: "Ost", geometry: JSON.stringify([[box(2, 0, 4, 2)]]), cells: "" },
+      { id: "relation/1", name: "West", geometry: JSON.stringify([[box(0, 0, 2, 2)]]), cells: "0:0 1:0", selected: true },
+      { id: "relation/2", name: "Ost", geometry: JSON.stringify([[box(2, 0, 4, 2)]]), cells: "", selected: false },
     ];
-    const areas = toAreas(list, ["relation/2"]);
+    const areas = toAreas(list);
     expect(areas.map((a) => [a.id, a.selected])).toEqual([["relation/1", true], ["relation/2", false]]);
     expect(areaAt([3, 1], areas)?.name).toBe("Ost");
     expect(areaAt([5, 1], areas)).toBeNull();
@@ -338,5 +323,30 @@ describe("echte OSM-Daten (vereinfacht, fixtures/osm)", () => {
     expect(parts).toHaveLength(51);
     expect(new Set(parts.map((p) => p.level))).toEqual(new Set([10]));
     expect(parts.map((p) => p.name)).toEqual(expect.arrayContaining(["Bonn-Zentrum", "Alt-Godesberg", "Beuel-Mitte", "Duisdorf"]));
+  });
+});
+
+describe("Gemeinden und Grenz-Kacheln", () => {
+  const c = (id: number, level: number, bbox: [number, number, number, number]) => ({ id, name: String(id), level, bbox });
+
+  test("Gemeinden auf Stufe 8; Kreis nur, wenn keine Gemeinde in ihm liegt (kreisfreie Stadt)", () => {
+    const kreis = c(1, 6, [0, 0, 10, 10]);
+    const gemeinde = c(2, 8, [1, 1, 3, 3]);
+    const kreisfreieStadt = c(3, 6, [11, 0, 14, 4]);
+    const regierungsbezirk = c(4, 5, [0, 0, 20, 20]);
+    expect(chooseUnits([kreis, gemeinde, kreisfreieStadt, regierungsbezirk]).map((u) => u.id)).toEqual([2, 3]);
+    // Stadt auf Stufe 7 innerhalb eines Kreises ohne Gemeinden darin: nur die feinere
+    expect(chooseUnits([c(5, 6, [0, 0, 10, 10]), c(6, 7, [1, 1, 4, 4])]).map((u) => u.id)).toEqual([6]);
+  });
+
+  test("Gemeinde ohne Unterteilung ist selbst ein Gebiet", () => {
+    const dorf = boundary(9, "Kleindorf", 8, box(0, 0, 1, 1));
+    expect(areasOfUnit(dorf, []).map((a) => a.name)).toEqual(["Kleindorf"]);
+  });
+
+  test("Kacheln", () => {
+    expect(boundaryTileOf(7.01, 50.71)).toBe("140:1014");
+    expect(boundaryTileBBox("140:1014").map((x) => Math.round(x * 100) / 100)).toEqual([7, 50.7, 7.05, 50.75]);
+    expect(boundaryTilesIn([7.01, 50.71, 7.06, 50.72]).sort()).toEqual(["140:1014", "141:1014"]);
   });
 });

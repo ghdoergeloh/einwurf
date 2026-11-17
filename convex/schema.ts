@@ -46,12 +46,12 @@ export default defineSchema({
     .index("by_campaign_cell", ["campaignId", "cell"]),
 
   /**
-   * Gebiete (Ortsteile) einer Aktion aus OSM, mit vereinfachter Grenze (convex/areas.ts).
-   * Ändern sich nach dem Laden nicht; die Auswahl steht in areaSets.
+   * Gebiete (Ortsteile) einer Aktion: Kopie aus dem Cache (osmAreas), sobald der Admin sie wählt.
+   * Abgewählte bleiben mit selected = false stehen; Markierungen dort bleiben ohnehin erhalten.
    */
   areas: defineTable({
     campaignId: v.id("campaigns"),
-    /** „relation/123“ oder „ort“ (ganzer Ort, wenn OSM ihn nicht unterteilt). */
+    /** OSM-Relation, z. B. „relation/2804866“. */
     areaId: v.string(),
     name: v.string(),
     /** MultiPolygon-Koordinaten [lng, lat] als JSON (siehe areaGeo.ts). */
@@ -62,23 +62,35 @@ export default defineSchema({
     labelAt: v.array(v.number()),
     /** Gebäude-Kacheln, die das Gebiet berühren, durch Leerzeichen getrennt (areaGeo.touchedCells). */
     cells: v.string(),
-  }).index("by_campaign", ["campaignId"]),
+    selected: v.boolean(),
+  })
+    .index("by_campaign", ["campaignId"])
+    .index("by_campaign_area", ["campaignId", "areaId"]),
 
-  /** Ladezustand und Auswahl der Gebiete je Aktion. */
-  areaSets: defineTable({
-    campaignId: v.id("campaigns"),
-    status: v.union(v.literal("loading"), v.literal("done"), v.literal("failed")),
-    /** OSM unterteilt den Ort nicht: Er ist ein einziges Gebiet. */
-    whole: v.optional(v.boolean()),
-    /** Nicht ausgewählte Gebiete (areaId). Neue Aktionen: alle ausgewählt. */
-    unselected: v.array(v.string()),
-    failures: v.number(),
-    /** Antwort der Overpass-Server beim letzten Fehlschlag (gekürzt), für den Hinweis im Panel. */
-    lastError: v.optional(v.string()),
-    updatedAt: v.number(),
-    /** Laufnummer; ein älterer Ladevorgang speichert nichts mehr. */
-    run: v.number(),
-  }).index("by_campaign", ["campaignId"]),
+  /** Gemeinsamer Cache der Ortsteile aus OSM, für alle Aktionen (convex/areas.ts). */
+  osmAreas: defineTable({
+    areaId: v.string(),
+    /** OSM-Relation der Gemeinde, zu der der Ortsteil gehört. */
+    unitId: v.number(),
+    name: v.string(),
+    geometry: v.string(),
+    bbox: v.array(v.number()),
+    labelAt: v.array(v.number()),
+    cells: v.string(),
+    fetchedAt: v.number(),
+  })
+    .index("by_area", ["areaId"])
+    .index("by_unit", ["unitId"])
+    .index("by_fetchedAt", ["fetchedAt"]),
+
+  /** Gemeinsamer Cache: welche Gemeinden eine Grenz-Kachel (areaGeo.BOUNDARY_TILE) schneiden. */
+  boundaryTiles: defineTable({
+    tile: v.string(),
+    unitIds: v.array(v.number()),
+    fetchedAt: v.number(),
+  })
+    .index("by_tile", ["tile"])
+    .index("by_fetchedAt", ["fetchedAt"]),
 
   /** Notiz eines Helfers an einem Haus (convex/notes.ts); das Haus erscheint dann blau. */
   notes: defineTable({
