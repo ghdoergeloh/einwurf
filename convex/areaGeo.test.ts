@@ -171,6 +171,16 @@ describe("Review-Befunde", () => {
     expect(chooseSubdivision(ort, [...teile, ...places])?.map((b) => b.name)).toEqual(["West", "Ost"]);
     // Ohne Verwaltungsgrenzen: überlappende place-Grenzen (200 % der Westhälfte) sind keine Teilung
     expect(chooseSubdivision(ort, places)).toBeNull();
+    // Überlappung allein: Nord, Süd und eine Mitte über beiden decken 100 % ab, sind aber keine Teilung
+    const ueberlappend = [
+      boundary(8, "Nord", 10, box(0, 1, 4, 2)),
+      boundary(9, "Süd", 10, box(0, 0, 4, 1)),
+      boundary(10, "Mitte", 10, box(0, 0.5, 4, 1.5)),
+    ];
+    expect(chooseSubdivision(ort, ueberlappend)).toBeNull();
+    // Reihenfolge: lückenlose Verwaltungsgrenzen gehen lückenlosen place-Grenzen vor
+    const placeGanz = [boundary(11, "P-Nord", 99, box(0, 1, 4, 2)), boundary(12, "P-Süd", 99, box(0, 0, 4, 1))];
+    expect(chooseSubdivision(ort, [...placeGanz, ...teile])?.map((b) => b.name)).toEqual(["West", "Ost"]);
     // Lückenlose place-Grenzen als Ersatz
     const ganz = [boundary(6, "Nord", 99, box(0, 1, 4, 2)), boundary(7, "Süd", 99, box(0, 0, 4, 1))];
     expect(chooseSubdivision(ort, ganz)?.map((b) => b.name)).toEqual(["Nord", "Süd"]);

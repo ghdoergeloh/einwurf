@@ -582,7 +582,8 @@ function startIn(cells: Set<string>, center: [number, number]): [number, number]
   for (const key of cells) {
     const { x, y } = parseCellKey(key)!;
     const p: [number, number] = [(x + 0.5) * CELL_SIZE, (y + 0.5) * CELL_SIZE];
-    const d = Math.hypot(p[0] - center[0], p[1] - center[1]);
+    // Abstand in etwa gleichen Metern (Länge schrumpft mit dem Breitengrad), wie in planPrefetch.
+    const d = Math.hypot((p[0] - center[0]) * Math.cos((center[1] * Math.PI) / 180), p[1] - center[1]);
     if (d < dist) [best, dist] = [p, d];
   }
   return best;
