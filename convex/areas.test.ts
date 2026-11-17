@@ -72,11 +72,26 @@ const C = {
 };
 
 type Place = typeof A | typeof C;
+/** Wie Overpass „out tags bb“: Tags und Ausdehnung, ohne Geometrie. */
+function withBounds(r: ReturnType<typeof rel>) {
+  const pts = r.members.flatMap((m) => m.geometry);
+  const lons = pts.map((p) => p.lon);
+  const lats = pts.map((p) => p.lat);
+  return {
+    type: "relation", id: r.id, tags: r.tags,
+    bounds: { minlon: Math.min(...lons), minlat: Math.min(...lats), maxlon: Math.max(...lons), maxlat: Math.max(...lats) },
+  };
+}
 function overpassFor(place: Place) {
   return vi.fn(async (_url: string, init?: RequestInit) => {
     const q = new URLSearchParams(String(init?.body)).get("data") ?? "";
     if (q.includes("is_in")) return Response.json({ elements: place.parents });
-    if (q.includes("boundary=")) return Response.json({ elements: place.boundaries });
+    if (q.includes("out tags bb")) return Response.json({ elements: place.boundaries.map(withBounds) });
+    const ids = q.match(/rel\(id:([\d,]+)\)/);
+    if (ids) {
+      const wanted = new Set(ids[1].split(",").map(Number));
+      return Response.json({ elements: place.boundaries.filter((b) => wanted.has(b.id)) });
+    }
     // Gebäude: ein Haus in jeder Kachel-Mitte des Ausschnitts
     const [s, w, n, e] = q.match(/\(([-\d.]+),([-\d.]+),([-\d.]+),([-\d.]+)\)/)!.slice(1).map(Number);
     const elements = [];

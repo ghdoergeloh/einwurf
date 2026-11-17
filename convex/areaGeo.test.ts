@@ -14,7 +14,11 @@ import {
   pointInGeometry,
   relationGeometry,
   simplifyRing,
-  subareaQuery,
+  candidateQuery,
+  geometryQuery,
+  parseCandidates,
+  preselect,
+  bboxOf,
   toAreas,
   selectionOf,
   touchedCells,
@@ -46,6 +50,26 @@ describe("relationGeometry", () => {
 });
 
 describe("parse", () => {
+  test("Liste ohne Geometrie: auch boundary=place, ohne Ausdehnung fällt weg", () => {
+    const bounds = { minlat: 0, minlon: 0, maxlat: 1, maxlon: 1 };
+    const list = parseCandidates({
+      elements: [
+        { type: "relation", id: 1, tags: { boundary: "administrative", admin_level: "10", name: "A" }, bounds },
+        { type: "relation", id: 2, tags: { boundary: "place", name: "B" }, bounds },
+        { type: "relation", id: 3, tags: { boundary: "administrative", admin_level: "10", name: "C" } },
+      ],
+    });
+    expect(list.map((c) => [c.id, c.level])).toEqual([[1, 10], [2, 99]]);
+    expect(parseParents({ elements: [{ type: "relation", id: 2, tags: { boundary: "place", name: "B" }, bounds }] })).toEqual([]);
+  });
+
+  test("Vorauswahl: nur feinere Grenzen, deren Ausdehnung im Ort liegt", () => {
+    const ort = { id: 1, name: "Ort", level: 8, bbox: [0, 0, 4, 2] as [number, number, number, number] };
+    const c = (id: number, level: number, bbox: [number, number, number, number]) => ({ id, name: String(id), level, bbox });
+    const picked = preselect(ort, [c(1, 8, [0, 0, 4, 2]), c(2, 10, [0, 0, 2, 2]), c(3, 10, [3, 0, 5, 2]), c(4, 7, [0, 0, 1, 1]), c(5, 9, [2, 0, 4.0001, 2])]);
+    expect(picked.map((p) => p.id)).toEqual([2, 5]);
+  });
+
   test("Grenzen ohne Namen oder Stufe fallen weg; boundary=place zählt als feinste Stufe", () => {
     const rel = (id: number, tags: Record<string, string>) => ({ type: "relation", id, tags, members: [way(box(0, 0, 1, 1))] });
     const list = parseBoundaries({
@@ -67,10 +91,11 @@ describe("parse", () => {
   });
 
   test("Abfrage der Teilgebiete nur feiner als der Ort", () => {
-    const q = subareaQuery(42, 8, [6.9, 50.7, 7.0, 50.8]);
+    const q = candidateQuery(8, [6.9, 50.7, 7.0, 50.8]);
     expect(q).toContain('admin_level~"^(9|10|11|12)$"](50.7,6.9,50.8,7)');
-    expect(q).toContain("rel(42)");
-    expect(q).not.toContain("map_to_area");
+    expect(q).toContain("out tags bb");
+    expect(q).not.toContain("geom");
+    expect(geometryQuery([42, 7])).toContain("rel(id:42,7);out geom;");
   });
 });
 
@@ -279,6 +304,24 @@ describe("gemischte Stufen (wie Bornheim: Ortschaften teils auf Stufe 9, teils a
 describe("echte OSM-Daten (vereinfacht, fixtures/osm)", () => {
   const load = (name: string) =>
     parseBoundaries(JSON.parse(readFileSync(new URL(`../fixtures/osm/${name}`, import.meta.url), "utf8")));
+
+  /** Wie der Code: Liste mit Ausdehnung, Vorauswahl, dann Grenzen nur für den Ort und die Kandidaten. */
+  const pipeline = (all: ReturnType<typeof load>, parentId: number) => {
+    const asCandidate = (b: (typeof all)[number]) => ({ id: b.id, name: b.name, level: b.level, bbox: bboxOf(b.geometry) });
+    const parentBoundary = all.find((b) => b.id === parentId)!;
+    const picked = preselect(asCandidate(parentBoundary), all.map(asCandidate));
+    const ids = new Set(picked.map((c) => c.id));
+    return { parts: chooseSubdivision(parentBoundary, all.filter((b) => ids.has(b.id))), picked: picked.length, total: all.length };
+  };
+
+  test("Vorauswahl ohne Geometrie lässt Nachbarorte weg und ändert das Ergebnis nicht", () => {
+    for (const [file, id] of [["overpass-bornheim.json", 168426], ["overpass-bonn.json", 62508]] as const) {
+      const all = load(file);
+      const { parts, picked, total } = pipeline(all, id);
+      expect(picked).toBeLessThan(total - 5);
+      expect(parts!.map((p) => p.id).sort()).toEqual(chooseSubdivision(all.find((b) => b.id === id)!, all)!.map((p) => p.id).sort());
+    }
+  });
 
   test("Bornheim: Ortschaften teils auf Stufe 9, teils auf 10, ohne Nachbarorte", () => {
     const all = load("overpass-bornheim.json");

@@ -39,17 +39,43 @@ export function parentQuery(lat: number, lng: number): string {
 const MAX_LEVEL = 12;
 
 /**
- * Schritt 2: Grenze des Ortes und alle feineren Grenzen in seiner Ausdehnung (Verwaltung,
- * ersatzweise boundary=place), mit Geometrie. Bewusst über die Ausdehnung statt über eine
- * Fläche (map_to_area): Das ist für ausgelastete Server deutlich leichter. Nachbarn, die in die
- * Ausdehnung ragen, kommen mit und werden später aussortiert (chooseSubdivision).
+ * Schritt 2: alle feineren Grenzen in der Ausdehnung des Ortes (Verwaltung, ersatzweise
+ * boundary=place), nur mit Namen, Stufe und Ausdehnung. Das ist auch für ausgelastete Server
+ * leicht; die Geometrie holt Schritt 3 nur für die Kandidaten (siehe preselect).
  */
-export function subareaQuery(relationId: number, level: number, [w, s, e, n]: BBox): string {
+export function candidateQuery(level: number, [w, s, e, n]: BBox): string {
   const levels = [];
   for (let l = level + 1; l <= MAX_LEVEL; l++) levels.push(l);
   const box = `${s},${w},${n},${e}`;
   const admin = levels.length ? `rel[boundary=administrative][admin_level~"^(${levels.join("|")})$"](${box});` : "";
-  return `[out:json][timeout:120];rel(${relationId});out geom;(${admin}rel[boundary=place](${box}););out geom;`;
+  return `[out:json][timeout:60];(${admin}rel[boundary=place](${box}););out tags bb;`;
+}
+
+/** Schritt 3: Grenzen (Geometrie) genau dieser Relationen. */
+export function geometryQuery(ids: number[]): string {
+  return `[out:json][timeout:120];rel(id:${ids.join(",")});out geom;`;
+}
+
+/** Mehr Kandidaten holt Schritt 3 nicht (Größe der Antwort). */
+export const MAX_CANDIDATES = 400;
+
+/**
+ * Vorauswahl ohne Geometrie: nur feinere Grenzen, deren Ausdehnung im Ort liegt. Gebiete der
+ * Nachbarorte und -kreise ragen über seine Ausdehnung hinaus und fallen so schon vor dem
+ * Laden der Geometrie weg; den Rest prüft chooseSubdivision genau.
+ */
+export function preselect(parent: ParentCandidate, candidates: ParentCandidate[]): ParentCandidate[] {
+  const [w, s, e, n] = parent.bbox;
+  const tx = (e - w) * 0.01 + 1e-4;
+  const ty = (n - s) * 0.01 + 1e-4;
+  return candidates
+    .filter(
+      (c) =>
+        c.id !== parent.id &&
+        c.level > parent.level &&
+        c.bbox[0] >= w - tx && c.bbox[2] <= e + tx && c.bbox[1] >= s - ty && c.bbox[3] <= n + ty,
+    )
+    .slice(0, MAX_CANDIDATES);
 }
 
 interface OverpassPoint {
@@ -120,10 +146,15 @@ export interface ParentCandidate {
 }
 
 export function parseParents(json: { elements?: OverpassRelation[] }): ParentCandidate[] {
+  return parseCandidates(json).filter((c) => c.level !== PLACE_LEVEL);
+}
+
+/** Grenzen mit Stufe und Ausdehnung (Overpass „out tags bb“), auch boundary=place. */
+export function parseCandidates(json: { elements?: OverpassRelation[] }): ParentCandidate[] {
   const out: ParentCandidate[] = [];
   for (const el of json.elements ?? []) {
     const level = levelOf(el.tags);
-    if (el.type !== "relation" || level === null || level === PLACE_LEVEL || !el.bounds) continue;
+    if (el.type !== "relation" || level === null || !el.bounds) continue;
     const b = el.bounds;
     out.push({ id: el.id, name: el.tags?.name ?? "", level, bbox: [b.minlon, b.minlat, b.maxlon, b.maxlat] });
   }

@@ -65,13 +65,22 @@ function fakeAreas(query) {
     const [w, s, e, n] = TOWN;
     return { elements: [{ type: "relation", id: 900, tags: { boundary: "administrative", admin_level: "8", name: "Bornheim" }, bounds: { minlon: w, minlat: s, maxlon: e, maxlat: n } }] };
   }
-  return {
-    elements: [
-      relBox(900, "Bornheim", 8, TOWN),
-      relBox(901, "Roisdorf", 10, [TOWN[0], TOWN[1], AREA_SPLIT, TOWN[3]]),
-      relBox(902, "Hersel", 10, [AREA_SPLIT, TOWN[1], TOWN[2], TOWN[3]]),
-    ],
-  };
+  const all = [
+    relBox(900, "Bornheim", 8, TOWN),
+    relBox(901, "Roisdorf", 10, [TOWN[0], TOWN[1], AREA_SPLIT, TOWN[3]]),
+    relBox(902, "Hersel", 10, [AREA_SPLIT, TOWN[1], TOWN[2], TOWN[3]]),
+  ];
+  // Liste ohne Geometrie (out tags bb), danach Grenzen gezielt per rel(id:…)
+  if (query.includes("out tags bb"))
+    return {
+      elements: all.map(({ members, ...r }) => {
+        const pts = members.flatMap((m) => m.geometry);
+        const lons = pts.map((p) => p.lon), lats = pts.map((p) => p.lat);
+        return { ...r, bounds: { minlon: Math.min(...lons), minlat: Math.min(...lats), maxlon: Math.max(...lons), maxlat: Math.max(...lats) } };
+      }),
+    };
+  const ids = new Set((query.match(/rel\(id:([\d,]+)\)/)?.[1] ?? "").split(",").map(Number));
+  return { elements: all.filter((r) => ids.has(r.id)) };
 }
 
 let overpassCalls = 0;
@@ -83,7 +92,7 @@ const overpass = http.createServer((req, res) => {
   req.on("end", () => {
     const q = new URLSearchParams(body).get("data") ?? "";
     res.setHeader("Content-Type", "application/json");
-    if (q.includes("is_in") || q.includes("boundary=")) return res.end(JSON.stringify(fakeAreas(q)));
+    if (q.includes("is_in") || q.includes("out tags bb") || q.includes("rel(id:")) return res.end(JSON.stringify(fakeAreas(q)));
     overpassCalls++;
     setTimeout(() => res.end(JSON.stringify(fakeBuildings(body))), overpassDelayMs);
   });

@@ -13,9 +13,12 @@ import {
   encodeCells,
   interiorPoint,
   parentQuery,
+  candidateQuery,
+  geometryQuery,
   parseBoundaries,
+  parseCandidates,
   parseParents,
-  subareaQuery,
+  preselect,
   touchedCells,
   type AreaGeometry,
 } from "./areaGeo";
@@ -242,8 +245,11 @@ async function fetchAreas(ctx: ActionCtx, campaign: Doc<"campaigns">) {
   const parent = chooseParent(parents, b && b.length === 4 ? [b[0], b[1], b[2], b[3]] : null);
   if (!parent) return { whole: true, areas: [wholePlace(campaign, null, null)] };
 
+  // Erst die Liste (leicht), dann Grenzen nur für den Ort und Kandidaten in seiner Ausdehnung.
   await ctx.runMutation(internal.areas.quota, { slug: campaign.slug });
-  const boundaries = await ask("Teilgebiete", subareaQuery(parent.id, parent.level, parent.bbox), parseBoundaries);
+  const candidates = preselect(parent, await ask("Teilgebiete (Liste)", candidateQuery(parent.level, parent.bbox), parseCandidates));
+  await ctx.runMutation(internal.areas.quota, { slug: campaign.slug });
+  const boundaries = await ask("Teilgebiete (Grenzen)", geometryQuery([parent.id, ...candidates.map((c) => c.id)]), parseBoundaries);
   const place = boundaries.find((x) => x.id === parent.id);
   if (!place) return { whole: true, areas: [wholePlace(campaign, parent.name, null)] };
   const parts = chooseSubdivision(place, boundaries);
