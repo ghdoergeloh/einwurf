@@ -1,5 +1,5 @@
 import { mutation, query, type QueryCtx } from "./_generated/server";
-import { campaignForEdit } from "./access";
+import { campaignByKey, requireRole } from "./access";
 import { ConvexError, v } from "convex/values";
 import type { Id } from "./_generated/dataModel";
 import { markCellOf } from "./cells";
@@ -27,13 +27,13 @@ function assertUnchanged(existing: { updatedAt: number } | null, expected: numbe
   throw new ConvexError("Die Notiz wurde inzwischen von jemand anderem geändert. Bitte nochmal öffnen.");
 }
 
-/** Notizen einer Rasterzelle, live über die Convex-Subscription. */
+/** Notizen einer Rasterzelle, live über die Convex-Subscription. Mit jedem Schlüssel (auch Ansehen). */
 export const inCell = query({
   args: { slug: v.string(), cell: v.string() },
   handler: async (ctx, { slug, cell }) => {
     if (!SLUG_PATTERN.test(slug)) return [];
     assertCell(cell);
-    const campaign = await campaignForEdit(ctx, slug);
+    const campaign = (await campaignByKey(ctx, slug))?.campaign;
     if (!campaign) return [];
     const notes = await ctx.db
       .query("notes")
@@ -43,7 +43,7 @@ export const inCell = query({
   },
 });
 
-/** Legt die Notiz eines Hauses an oder ersetzt sie. `center` ist der Mittelpunkt [lng, lat]. */
+/** Legt die Notiz eines Hauses an oder ersetzt sie, ab Rolle edit. `center` ist der Mittelpunkt [lng, lat]. */
 export const set = mutation({
   args: { slug: v.string(), osmId: v.string(), center: v.array(v.number()), text: v.string(), expectedUpdatedAt },
   handler: async (ctx, { slug, osmId, center, text, expectedUpdatedAt }) => {
@@ -51,8 +51,7 @@ export const set = mutation({
     assertOsmId(osmId);
     assertCenter(center);
     const clean = cleanNote(text);
-    const campaign = await campaignForEdit(ctx, slug);
-    if (!campaign) throw new ConvexError("Verteilaktion nicht gefunden");
+    const { campaign } = await requireRole(ctx, slug, "edit");
 
     const existing = await noteOf(ctx, campaign._id, osmId);
     assertUnchanged(existing, expectedUpdatedAt);
@@ -75,14 +74,13 @@ export const set = mutation({
   },
 });
 
-/** Löscht die Notiz eines Hauses; ohne Notiz passiert nichts. */
+/** Löscht die Notiz eines Hauses, ab Rolle edit; ohne Notiz passiert nichts. */
 export const remove = mutation({
   args: { slug: v.string(), osmId: v.string(), expectedUpdatedAt },
   handler: async (ctx, { slug, osmId, expectedUpdatedAt }) => {
     assertSlug(slug);
     assertOsmId(osmId);
-    const campaign = await campaignForEdit(ctx, slug);
-    if (!campaign) throw new ConvexError("Verteilaktion nicht gefunden");
+    const { campaign } = await requireRole(ctx, slug, "edit");
     const existing = await noteOf(ctx, campaign._id, osmId);
     if (!existing) return;
     assertUnchanged(existing, expectedUpdatedAt);

@@ -2,7 +2,7 @@
 
 Eine Karte für Verteilaktionen: Alle Häuser sind dunkelgrau. Wer einen Flyer eingeworfen hat, tippt das Haus an, und es wird gelb. Ein zweiter Tipp macht es dunkelgelb: Einwerfen nicht möglich, etwa wegen eines Aufklebers „Keine Werbung“ oder weil der Briefkasten nicht erreichbar ist. Ein dritter Tipp macht es wieder grau. Alle mit dem Link sehen die Änderungen sofort.
 
-- **Ohne Anmeldung.** Jede Aktion hat einen geheimen Link zum Mitmachen (`/v/<22 Zeichen>`, etwa 131 Bit Zufall) und einen eigenen geheimen **Admin-Link** (`/admin/<22 Zeichen>`) für den Organisator. Aktionen werden nirgends aufgelistet.
+- **Ohne Anmeldung.** Jede Aktion hat einen geheimen Link zum Mitmachen (`/v/<22 Zeichen>`, etwa 131 Bit Zufall) einen eigenen geheimen Link zum Ansehen (`/a/<22 Zeichen>`, siehe unten) und einen geheimen **Admin-Link** (`/admin/<22 Zeichen>`) für den Organisator, der die Gebiete festlegt. Aktionen werden nirgends aufgelistet.
 - **Frontend:** React, Tailwind v4, MapLibre, Vite.
 - **Backend:** [Convex](https://convex.dev), live per Subscription.
 - **Kartendaten:** © OpenStreetMap-Mitwirkende. Grundkarte von [OpenFreeMap](https://openfreemap.org), Gebäude über die [Overpass API](https://overpass-api.de), Ortssuche über [Nominatim](https://nominatim.org). Alle ohne API-Schlüssel.
@@ -30,7 +30,7 @@ Der Ort einer Aktion ist in Gebiete geteilt, meist die Ortsteile (in Bornheim et
 | Geste | Wirkung |
 | --- | --- |
 | Tippen auf ein Haus | weiterschalten: grau (offen) → gelb (Flyer drin) → dunkelgelb (nicht möglich) → grau (nach 0,3 s, siehe unten) |
-| Langes Drücken (0,5 s) oder Rechtsklick auf ein Haus | Notiz anlegen, ändern oder löschen (schaltet nichts weiter) |
+| Langes Drücken (0,5 s) oder Rechtsklick auf ein Haus | Notiz anlegen, ändern oder löschen (schaltet nichts weiter); beim Ansehen nur lesen |
 | Doppeltipp | hineinzoomen (markiert nichts) |
 | Doppeltipp und ziehen | mit einem Finger zoomen |
 | Ziehen, Pinch, Mausrad, +/− | schieben und zoomen |
@@ -45,6 +45,19 @@ Ein Tipp färbt das Haus sofort, dazu sprühen kurz „Pixel-Funken“ (`src/lib
 Solange die Häuser eines neuen Gebiets noch von Overpass kommen, zeigt die Karte die Häuser der Grundkarte hellgrau als Platzhalter. Ein Tipp auf ein hellgraues Haus färbt es sofort vorläufig (gestrichelter Rand) und schaltet weiter wie bei jedem Haus; übernommen wird, sobald das Haus geladen ist (von „offen“ aus: hat jemand anderes es inzwischen markiert, gilt dessen Stand). Gibt es dort kein Haus zum Markieren oder kommt es nach 3 Minuten nicht, erscheint ein Hinweis (`src/lib/placeholderTaps.ts`). Unterhalb von Zoomstufe 15 sind alle Häuser hellgrau (Übersicht, nicht antippbar). Vereinzelt bleibt ein Haus grau (etwa ein Gebäudeteil, den die Grundkarte zeigt, Overpass aber nicht als Gebäude liefert). Häuser werden erst ab Zoomstufe 15 geladen, kachelweise und mit etwas Vorrat über den Rand hinaus. Nach einem Fehler wartet die Karte zunehmend länger (5 s bis 60 s), bevor sie es erneut versucht.
 
 Convex speichert je markiertem Haus nur die OSM-ID und den Mittelpunkt, einsortiert in Zellen von 0,01° (`convex/cells.ts`). Jedes Handy abonniert nur die sichtbaren Zellen. Ein Tipp schickt deshalb nur die Zelle mit dem Haus an die Helfer, die sie gerade sehen, nicht die ganze Aktion. Eingefärbt (gelb oder dunkelgelb) wird der Umriss, den das Handy ohnehin von Overpass hat. Rausgezoomt, oder solange der Umriss fehlt, zeigt die Karte Punkte in derselben Farbe. Ab einem Ausschnitt von mehr als 100 Zellen (etwa ab Zoomstufe 12) zeigt sie keine Markierungen mehr. Ohne Netz zeigt die Karte „Offline“, Convex holt das Speichern nach.
+
+## Links und Rechte
+
+| Link | Rolle | Was geht |
+| --- | --- | --- |
+| `/v/…` zum Mitmachen | edit | Häuser markieren, teilen, Gebiet vorladen |
+| `/a/…` nur ansehen | view | Karte, Markierungen und Notizen live sehen (Tipp auf ein blaues Haus zeigt die Notiz), sonst nichts |
+
+Der Teilen-Dialog zeigt beide Links getrennt („Zum Mitmachen“ und „Nur ansehen“). Ältere Aktionen bekommen ihren Ansehen-Link, sobald jemand mit dem Link zum Mitmachen den Teilen-Dialog öffnet. Die beiden Schlüssel sind unabhängig voneinander zufällig, der eine lässt sich aus dem anderen nicht ableiten.
+
+Durchgesetzt wird das im Backend (`convex/access.ts`): Jede Mutation an einer bestehenden Aktion verlangt mindestens die Rolle edit, mit dem Ansehen-Schlüssel gehen nur lesende Queries und das Laden der Häuser (im selben Kontingent wie die Aktion). Keine Query, die mit dem Ansehen-Schlüssel aufrufbar ist, liefert den Schlüssel zum Mitmachen. Ein Test (`convex/access.test.ts`) prüft jede öffentliche Mutation, Action und Query; kommt eine neue dazu, schlägt er fehl, bis ihre Rechte dort geprüft sind. Für eine dritte Rolle admin (Admin-Link, Gebietsauswahl) ist die Prüfung schon vorbereitet.
+
+Mit dem Link zum Mitmachen gibt es oben rechts den Umschalter **Bearbeiten / Ansehen**. Im Modus „Ansehen“ verhält sich die Karte wie beim Ansehen-Link, etwa damit beim Schieben in der Tasche oder beim Zeigen nichts markiert wird. Ein Tipp auf ein Haus zeigt dann nur einen Hinweis; ein Tipp oder langes Drücken auf ein blaues Haus zeigt seine Notiz zum Lesen (wie beim Ansehen-Link), ohne Bearbeiten. Das Handy merkt sich den Modus je Aktion; Standard ist „Bearbeiten“. Schieben, Zoomen, Doppeltipp und Standort funktionieren in beiden Ansichten.
 
 ## Entwickeln
 
@@ -71,6 +84,16 @@ node e2e/preview-gebiete.mjs <preview-url>
                         # mit --mock-osm werden Ortssuche und Grundkarte nachgebildet
 ```
 
+Gegen eine Vercel-Preview (eigenes Convex-Preview-Backend, echte Häuser von Overpass; nachgebildet ist nur die Ortssuche im Browser):
+
+```bash
+pnpm e2e:preview https://<preview>.vercel.app [ordner-für-screenshots]
+```
+
+Liegt die Preview hinter Vercel Deployment Protection, braucht der Test den Header `x-vercel-protection-bypass` (Secret aus *Settings → Deployment Protection → Protection Bypass for Automation*), z. B. von einem Proxy gesetzt.
+
+In Previews (`VITE_VERCEL_ENV=preview`) stellt die Seite dafür die Karte als `window.__einwurfMap` bereit, in Produktion nicht.
+
 ## Deployen
 
 Es braucht zwei Teile: das Convex-Backend und die statischen Dateien des Frontends.
@@ -88,7 +111,7 @@ Im [Convex-Dashboard](https://dashboard.convex.dev) unter *Settings → Deploy K
 
 1. Repository auf GitHub pushen und in Vercel importieren.
 2. In Vercel unter *Settings → Environment Variables* `CONVEX_DEPLOY_KEY` = der Production Deploy Key anlegen, Environment **Production**. Das ist eine Variable in Vercel, kein GitHub-Secret.
-3. Deployen. Build-Befehl, Ausgabeordner und die Umleitung für geteilte Links (`/v/…`) stehen in `vercel.json`, in der Vercel-Oberfläche muss dafür nichts eingestellt werden. `convex deploy` deployt dabei das Backend und setzt `VITE_CONVEX_URL` für den Build.
+3. Deployen. Build-Befehl, Ausgabeordner und die Umleitung für geteilte Links (`/v/…`, `/a/…`) stehen in `vercel.json`, in der Vercel-Oberfläche muss dafür nichts eingestellt werden. `convex deploy` deployt dabei das Backend und setzt `VITE_CONVEX_URL` für den Build.
 
 Fehlt `VITE_CONVEX_URL` beim Build auf Vercel (Key fehlt oder Build lief nicht über `convex deploy`), bricht der Build mit einer Meldung ab, statt eine Seite ohne Backend zu veröffentlichen.
 
@@ -124,4 +147,4 @@ Auch Convex lässt sich selbst betreiben (Docker-Image `ghcr.io/get-convex/conve
 - Overpass, Nominatim und OpenFreeMap sind kostenlose öffentliche Dienste mit fairen Nutzungsregeln. Dank Cache fragt die App Overpass je Gebiet nur einmal. Sind alle Overpass-Server überlastet, zeigt die Karte „Erneut“.
 - Optional: Convex-Umgebungsvariable `OVERPASS_URLS` (kommagetrennt) legt eigene Overpass-Server fest.
 - Overpass-Abrufe über Convex sind begrenzt: 12 pro Minute je Aktion, 30 pro Minute insgesamt für die Karte (Vorladen getrennt, 15 pro Minute). Cache-Treffer zählen nicht. Ohne Anmeldung kann jemand mit mehreren Aktionen das gemeinsame Limit kurzzeitig ausschöpfen; neue Gebiete laden dann erst nach einer Minute. Der Cache wird täglich von Kacheln älter als 30 Tage befreit.
-- Wer den Link zum Mitmachen kennt, kann alle Häuser dieser Aktion markieren und Notizen schreiben (so gewollt); die Gebiete legt nur der Admin-Link fest. Neue Aktionen kann jeder anlegen. Eine Aktion hat höchstens 20.000 Markierungen und 5.000 Notizen. Neue Aktionen sind auf 20 pro Minute begrenzt, über alle Nutzer.
+- Wer den Link zum Mitmachen kennt, kann alle Häuser und Notizen dieser Aktion ändern (so gewollt); die Gebiete legt nur der Admin-Link fest. Wer nur den Ansehen-Link kennt, kann nichts ändern. Neue Aktionen kann jeder anlegen. Eine Aktion hat höchstens 20.000 Markierungen und 5.000 Notizen. Neue Aktionen sind auf 20 pro Minute begrenzt, über alle Nutzer.

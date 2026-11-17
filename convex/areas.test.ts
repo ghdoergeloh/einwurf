@@ -184,9 +184,9 @@ describe("Admin-Link", () => {
       await t.query(api.buildings.prefetchStatus, { slug: SLUG }),
     ];
     for (const r of results) expect(JSON.stringify(r)).not.toContain(ADMIN);
-    expect(await t.query(api.campaigns.get, { slug: SLUG })).toMatchObject({ access: "edit", slug: SLUG });
+    expect(await t.query(api.campaigns.get, { slug: SLUG })).toMatchObject({ role: "edit", slug: SLUG });
     // Mit dem Admin-Schlüssel: Rolle admin und der Bearbeiten-Schlüssel zum Weitergeben
-    expect(await t.query(api.campaigns.get, { slug: ADMIN })).toMatchObject({ access: "admin", slug: SLUG });
+    expect(await t.query(api.campaigns.get, { slug: ADMIN })).toMatchObject({ role: "admin", slug: SLUG });
   });
 
   test("Schlüssel dürfen nicht doppelt vergeben werden", async () => {
@@ -207,7 +207,7 @@ describe("Admin-Link", () => {
     const keys = await t.run(async (ctx) => (await ctx.db.query("campaigns").collect()).map((c) => c.adminKey));
     expect(keys.every((k) => /^[A-Za-z0-9]{22}$/.test(k!))).toBe(true);
     expect(new Set(keys).size).toBe(2);
-    expect(await t.query(api.campaigns.get, { slug: keys[0]! })).toMatchObject({ access: "admin", slug: SLUG });
+    expect(await t.query(api.campaigns.get, { slug: keys[0]! })).toMatchObject({ role: "admin", slug: SLUG });
   });
 });
 

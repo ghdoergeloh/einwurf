@@ -44,6 +44,7 @@ export function HomePage() {
       const adminKey = generateSlug();
       await create({
         slug: generateSlug(),
+        viewKey: generateSlug(),
         adminKey,
         name: name.trim() || `Verteilaktion ${place.short}`,
         placeLabel: place.label,

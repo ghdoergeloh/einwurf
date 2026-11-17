@@ -174,7 +174,7 @@ try {
   // Der Anleger landet auf dem Admin-Link; weitergegeben wird der Bearbeiten-Link.
   const adminUrl = p.url();
   assert.match(adminUrl, /\/admin\/[A-Za-z0-9]{22}$/, "Admin-Link ohne ?neu");
-  const url = await p.getByLabel("Link zur Verteilaktion").inputValue();
+  const url = await p.getByLabel("Link zum Mitmachen").inputValue();
   assert.match(url, /\/v\/[A-Za-z0-9]{22}$/, "Bearbeiten-Link zum Weitergeben");
   assert.equal(await p.getByLabel("Admin-Link").inputValue(), adminUrl);
   await p.getByText("Diesen Link für dich behalten").waitFor();
@@ -599,6 +599,133 @@ try {
   });
   assert.equal(calmPixels, 0, "keine Funken bei „Bewegung reduzieren“");
   await calm.close();
+
+  // Ansehen-Link: Teilen-Dialog zeigt ihn getrennt, mit ihm ändert ein Tipp nichts
+  const editKey = url.split("/v/")[1];
+  await p.goto(url);
+  await p.waitForTimeout(2500);
+  await p.getByRole("button", { name: "Link teilen" }).click();
+  await p.getByRole("button", { name: /Nur ansehen/ }).click();
+  const viewUrl = await p.getByLabel("Link zum Ansehen").inputValue();
+  assert.match(viewUrl, /\/a\/[A-Za-z0-9]{22}$/, "eigener Ansehen-Link");
+  assert.ok(!viewUrl.includes(editKey), "Ansehen-Link enthält den Bearbeiten-Schlüssel nicht");
+  await shot(p, "8-share-ansehen");
+  await p.getByRole("button", { name: "Schließen" }).last().click();
+  // Eine Notiz für die Ansicht (Rechtsklick beim Bearbeiten)
+  const vnx = cx - 120, vny = cy - 120;
+  await p.mouse.click(vnx, vny, { button: "right" });
+  await p.getByRole("dialog").getByLabel("Text der Notiz").fill("Nur zum Lesen");
+  await p.getByRole("dialog").getByRole("button", { name: "Speichern" }).click();
+  await p.getByRole("dialog").waitFor({ state: "hidden" });
+
+  const vc = await browser.newContext({ ...phone, geolocation: { latitude: CENTER.lat + 0.001, longitude: CENTER.lng + 0.001 }, permissions: ["geolocation"] });
+  await mockOsm(vc);
+  const pv = await vc.newPage();
+  track(pv);
+  // Mitschneiden, was Convex an den Ansehen-Link schickt: Der Bearbeiten-Schlüssel darf nie dabei sein.
+  const received = [];
+  pv.on("websocket", (ws) => ws.on("framereceived", (f) => received.push(String(f.payload))));
+  await pv.goto(viewUrl);
+  await pv.getByTestId("view-only").waitFor();
+  await pv.waitForTimeout(2500);
+  assert.equal(await pv.getByTestId("mode-switch").count(), 0, "kein Umschalter beim Ansehen-Link");
+  assert.equal(await count(pv), await count(p), "Stand wie beim Bearbeiten-Link");
+  const vBefore = await statusAt(pv, cx, cy);
+  assert.ok(vBefore, "Haus sichtbar");
+  await pv.mouse.click(cx, cy);
+  await pv.waitForTimeout(1200);
+  assert.equal(await statusAt(pv, cx, cy), vBefore, "Ansehen-Link: Tipp ändert nichts");
+  assert.equal(await pv.getByRole("dialog").count(), 0, "Tipp auf Haus ohne Notiz öffnet nichts");
+  // Notizen: blau, Tipp oder Rechtsklick zeigt sie nur zum Lesen
+  const vNoteStatus = await statusAt(pv, vnx, vny);
+  assert.equal(await notePainted(pv, vnx, vny), true, "Notiz beim Ansehen blau");
+  for (const button of ["left", "right"]) {
+    await pv.mouse.click(vnx, vny, { button });
+    const nd = pv.getByRole("dialog");
+    await nd.waitFor({ timeout: 3000 });
+    assert.equal(await nd.getByTestId("note-text").textContent(), "Nur zum Lesen");
+    assert.equal(await nd.getByLabel("Text der Notiz").count(), 0, "kein Textfeld beim Ansehen");
+    assert.equal(await nd.getByRole("button", { name: "Notiz löschen" }).count(), 0, "kein Löschen beim Ansehen");
+    if (button === "right") await shot(pv, "9a-notiz-lesen");
+    await nd.getByRole("button", { name: "Schließen" }).click();
+    await nd.waitFor({ state: "hidden" });
+  }
+  assert.equal(await statusAt(pv, vnx, vny), vNoteStatus, "Tipp auf Notiz-Haus schaltet beim Ansehen nicht weiter");
+  assert.equal(await count(pv), await count(p));
+  // Live: Ein Helfer markiert, die Ansicht folgt
+  const pBefore = await statusAt(p, cx, cy);
+  await p.mouse.click(cx, cy);
+  await p.waitForTimeout(1200);
+  assert.equal(await count(pv), await count(p), "Ansicht zählt live mit");
+  // Doppeltipp-Zoom geht auch beim Ansehen
+  const zv = await zoom(pv);
+  await pv.mouse.dblclick(cx, cy);
+  await pv.waitForTimeout(1200);
+  assert.ok(Math.abs((await zoom(pv)) - (zv + 1)) < 0.01, "Doppeltipp zoomt beim Ansehen");
+  await shot(pv, "9-ansehen-link");
+  // Schieben und Standort gehen auch beim Ansehen
+  const centerOf = (page) => page.evaluate(() => window.__einwurfMap.getCenter().toArray());
+  const c0 = await centerOf(pv);
+  await pv.mouse.move(cx, cy + 100);
+  await pv.mouse.down();
+  await pv.mouse.move(cx + 120, cy + 100, { steps: 6 });
+  await pv.mouse.up();
+  await pv.waitForTimeout(600);
+  assert.notDeepEqual(await centerOf(pv), c0, "Schieben beim Ansehen");
+  await pv.locator(".maplibregl-ctrl-geolocate").click();
+  await pv.waitForFunction(
+    (c) => {
+      const m = window.__einwurfMap.getCenter();
+      return Math.abs(m.lat - c.lat) < 0.0002 && Math.abs(m.lng - c.lng) < 0.0002;
+    },
+    { lat: CENTER.lat + 0.001, lng: CENTER.lng + 0.001 },
+    { timeout: 10_000 },
+  );
+  assert.ok(received.length > 0, "Convex-Antworten mitgeschnitten");
+  assert.ok(!received.some((f) => f.includes(editKey)), "Bearbeiten-Schlüssel kommt beim Ansehen-Link nie an");
+  assert.ok(!(await pv.content()).includes(editKey), "Bearbeiten-Schlüssel nicht in der Seite");
+  await vc.close();
+
+  // Ansehen-Modus mit dem Bearbeiten-Link: Tipp ändert nichts, Hinweis; bleibt nach Neuladen
+  await p.getByTestId("mode-switch").getByRole("button", { name: "Ansehen" }).click();
+  const mBefore = await statusAt(p, cx, cy);
+  assert.equal(mBefore, next[pBefore]);
+  await p.mouse.click(cx, cy);
+  await p.getByText("Ansehen-Modus – zum Markieren auf Bearbeiten wechseln").waitFor({ timeout: 3000 });
+  await p.waitForTimeout(800);
+  assert.equal(await statusAt(p, cx, cy), mBefore, "Ansehen-Modus: Tipp ändert nichts");
+  await shot(p, "10-ansehen-modus");
+  // Notiz im Ansehen-Modus: nur lesen, mit Hinweis; Fokus im Dialog
+  await p.mouse.click(vnx, vny, { button: "right" });
+  const md = p.getByRole("dialog");
+  await md.waitFor({ timeout: 3000 });
+  assert.equal(await md.getByLabel("Text der Notiz").count(), 0, "Ansehen-Modus: kein Textfeld");
+  assert.equal(await md.getByRole("button", { name: "Notiz löschen" }).count(), 0, "Ansehen-Modus: kein Löschen");
+  await md.getByText("Ansehen-Modus – zum Ändern auf Bearbeiten wechseln.").waitFor();
+  assert.equal(await p.evaluate(() => !!document.activeElement?.closest("[role=dialog]")), true, "Fokus im Dialog");
+  await md.getByRole("button", { name: "Schließen" }).click();
+  await md.waitFor({ state: "hidden" });
+  // Rechtsklick auf ein Haus ohne Notiz: Hinweis statt Dialog
+  await p.mouse.click(cx + 120, cy + 120, { button: "right" });
+  await p.getByText("Ansehen-Modus – für Notizen auf Bearbeiten wechseln").waitFor({ timeout: 3000 });
+  assert.equal(await p.getByRole("dialog").count(), 0);
+  await p.reload();
+  await p.getByTestId("view-only").waitFor();
+  assert.equal(
+    await p.getByTestId("mode-switch").getByRole("button", { name: "Ansehen" }).getAttribute("aria-pressed"),
+    "true",
+    "Modus bleibt nach Neuladen",
+  );
+  await p.waitForTimeout(2500);
+  const zm = await zoom(p);
+  await p.mouse.dblclick(cx, cy);
+  await p.waitForTimeout(1200);
+  assert.ok(Math.abs((await zoom(p)) - (zm + 1)) < 0.01, "Doppeltipp zoomt im Ansehen-Modus");
+  await p.getByTestId("mode-switch").getByRole("button", { name: "Bearbeiten" }).click();
+  const eBefore = await statusAt(p, cx, cy);
+  await p.mouse.click(cx, cy);
+  await p.waitForTimeout(1200);
+  assert.equal(await statusAt(p, cx, cy), next[eBefore], "zurück auf Bearbeiten: Tipp markiert wieder");
 
   // Unbekannter Link
   await p.goto(`${BASE}/v/AAAAAAAAAAAAAAAAAAAAAA`);

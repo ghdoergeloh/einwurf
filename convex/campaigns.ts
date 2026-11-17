@@ -1,7 +1,7 @@
 import { mutation, query } from "./_generated/server";
 import { startPrefetch } from "./buildings";
 import { startAreas } from "./areas";
-import { campaignForRead, keyTaken } from "./access";
+import { campaignByKey, requireRole, keyTaken } from "./access";
 import { ConvexError, v } from "convex/values";
 import {
   MAX_CAMPAIGNS_PER_MINUTE,
@@ -15,11 +15,12 @@ import {
 /**
  * Legt eine Verteilaktion an. Die geheimen Schlüssel erzeugt der Browser mit
  * crypto.getRandomValues (Zufall in Convex-Mutationen ist deterministisch).
- * `adminKey` fehlt nur bei noch geöffneten alten Seiten.
+ * `viewKey` und `adminKey` fehlen nur bei noch geöffneten alten Seiten.
  */
 export const create = mutation({
   args: {
     slug: v.string(),
+    viewKey: v.optional(v.string()),
     adminKey: v.optional(v.string()),
     name: v.string(),
     placeLabel: v.string(),
@@ -37,9 +38,17 @@ export const create = mutation({
       if (!(w < e && s < n)) throw new ConvexError("Ungültiger Ausschnitt");
     }
     if (await keyTaken(ctx, args.slug)) throw new ConvexError("Link existiert bereits");
+    if (args.viewKey !== undefined) {
+      assertSlug(args.viewKey);
+      if (args.viewKey === args.slug || (await keyTaken(ctx, args.viewKey))) {
+        throw new ConvexError("Link existiert bereits");
+      }
+    }
     if (args.adminKey !== undefined) {
       assertSlug(args.adminKey);
-      if (args.adminKey === args.slug || (await keyTaken(ctx, args.adminKey))) throw new ConvexError("Link existiert bereits");
+      if (args.adminKey === args.slug || args.adminKey === args.viewKey || (await keyTaken(ctx, args.adminKey))) {
+        throw new ConvexError("Link existiert bereits");
+      }
     }
 
     // Einfache Bremse gegen Skripte, die massenhaft Aktionen anlegen.
@@ -51,6 +60,7 @@ export const create = mutation({
 
     const campaignId = await ctx.db.insert("campaigns", {
       slug: args.slug,
+      viewKey: args.viewKey,
       adminKey: args.adminKey,
       name: cleanText(args.name, MAX_NAME_LENGTH, "Name"),
       placeLabel: cleanText(args.placeLabel, MAX_PLACE_LENGTH, "Ort"),
@@ -69,19 +79,18 @@ export const create = mutation({
 });
 
 /**
- * Liefert die Aktion zum Bearbeiten- oder Admin-Schlüssel, oder null. `slug` ist der
- * Bearbeiten-Schlüssel (für die Admin-Seite: zum Markieren und Weitergeben). Den
- * Admin-Schlüssel gibt diese Query nie heraus. Es gibt bewusst keine Liste aller Aktionen.
+ * Liefert die Aktion zum Schlüssel (jede Rolle) samt `role`, oder null.
+ * Mit dem Ansehen-Schlüssel ohne `slug` und `viewKey`: Aus dem Ansehen-Link darf sich der
+ * Bearbeiten-Link nicht erfahren lassen. Den Admin-Schlüssel liefert die Query nie (wer ihn
+ * hat, kennt ihn). Es gibt bewusst keine Liste aller Aktionen.
  */
 export const get = query({
   args: { slug: v.string() },
   handler: async (ctx, { slug }) => {
-    const found = await campaignForRead(ctx, slug);
+    const found = await campaignByKey(ctx, slug);
     if (!found) return null;
-    const { campaign, access } = found;
-    return {
-      access,
-      slug: campaign.slug,
+    const { campaign, role } = found;
+    const shared = {
       name: campaign.name,
       placeLabel: campaign.placeLabel,
       center: campaign.center,
@@ -90,5 +99,23 @@ export const get = query({
       blockedCount: campaign.blockedCount ?? 0,
       createdAt: campaign._creationTime,
     };
+    if (role === "view") return { role, ...shared };
+    return { role, slug: campaign.slug, viewKey: campaign.viewKey ?? null, ...shared };
+  },
+});
+
+/**
+ * Gibt einer älteren Aktion ihren Ansehen-Schlüssel (Teilen-Dialog, ab Rolle edit).
+ * Hat sie schon einen, bleibt er; zurück kommt der gültige Schlüssel.
+ */
+export const ensureViewKey = mutation({
+  args: { slug: v.string(), viewKey: v.string() },
+  handler: async (ctx, { slug, viewKey }) => {
+    const { campaign } = await requireRole(ctx, slug, "edit");
+    if (campaign.viewKey) return campaign.viewKey;
+    assertSlug(viewKey);
+    if (await keyTaken(ctx, viewKey)) throw new ConvexError("Link existiert bereits");
+    await ctx.db.patch(campaign._id, { viewKey });
+    return viewKey;
   },
 });

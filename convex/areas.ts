@@ -21,7 +21,7 @@ import {
 } from "./areaGeo";
 import { askServers, overpassDeadline, overpassDetails, startPrefetch, takeOverpassQuota } from "./buildings";
 import { prefetchArea } from "./osm";
-import { campaignForAdmin, campaignForRead } from "./access";
+import { campaignByKey, requireRole } from "./access";
 
 /**
  * Gebiete (Ortsteile) einer Aktion: Convex lädt die Grenzen einmal je Aktion von Overpass
@@ -62,8 +62,7 @@ export async function startAreas(ctx: MutationCtx, campaignId: Id<"campaigns">) 
 export const load = mutation({
   args: { adminKey: v.string() },
   handler: async (ctx, { adminKey }) => {
-    const campaign = await campaignForAdmin(ctx, adminKey);
-    if (!campaign) throw new ConvexError("Verteilaktion nicht gefunden");
+    const { campaign } = await requireRole(ctx, adminKey, "admin");
     const set = await setOf(ctx, campaign._id);
     const stale = set?.status === "loading" && Date.now() - set.updatedAt > AREAS_STALE_MS;
     if (!set || set.status === "failed" || stale) await startAreas(ctx, campaign._id);
@@ -78,7 +77,7 @@ export const load = mutation({
 export const list = query({
   args: { slug: v.string() },
   handler: async (ctx, { slug }) => {
-    const campaign = (await campaignForRead(ctx, slug))?.campaign;
+    const campaign = (await campaignByKey(ctx, slug))?.campaign;
     if (!campaign) return null;
     const rows = await ctx.db.query("areas").withIndex("by_campaign", (q) => q.eq("campaignId", campaign._id)).collect();
     return rows
@@ -91,7 +90,7 @@ export const list = query({
 export const status = query({
   args: { slug: v.string() },
   handler: async (ctx, { slug }) => {
-    const campaign = (await campaignForRead(ctx, slug))?.campaign;
+    const campaign = (await campaignByKey(ctx, slug))?.campaign;
     if (!campaign) return null;
     const set = await setOf(ctx, campaign._id);
     if (!set) return { status: "none" as const, whole: false, unselected: [], updatedAt: 0, staleAfterMs: AREAS_STALE_MS, lastError: null };
@@ -111,8 +110,7 @@ export const status = query({
 export const select = mutation({
   args: { adminKey: v.string(), ids: v.array(v.string()), selected: v.boolean() },
   handler: async (ctx, { adminKey, ids, selected }) => {
-    const campaign = await campaignForAdmin(ctx, adminKey);
-    if (!campaign) throw new ConvexError("Verteilaktion nicht gefunden");
+    const { campaign } = await requireRole(ctx, adminKey, "admin");
     if (ids.length > MAX_AREAS) throw new ConvexError("Zu viele Gebiete");
     const set = await setOf(ctx, campaign._id);
     if (!set || set.status !== "done") throw new ConvexError("Die Gebiete sind noch nicht geladen");
