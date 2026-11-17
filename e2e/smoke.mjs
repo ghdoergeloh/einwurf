@@ -397,6 +397,79 @@ try {
   assert.equal(calmPixels, 0, "keine Funken bei „Bewegung reduzieren“");
   await calm.close();
 
+  // Ansehen-Link: Teilen-Dialog zeigt ihn getrennt, mit ihm ändert ein Tipp nichts
+  const editKey = url.split("/v/")[1];
+  await p.goto(url);
+  await p.waitForTimeout(2500);
+  await p.getByRole("button", { name: "Link teilen" }).click();
+  await p.getByRole("tab", { name: /Nur ansehen/ }).click();
+  const viewUrl = await p.getByLabel("Link zum Ansehen").inputValue();
+  assert.match(viewUrl, /\/a\/[A-Za-z0-9]{22}$/, "eigener Ansehen-Link");
+  assert.ok(!viewUrl.includes(editKey), "Ansehen-Link enthält den Bearbeiten-Schlüssel nicht");
+  await shot(p, "8-share-ansehen");
+  await p.getByRole("button", { name: "Schließen" }).last().click();
+
+  const vc = await browser.newContext(phone);
+  await mockOsm(vc);
+  const pv = await vc.newPage();
+  track(pv);
+  // Mitschneiden, was Convex an den Ansehen-Link schickt: Der Bearbeiten-Schlüssel darf nie dabei sein.
+  const received = [];
+  pv.on("websocket", (ws) => ws.on("framereceived", (f) => received.push(String(f.payload))));
+  await pv.goto(viewUrl);
+  await pv.getByTestId("view-only").waitFor();
+  await pv.waitForTimeout(2500);
+  assert.equal(await pv.getByTestId("mode-switch").count(), 0, "kein Umschalter beim Ansehen-Link");
+  assert.equal(await count(pv), await count(p), "Stand wie beim Bearbeiten-Link");
+  const vBefore = await statusAt(pv, cx, cy);
+  assert.ok(vBefore, "Haus sichtbar");
+  await pv.mouse.click(cx, cy);
+  await pv.waitForTimeout(1200);
+  assert.equal(await statusAt(pv, cx, cy), vBefore, "Ansehen-Link: Tipp ändert nichts");
+  assert.equal(await count(pv), await count(p));
+  // Live: Ein Helfer markiert, die Ansicht folgt
+  const pBefore = await statusAt(p, cx, cy);
+  await p.mouse.click(cx, cy);
+  await p.waitForTimeout(1200);
+  assert.equal(await count(pv), await count(p), "Ansicht zählt live mit");
+  // Doppeltipp-Zoom geht auch beim Ansehen
+  const zv = await zoom(pv);
+  await pv.mouse.dblclick(cx, cy);
+  await pv.waitForTimeout(1200);
+  assert.ok(Math.abs((await zoom(pv)) - (zv + 1)) < 0.01, "Doppeltipp zoomt beim Ansehen");
+  await shot(pv, "9-ansehen-link");
+  assert.ok(received.length > 0, "Convex-Antworten mitgeschnitten");
+  assert.ok(!received.some((f) => f.includes(editKey)), "Bearbeiten-Schlüssel kommt beim Ansehen-Link nie an");
+  assert.ok(!(await pv.content()).includes(editKey), "Bearbeiten-Schlüssel nicht in der Seite");
+  await vc.close();
+
+  // Ansehen-Modus mit dem Bearbeiten-Link: Tipp ändert nichts, Hinweis; bleibt nach Neuladen
+  await p.getByTestId("mode-switch").getByRole("button", { name: "Ansehen" }).click();
+  const mBefore = await statusAt(p, cx, cy);
+  assert.equal(mBefore, next[pBefore]);
+  await p.mouse.click(cx, cy);
+  await p.getByText("Ansehen-Modus – zum Markieren auf Bearbeiten wechseln").waitFor({ timeout: 3000 });
+  await p.waitForTimeout(800);
+  assert.equal(await statusAt(p, cx, cy), mBefore, "Ansehen-Modus: Tipp ändert nichts");
+  await shot(p, "10-ansehen-modus");
+  await p.reload();
+  await p.getByTestId("view-only").waitFor();
+  assert.equal(
+    await p.getByTestId("mode-switch").getByRole("button", { name: "Ansehen" }).getAttribute("aria-pressed"),
+    "true",
+    "Modus bleibt nach Neuladen",
+  );
+  await p.waitForTimeout(2500);
+  const zm = await zoom(p);
+  await p.mouse.dblclick(cx, cy);
+  await p.waitForTimeout(1200);
+  assert.ok(Math.abs((await zoom(p)) - (zm + 1)) < 0.01, "Doppeltipp zoomt im Ansehen-Modus");
+  await p.getByTestId("mode-switch").getByRole("button", { name: "Bearbeiten" }).click();
+  const eBefore = await statusAt(p, cx, cy);
+  await p.mouse.click(cx, cy);
+  await p.waitForTimeout(1200);
+  assert.equal(await statusAt(p, cx, cy), next[eBefore], "zurück auf Bearbeiten: Tipp markiert wieder");
+
   // Unbekannter Link
   await p.goto(`${BASE}/v/AAAAAAAAAAAAAAAAAAAAAA`);
   await p.getByText("Diese Verteilaktion gibt es nicht").waitFor();
