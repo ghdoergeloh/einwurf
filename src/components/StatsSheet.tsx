@@ -6,8 +6,10 @@ import { progressOf, sumProgress, type Progress } from "../lib/progress";
 import type { MapArea } from "./BuildingMap";
 
 interface Props {
-  /** Bearbeiten- oder Admin-Schlüssel. */
+  /** Schlüssel aus dem Link (jede Rolle). */
   slug: string;
+  /** Darf neu zählen lassen (nicht im Ansehen-Link: der ändert nichts). */
+  canRefresh: boolean;
   /** Gebiete mit Grenze, für „Zeigen“ auf der Karte. */
   areas: MapArea[];
   onShow: (bbox: number[]) => void;
@@ -18,7 +20,7 @@ interface Props {
  * Panel „Statistik“: Fortschritt je Gebiet in Prozent, live. Zielgebiete oben mit Summe,
  * nicht gewählte eingeklappt und ohne Prozent (ihre Häuser werden nicht geladen).
  */
-export function StatsSheet({ slug, areas, onShow, onClose }: Props) {
+export function StatsSheet({ slug, canRefresh, areas, onShow, onClose }: Props) {
   const dialogRef = useRef<HTMLDivElement>(null);
   const stats = useQuery(api.stats.byArea, { slug });
   const refresh = useMutation(api.stats.refresh);
@@ -39,9 +41,9 @@ export function StatsSheet({ slug, areas, onShow, onClose }: Props) {
   const provisional = !!stats?.areas?.rows.some((r) => r.target && !r.complete);
   const needsSetup = !!stats?.needsSetup;
   useEffect(() => {
-    if (provisional || needsSetup) refresh({ slug }).catch(() => {});
+    if (canRefresh && (provisional || needsSetup)) refresh({ slug }).catch(() => {});
     // Nur beim Öffnen und wenn es vorläufig wird, nicht bei jedem Tipp.
-  }, [provisional, needsSetup, refresh, slug]);
+  }, [canRefresh, provisional, needsSetup, refresh, slug]);
 
   const targets = stats?.areas?.rows.filter((r) => r.target) ?? [];
   const others = stats?.areas?.rows.filter((r) => !r.target) ?? [];
@@ -93,7 +95,12 @@ export function StatsSheet({ slug, areas, onShow, onClose }: Props) {
             </div>
           )}
 
-          {stats?.needsSetup && (
+          {stats?.needsSetup && !canRefresh && (
+            <p className="rounded-2xl bg-paper p-4 text-sm text-muted" role="status">
+              Die Statistik je Gebiet entsteht, sobald jemand mit dem Link zum Mitmachen sie öffnet.
+            </p>
+          )}
+          {stats?.needsSetup && canRefresh && (
             <div className="flex items-center gap-3 rounded-2xl bg-paper p-4 text-sm" role="status">
               <span className="size-4 shrink-0 animate-spin rounded-full border-2 border-ink/20 border-t-ink" />
               Statistik wird vorbereitet …

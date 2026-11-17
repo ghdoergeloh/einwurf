@@ -20,9 +20,9 @@ import {
 } from "./osm";
 import { SLUG_PATTERN } from "./validation";
 import { areaRows } from "./areaStore";
-import { campaignForEdit } from "./access";
 import { recountHousesFor } from "./stats";
 import { decodeCells, decodeGeometry, selectionOf, type Selection } from "./areaGeo";
+import { campaignByKey, hasRole, requireRole } from "./access";
 
 /**
  * Häuser aus OpenStreetMap, serverseitig über Overpass geladen und je Kachel für alle
@@ -51,6 +51,9 @@ const MIN_ATTEMPT_MS = 15_000;
 /** Öffentliche Overpass-Server, der Reihe nach. Überschreibbar mit der Convex-Umgebungsvariable OVERPASS_URLS. */
 const DEFAULT_ENDPOINTS = [
   "https://overpass-api.de/api/interpreter",
+  // Aus der Convex-Cloud ist overpass-api.de zeitweise gar nicht erreichbar („error sending request“);
+  // dann kommt dieser sofort dran.
+  "https://overpass.kumi.systems/api/interpreter",
   "https://overpass.private.coffee/api/interpreter",
   "https://maps.mail.ru/osm/tools/overpass/api/interpreter",
 ];
@@ -75,13 +78,22 @@ const NEIGHBOUR_RING = 2;
 const WAIT_POLL_MS = 1_000;
 
 /**
+ * Bearbeiten-Schlüssel der Aktion zu einem Schlüssel beliebiger Rolle, oder null.
+ * Nur intern: Er dient als Schlüssel des Kontingents, damit alle Links dasselbe teilen.
+ */
+export const rateKeyOf = internalQuery({
+  args: { slug: v.string() },
+  handler: async (ctx, { slug }) => (await campaignByKey(ctx, slug))?.campaign.slug ?? null,
+});
+
+/**
  * Gewählte Gebiete einer Aktion (Grenze als JSON, berührte Kacheln); [] = keine Einschränkung
- * (nichts gewählt oder noch keine Gebiete), null = keine Aktion.
+ * (nichts gewählt oder noch keine Gebiete), null = keine Aktion. Erwartet den Bearbeiten-Schlüssel (rateKeyOf).
  */
 export const selectedAreas = internalQuery({
   args: { slug: v.string() },
   handler: async (ctx, { slug }): Promise<{ geometry: string; cells: string }[] | null> => {
-    const campaign = await campaignForEdit(ctx, slug);
+    const campaign = await ctx.db.query("campaigns").withIndex("by_slug", (q) => q.eq("slug", slug)).unique();
     if (!campaign) return null;
     const rows = await areaRows(ctx, campaign._id);
     return (rows ?? []).filter((r) => r.selected).map(({ row }) => ({ geometry: row.geometry, cells: row.cells }));
@@ -247,6 +259,18 @@ function fetchOverpass(
   return askServers(buildQuery(bbox), parseOverpass, { ...opts, failure: "Die Gebäudedaten (OpenStreetMap) sind gerade nicht erreichbar. Bitte gleich noch einmal versuchen." });
 }
 
+/** Fehler „kein Server hat geantwortet“, mit den Antworten der einzelnen Server für die Diagnose. */
+function overpassFailure(message: string, problems: string[]) {
+  return Object.assign(new ConvexError(message), { details: problems.join(" · ") });
+}
+
+/** Antworten der Overpass-Server zu einem Fehler aus askServers (für Diagnose und Hinweise), sonst die Meldung. */
+export function overpassDetails(e: unknown): string {
+  const details = (e as { details?: unknown })?.details;
+  if (typeof details === "string" && details) return details;
+  return e instanceof Error ? e.message : String(e);
+}
+
 /** Frist für einen Abruf ohne Sperre (z. B. Gebiete): so lange, wie alle Server zusammen höchstens brauchen. */
 export const overpassDeadline = () => Date.now() + lockMs();
 
@@ -305,7 +329,7 @@ export function askServers<T>(
           if (!launch() && running.size === 0) {
             finish();
             console.warn("Overpass nicht erreichbar", problems);
-            reject(new ConvexError(failure));
+            reject(overpassFailure(failure, problems));
           }
         },
       );
@@ -314,7 +338,7 @@ export function askServers<T>(
     if (!launch()) {
       // Frist schon vorbei (z. B. Auffrischen kam spät dran): gar nicht erst fragen.
       finish();
-      reject(new ConvexError(failure));
+      reject(overpassFailure(failure, ["keine Zeit mehr für einen Abruf"]));
     }
   });
 }
@@ -455,7 +479,8 @@ async function loadCells(
 
 /**
  * Liefert die Häuser der angefragten Kacheln, in derselben Reihenfolge, je Kachel als
- * kompakter JSON-Text (siehe decodeBuildings).
+ * kompakter JSON-Text (siehe decodeBuildings). Mit jedem Schlüssel, alle im Kontingent
+ * der Aktion.
  */
 export const load = action({
   args: { slug: v.string(), cells: v.array(v.string()) },
@@ -471,13 +496,15 @@ export const load = action({
       throw new ConvexError("Ausschnitt zu groß");
     }
     // Kein offener Proxy für Overpass: nur für bestehende Aktionen.
-    const areas = SLUG_PATTERN.test(slug) ? await ctx.runQuery(internal.buildings.selectedAreas, { slug }) : null;
-    if (!areas) throw new ConvexError("Verteilaktion nicht gefunden");
-    // Gewählte Gebiete: Kacheln außerhalb gar nicht laden, Häuser außerhalb nicht ausliefern.
+    const rateKey = SLUG_PATTERN.test(slug) ? await ctx.runQuery(internal.buildings.rateKeyOf, { slug }) : null;
+    if (!rateKey) throw new ConvexError("Verteilaktion nicht gefunden");
+    // Gewählte Gebiete: Kacheln außerhalb gar nicht laden, Häuser außerhalb nicht ausliefern
+    // (für alle Rollen gleich, auch im Ansehen-Link).
+    const areas = (await ctx.runQuery(internal.buildings.selectedAreas, { slug: rateKey })) ?? [];
     const selection = selectionOf(areas.map((a) => ({ geometry: decodeGeometry(a.geometry), selected: true, cells: decodeCells(a.cells) })));
-    if (!selection) return (await loadCells(ctx, slug, cells)).data;
+    if (!selection) return (await loadCells(ctx, rateKey, cells)).data;
     const inside = cells.filter((c) => selection.touches(c));
-    const loaded = inside.length ? (await loadCells(ctx, slug, inside, "map", { within: selection })).data : [];
+    const loaded = inside.length ? (await loadCells(ctx, rateKey, inside, "map", { within: selection })).data : [];
     const byCell = new Map(inside.map((c, i) => [c, loaded[i]]));
     return cells.map((c) => (byCell.has(c) ? filterBuildings(byCell.get(c)!, selection) : "[]"));
   },
@@ -525,7 +552,8 @@ const prefetchRateKey = (slug: string) => `${slug}:vorladen`;
  * Wird von campaigns.create und vom Knopf im Teilen-Dialog aufgerufen.
  */
 export async function startPrefetch(ctx: MutationCtx, slug: string, { replan = false }: { replan?: boolean } = {}) {
-  const campaign = await campaignForEdit(ctx, slug);
+  // Intern, mit dem Bearbeiten-Schlüssel (Aufrufer prüfen die Rolle).
+  const campaign = await ctx.db.query("campaigns").withIndex("by_slug", (q) => q.eq("slug", slug)).unique();
   if (!campaign) throw new ConvexError("Verteilaktion nicht gefunden");
   const now = Date.now();
   const existing = await ctx.db.query("prefetchJobs").withIndex("by_slug", (q) => q.eq("slug", slug)).unique();
@@ -590,20 +618,22 @@ function startIn(cells: Set<string>, center: [number, number]): [number, number]
   return best;
 }
 
-/** Knopf „Gebiet vorladen“ im Teilen-Dialog. */
+/** Knopf „Gebiet vorladen“ im Teilen-Dialog, ab Rolle edit. */
 export const prefetch = mutation({
   args: { slug: v.string() },
   handler: async (ctx, { slug }) => {
-    if (!SLUG_PATTERN.test(slug)) throw new ConvexError("Verteilaktion nicht gefunden");
-    await startPrefetch(ctx, slug);
+    const { campaign } = await requireRole(ctx, slug, "edit");
+    await startPrefetch(ctx, campaign.slug);
   },
 });
 
-/** Fortschritt des Vorladens, live für den Teilen-Dialog. */
+/** Fortschritt des Vorladens, live für den Teilen-Dialog, ab Rolle edit. */
 export const prefetchStatus = query({
   args: { slug: v.string() },
-  handler: async (ctx, { slug }) => {
-    if (!SLUG_PATTERN.test(slug)) return null;
+  handler: async (ctx, { slug: key }) => {
+    const found = await campaignByKey(ctx, key);
+    if (!found || !hasRole(found.role, "edit")) return null;
+    const slug = found.campaign.slug;
     const job = await ctx.db.query("prefetchJobs").withIndex("by_slug", (q) => q.eq("slug", slug)).unique();
     if (!job) return null;
     // Ob ein Auftrag hängt, entscheidet der Browser anhand von updatedAt (eine Query wird

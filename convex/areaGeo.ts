@@ -488,3 +488,12 @@ export function touchedCells(g: AreaGeometry): string[] {
   }
   return [...out];
 }
+
+/**
+ * Nur die Einträge (Markierungen, Notizen), deren Mittelpunkt in einem gewählten Gebiet liegt.
+ * Die anderen bleiben gespeichert, die Karte zeigt sie nur nicht. Ohne Auswahl: alle.
+ */
+export function visibleIn<T extends { center: Position }>(items: Map<string, T>, selection: Selection | null): Map<string, T> {
+  if (!selection) return items;
+  return new Map([...items].filter(([, item]) => selection.contains(item.center)));
+}

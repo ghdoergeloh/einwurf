@@ -1,9 +1,9 @@
 import { internalMutation, mutation, query, type MutationCtx, type QueryCtx } from "./_generated/server";
 import type { Doc, Id } from "./_generated/dataModel";
 import { internal } from "./_generated/api";
-import { ConvexError, v } from "convex/values";
+import { v } from "convex/values";
 import type { Position } from "geojson";
-import { campaignForEdit, campaignForRead } from "./access";
+import { campaignByKey, requireRole } from "./access";
 import { areaAt, decodeCells, decodeGeometry, encodeCells, inBox, type AreaGeometry } from "./areaGeo";
 import { centerOf, decodeBuildings } from "./osm";
 import { countDelta, statusOf, type HouseStatus } from "./status";
@@ -152,7 +152,7 @@ export async function recountHouses(ctx: MutationCtx, campaignId: Id<"campaigns"
 
 /** Wie recountHouses, für den Bearbeiten-Schlüssel (Vorladen fertig). */
 export async function recountHousesFor(ctx: MutationCtx, slug: string) {
-  const campaign = await campaignForEdit(ctx, slug);
+  const campaign = (await campaignByKey(ctx, slug))?.campaign;
   if (campaign) await recountHouses(ctx, campaign._id);
 }
 
@@ -276,7 +276,7 @@ export const countStep = internalMutation({
 export const byArea = query({
   args: { slug: v.string() },
   handler: async (ctx, { slug }) => {
-    const campaign = (await campaignForRead(ctx, slug))?.campaign;
+    const campaign = (await campaignByKey(ctx, slug))?.campaign;
     if (!campaign) return null;
     const total = { done: campaign.markCount ?? 0, blocked: campaign.blockedCount ?? 0 };
     const set = await setOf(ctx, campaign._id);
@@ -317,13 +317,12 @@ export const byArea = query({
 
 /**
  * Beim Öffnen der Statistik: fehlt sie für die geladenen Gebiete (vor ihr geladen), anlegen;
- * ist sie vorläufig, Häuser neu zählen (gebremst). Nur mit dem Bearbeiten-Schlüssel (siehe access.ts).
+ * ist sie vorläufig, Häuser neu zählen (gebremst). Ab der Rolle „edit“ (siehe access.ts); der Ansehen-Link liest nur.
  */
 export const refresh = mutation({
   args: { slug: v.string() },
   handler: async (ctx, { slug }) => {
-    const campaign = await campaignForEdit(ctx, slug);
-    if (!campaign) throw new ConvexError("Verteilaktion nicht gefunden");
+    const { campaign } = await requireRole(ctx, slug, "edit");
     const set = await setOf(ctx, campaign._id);
     if (!set || set.status !== "done") return;
     if (!(await ready(ctx, campaign._id, set))) return await resetAreaStats(ctx, campaign._id);

@@ -15,7 +15,9 @@ import {
   simplifyRing,
   subareaQuery,
   toAreas,
+  selectionOf,
   touchedCells,
+  visibleIn,
   type Boundary,
 } from "./areaGeo";
 
@@ -206,5 +208,35 @@ describe("Review-Befunde", () => {
     expect(performance.now() - t0).toBeLessThan(200);
     expect(cells.length).toBeGreaterThan(3000);
     expect(cells).toContain(`${Math.floor(7 / 0.005)}:${Math.floor(50.9 / 0.005)}`);
+  });
+});
+
+describe("nur Einträge in gewählten Gebieten (S8)", () => {
+  const west = { geometry: [[box(0, 0, 2, 2)]], cells: ["0:0"] };
+  const ost = { geometry: [[box(2, 0, 4, 2)]], cells: ["400:0"] };
+  const marks = new Map([
+    ["way/1", { osmId: "way/1", center: [1, 1], status: "done" }],
+    ["way/2", { osmId: "way/2", center: [3, 1], status: "blocked" }],
+  ]);
+  const notes = new Map([
+    ["way/2", { osmId: "way/2", center: [3, 1], text: "Hund" }],
+    ["way/3", { osmId: "way/3", center: [9, 9], text: "außerhalb des Ortes" }],
+  ]);
+
+  test("Markierung und Notiz außerhalb der Auswahl werden ausgeblendet", () => {
+    const sel = selectionOf([{ ...west, selected: true }, { ...ost, selected: false }]);
+    expect([...visibleIn(marks, sel).keys()]).toEqual(["way/1"]);
+    expect([...visibleIn(notes, sel).keys()]).toEqual([]);
+  });
+
+  test("ohne Auswahl (nichts gewählt oder keine Gebiete) bleibt alles sichtbar", () => {
+    expect(visibleIn(marks, selectionOf([{ ...west, selected: false }, { ...ost, selected: false }]))).toBe(marks);
+    expect(visibleIn(notes, selectionOf(null))).toBe(notes);
+  });
+
+  test("Auswahl erweitert: wieder sichtbar", () => {
+    const beide = selectionOf([{ ...west, selected: true }, { ...ost, selected: true }]);
+    expect([...visibleIn(marks, beide).keys()]).toEqual(["way/1", "way/2"]);
+    expect([...visibleIn(notes, beide).keys()]).toEqual(["way/2"]);
   });
 });

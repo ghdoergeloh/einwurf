@@ -47,13 +47,18 @@ async function createAndLoadAreas(query) {
   await p.getByRole("button", { name: /Verteilaktion starten/ }).click();
   await p.getByRole("dialog").waitFor();
   await p.waitForURL(/\/admin\/[A-Za-z0-9]{22}$/);
-  const editUrl = await p.getByLabel("Link zur Verteilaktion").inputValue();
+  const editUrl = await p.getByLabel("Link zum Mitmachen").inputValue();
   assert.match(editUrl, /\/v\/[A-Za-z0-9]{22}$/);
   await p.getByRole("button", { name: /Ortsteile festlegen/ }).click();
   const sheet = p.getByTestId("areas-sheet");
   // Overpass in der Cloud: bis zu drei Versuche mit Pausen; großzügig warten.
   const started = Date.now();
-  await sheet.getByRole("checkbox").first().waitFor({ timeout: 240_000 });
+  // Bis zu drei Versuche über alle Server mit Pausen: höchstens etwa 10 Minuten.
+  await sheet.getByRole("checkbox").first().or(sheet.getByText("konnten nicht geladen werden")).waitFor({ timeout: 660_000 });
+  if (await sheet.getByText("konnten nicht geladen werden").count()) {
+    const why = (await sheet.getByTestId("areas-error").count()) ? await sheet.getByTestId("areas-error").innerText() : "(keine Angabe)";
+    throw new Error(`${query}: Gebiete nicht geladen. Antwort der Overpass-Server: ${why}`);
+  }
   const names = await sheet.locator("li label span").allTextContents();
   console.log(`${query}: ${names.length} Gebiete nach ${Math.round((Date.now() - started) / 1000)} s:`, names.join(", "));
   const whole = await sheet.getByText("keine Ortsteile eingetragen").count();
@@ -63,7 +68,7 @@ async function createAndLoadAreas(query) {
 
 try {
   // Bornheim: Ortsteile wie im Issue
-  const b = await createAndLoadAreas("Bornheim");
+  const b = await createAndLoadAreas("Bornheim, Rhein-Sieg-Kreis");
   for (const n of ["Brenig", "Hersel", "Roisdorf", "Sechtem", "Walberberg", "Widdig"]) {
     assert.ok(b.names.some((x) => x.includes(n)), `Bornheim: Ortsteil ${n} fehlt`);
   }

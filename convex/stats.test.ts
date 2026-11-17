@@ -9,6 +9,7 @@ import { bboxOf, encodeCells, touchedCells, type AreaGeometry } from "./areaGeo"
 const modules = import.meta.glob("./**/*.ts");
 const SLUG = "AbCdEfGhIjKlMnOpQrStUv";
 const ADMIN = "AdminSchluessel1234567";
+const VIEW_KEY = "AnsehenSchluessel12345";
 
 type T = ReturnType<typeof convexTest>;
 const box = (w: number, s: number, e: number, n: number): AreaGeometry => [[[[w, s], [e, s], [e, n], [w, n], [w, s]]]];
@@ -249,11 +250,19 @@ describe("Statistik je Gebiet", () => {
     expect((await row(t, "f")).houses).toBe(0);
   });
 
-  test("lesbar mit Admin- und Bearbeiten-Schlüssel, nicht mit unbekanntem", async () => {
+  test("lesbar mit Admin-, Bearbeiten- und Ansehen-Schlüssel, nicht mit unbekanntem", async () => {
     const t = convexTest(schema, modules);
     await setup(t, [["w", "West", WEST]]);
     await settle(t);
+    await tap(t, "way/1", [7.005, 50.705], "done");
     expect((await stats(t, ADMIN))!.areas!.rows).toHaveLength(1);
+    await t.run(async (ctx) => {
+      const c = (await ctx.db.query("campaigns").collect())[0];
+      await ctx.db.patch(c._id, { viewKey: VIEW_KEY });
+    });
+    expect((await stats(t, VIEW_KEY))!.areas!.rows[0]).toMatchObject({ id: "w", done: 1 });
+    // Neu zählen ist eine Änderung: nicht mit dem Ansehen-Schlüssel.
+    await expect(t.mutation(api.stats.refresh, { slug: VIEW_KEY })).rejects.toThrow(/nichts ändern/);
     expect(await stats(t, "Unbekannt1234567890123")).toBeNull();
   });
 
@@ -296,7 +305,7 @@ describe("Statistik je Gebiet", () => {
     expect(await row(t, "a")).toMatchObject({ done: 0 });
   });
 
-  test("Neu zählen per refresh nur mit Bearbeiten-Schlüssel und gebremst", async () => {
+  test("Neu zählen per refresh ab Rolle edit und gebremst", async () => {
     const t = convexTest(schema, modules);
     await setup(t, [["w", "West", WEST]]);
     await settle(t);
@@ -309,6 +318,7 @@ describe("Statistik je Gebiet", () => {
     await settle(t);
     expect((await row(t, "w")).houses).toBe(grid([7.0, 50.7, SPLIT, 50.71]).length);
     await expect(t.mutation(api.stats.refresh, { slug: "Unbekannt1234567890123" })).rejects.toThrow();
-    await expect(t.mutation(api.stats.refresh, { slug: ADMIN })).rejects.toThrow();
+    // Der Admin-Schlüssel umfasst die Rechte des Bearbeiten-Schlüssels (access.ts).
+    await t.mutation(api.stats.refresh, { slug: ADMIN });
   });
 });

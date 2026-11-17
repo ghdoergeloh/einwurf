@@ -19,9 +19,9 @@ import {
   touchedCells,
   type AreaGeometry,
 } from "./areaGeo";
-import { askServers, overpassDeadline, startPrefetch, takeOverpassQuota } from "./buildings";
+import { askServers, overpassDeadline, overpassDetails, startPrefetch, takeOverpassQuota } from "./buildings";
 import { prefetchArea } from "./osm";
-import { campaignForAdmin, campaignForRead } from "./access";
+import { campaignByKey, requireRole } from "./access";
 import { recountHouses, resetAreaStats } from "./stats";
 
 /**
@@ -40,6 +40,8 @@ const AREAS_MAX_TOTAL_BYTES = 3_000_000;
 /** Mehr Gebiete nimmt niemand in eine Liste zum Ankreuzen. */
 const MAX_AREAS = 500;
 const FAILURE = "Die Gebiete (OpenStreetMap) sind gerade nicht erreichbar.";
+/** So viel der Fehlermeldung wird gespeichert und angezeigt. */
+const MAX_ERROR_LENGTH = 300;
 
 const setOf = (ctx: QueryCtx, campaignId: Id<"campaigns">) =>
   ctx.db.query("areaSets").withIndex("by_campaign", (q) => q.eq("campaignId", campaignId)).unique();
@@ -48,7 +50,7 @@ const setOf = (ctx: QueryCtx, campaignId: Id<"campaigns">) =>
 export async function startAreas(ctx: MutationCtx, campaignId: Id<"campaigns">) {
   const existing = await setOf(ctx, campaignId);
   const run = (existing?.run ?? 0) + 1;
-  const fields = { status: "loading" as const, failures: 0, updatedAt: Date.now(), run };
+  const fields = { status: "loading" as const, failures: 0, updatedAt: Date.now(), run, lastError: undefined };
   if (existing) await ctx.db.patch(existing._id, fields);
   else await ctx.db.insert("areaSets", { campaignId, unselected: [], ...fields });
   await ctx.scheduler.runAfter(0, internal.areas.download, { campaignId, run });
@@ -61,8 +63,7 @@ export async function startAreas(ctx: MutationCtx, campaignId: Id<"campaigns">) 
 export const load = mutation({
   args: { adminKey: v.string() },
   handler: async (ctx, { adminKey }) => {
-    const campaign = await campaignForAdmin(ctx, adminKey);
-    if (!campaign) throw new ConvexError("Verteilaktion nicht gefunden");
+    const { campaign } = await requireRole(ctx, adminKey, "admin");
     const set = await setOf(ctx, campaign._id);
     const stale = set?.status === "loading" && Date.now() - set.updatedAt > AREAS_STALE_MS;
     if (!set || set.status === "failed" || stale) await startAreas(ctx, campaign._id);
@@ -77,7 +78,7 @@ export const load = mutation({
 export const list = query({
   args: { slug: v.string() },
   handler: async (ctx, { slug }) => {
-    const campaign = (await campaignForRead(ctx, slug))?.campaign;
+    const campaign = (await campaignByKey(ctx, slug))?.campaign;
     if (!campaign) return null;
     const rows = await ctx.db.query("areas").withIndex("by_campaign", (q) => q.eq("campaignId", campaign._id)).collect();
     return rows
@@ -90,11 +91,19 @@ export const list = query({
 export const status = query({
   args: { slug: v.string() },
   handler: async (ctx, { slug }) => {
-    const campaign = (await campaignForRead(ctx, slug))?.campaign;
+    const campaign = (await campaignByKey(ctx, slug))?.campaign;
     if (!campaign) return null;
     const set = await setOf(ctx, campaign._id);
-    if (!set) return { status: "none" as const, whole: false, unselected: [], updatedAt: 0, staleAfterMs: AREAS_STALE_MS };
-    return { status: set.status, whole: !!set.whole, unselected: set.unselected, updatedAt: set.updatedAt, staleAfterMs: AREAS_STALE_MS };
+    if (!set) return { status: "none" as const, whole: false, unselected: [], updatedAt: 0, staleAfterMs: AREAS_STALE_MS, lastError: null };
+    return {
+      status: set.status,
+      whole: !!set.whole,
+      unselected: set.unselected,
+      updatedAt: set.updatedAt,
+      staleAfterMs: AREAS_STALE_MS,
+      /** Antwort der Overpass-Server beim letzten Fehlschlag (z. B. „HTTP 429“), für den Hinweis im Panel. */
+      lastError: set.lastError ?? null,
+    };
   },
 });
 
@@ -102,8 +111,7 @@ export const status = query({
 export const select = mutation({
   args: { adminKey: v.string(), ids: v.array(v.string()), selected: v.boolean() },
   handler: async (ctx, { adminKey, ids, selected }) => {
-    const campaign = await campaignForAdmin(ctx, adminKey);
-    if (!campaign) throw new ConvexError("Verteilaktion nicht gefunden");
+    const { campaign } = await requireRole(ctx, adminKey, "admin");
     if (ids.length > MAX_AREAS) throw new ConvexError("Zu viele Gebiete");
     const set = await setOf(ctx, campaign._id);
     if (!set || set.status !== "done") throw new ConvexError("Die Gebiete sind noch nicht geladen");
@@ -174,6 +182,7 @@ export const save = internalMutation({
       status: "done",
       whole,
       failures: 0,
+      lastError: undefined,
       updatedAt: Date.now(),
       // Auswahl aus einem früheren Laden übernehmen, soweit es die Gebiete noch gibt.
       unselected: set.unselected.filter((id) => ids.has(id)),
@@ -185,16 +194,16 @@ export const save = internalMutation({
 });
 
 export const failed = internalMutation({
-  args: { campaignId: v.id("campaigns"), run: v.number() },
-  handler: async (ctx, { campaignId, run }) => {
+  args: { campaignId: v.id("campaigns"), run: v.number(), error: v.optional(v.string()) },
+  handler: async (ctx, { campaignId, run, error }) => {
     const set = await setOf(ctx, campaignId);
     if (!set || set.run !== run || set.status !== "loading") return;
     const failures = set.failures + 1;
     if (failures >= AREAS_MAX_FAILURES) {
-      await ctx.db.patch(set._id, { status: "failed", failures, updatedAt: Date.now() });
+      await ctx.db.patch(set._id, { status: "failed", failures, updatedAt: Date.now(), lastError: error });
       return;
     }
-    await ctx.db.patch(set._id, { failures, updatedAt: Date.now() });
+    await ctx.db.patch(set._id, { failures, updatedAt: Date.now(), lastError: error });
     await ctx.scheduler.runAfter(AREAS_RETRY_MS * failures, internal.areas.download, { campaignId, run });
   },
 });
@@ -246,8 +255,9 @@ export const download = internalAction({
       });
       await ctx.runMutation(internal.areas.save, { campaignId, run, whole, areas: rows });
     } catch (e) {
-      console.warn("Gebiete: Laden fehlgeschlagen", e instanceof Error ? e.message : String(e));
-      await ctx.runMutation(internal.areas.failed, { campaignId, run });
+      const error = overpassDetails(e).slice(0, MAX_ERROR_LENGTH);
+      console.warn("Gebiete: Laden fehlgeschlagen", error);
+      await ctx.runMutation(internal.areas.failed, { campaignId, run, error });
     }
   },
 });

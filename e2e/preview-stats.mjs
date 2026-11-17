@@ -2,7 +2,7 @@
 // Overpass-Daten über Convex). Nachgebildet werden nur Ortssuche und Grundkarte im Browser.
 // Ablauf: Aktion in Bornheim anlegen, nur einen kleinen Ortsteil wählen, warten bis seine Häuser
 // gezählt sind, dann tippt der Admin ein Haus gelb → dunkelgelb → offen, und ein zweites Gerät
-// sieht die Zahlen live.
+// mit dem Ansehen-Link sieht die Zahlen live.
 // Aufruf: node e2e/preview-stats.mjs <preview-url> [ortsteil] [ordner-für-screenshots]
 import { chromium } from "playwright";
 import assert from "node:assert/strict";
@@ -61,7 +61,10 @@ try {
   await p.getByText("Bornheim, Rhein-Sieg-Kreis").click();
   await p.getByRole("button", { name: /Verteilaktion starten/ }).click();
   await p.getByRole("dialog").waitFor();
-  const url = await p.getByLabel("Link zur Verteilaktion").inputValue();
+  // Für das zweite Gerät den Ansehen-Link (#3): Statistik dort nur lesen.
+  await p.getByRole("dialog").getByRole("button", { name: /Nur ansehen/ }).click();
+  const url = await p.getByLabel("Link zum Ansehen").inputValue();
+  if (!/\/a\/[A-Za-z0-9]{22}$/.test(url)) throw new Error(`kein Ansehen-Link: ${url}`);
   log("Aktion angelegt", p.url());
 
   // Nur einen kleinen Ortsteil wählen (echte Grenzen aus OSM).
@@ -107,7 +110,7 @@ try {
   }
   await p.getByText("Haus antippen, wenn der Flyer drin ist.").waitFor({ timeout: 180_000 });
 
-  // Zweites Gerät mit dem Link zum Mitmachen öffnet die Statistik.
+  // Zweites Gerät mit dem Ansehen-Link öffnet die Statistik.
   const b = await browser.newContext(phone);
   await mockBrowserOsm(b);
   const p2 = await b.newPage();
