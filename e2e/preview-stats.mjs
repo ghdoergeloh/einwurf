@@ -72,8 +72,8 @@ try {
   const areas = p.getByTestId("areas-sheet");
   // Gebiete kommen von Overpass über Convex (zwei Abfragen, bis zu drei Versuche); Fehler gleich melden.
   await Promise.race([
-    areas.getByLabel(AREA).waitFor({ timeout: 480_000 }),
-    areas.getByText("konnten nicht geladen werden").waitFor({ timeout: 480_000 }).then(() => {
+    areas.getByLabel(AREA).waitFor({ timeout: 720_000 }),
+    areas.getByText("konnten nicht geladen werden").waitFor({ timeout: 720_000 }).then(() => {
       throw new Error("Ortsteile konnten nicht geladen werden (Overpass vom Convex-Backend aus)");
     }),
   ]);
