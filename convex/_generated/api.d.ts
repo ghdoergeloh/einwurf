@@ -19,6 +19,7 @@ import type * as crons from "../crons.js";
 import type * as marks from "../marks.js";
 import type * as migrations from "../migrations.js";
 import type * as osm from "../osm.js";
+import type * as stats from "../stats.js";
 import type * as status from "../status.js";
 import type * as validation from "../validation.js";
 
@@ -40,6 +41,7 @@ declare const fullApi: ApiFromModules<{
   marks: typeof marks;
   migrations: typeof migrations;
   osm: typeof osm;
+  stats: typeof stats;
   status: typeof status;
   validation: typeof validation;
 }>;

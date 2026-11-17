@@ -21,6 +21,7 @@ import {
 import { SLUG_PATTERN } from "./validation";
 import { areaRows } from "./areaStore";
 import { campaignForEdit } from "./access";
+import { recountHousesFor } from "./stats";
 import { decodeCells, decodeGeometry, selectionOf, type Selection } from "./areaGeo";
 
 /**
@@ -628,6 +629,8 @@ export const prefetchAdvance = internalMutation({
       const done = job.done + (first?.length ?? 0);
       if (rest.length === 0) {
         await ctx.db.patch(jobId, { batches: [], done, status: "done", failures: 0, updatedAt: now });
+        // Statistik: Jetzt sind die Häuser der Gebiete im Cache.
+        await recountHousesFor(ctx, job.slug);
         return;
       }
       await ctx.db.patch(jobId, { batches: rest, done, failures: 0, updatedAt: now });
@@ -637,6 +640,7 @@ export const prefetchAdvance = internalMutation({
       const failures = job.failures + 1;
       if (failures >= PREFETCH_MAX_FAILURES) {
         await ctx.db.patch(jobId, { status: "failed", failures, updatedAt: now });
+        await recountHousesFor(ctx, job.slug);
         return;
       }
       await ctx.db.patch(jobId, { failures, updatedAt: now });

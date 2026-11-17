@@ -22,6 +22,7 @@ import {
 import { askServers, overpassDeadline, startPrefetch, takeOverpassQuota } from "./buildings";
 import { prefetchArea } from "./osm";
 import { campaignForAdmin, campaignForRead } from "./access";
+import { recountHouses, resetAreaStats } from "./stats";
 
 /**
  * Gebiete (Ortsteile) einer Aktion: Convex lädt die Grenzen einmal je Aktion von Overpass
@@ -118,6 +119,8 @@ export const select = mutation({
     const unselected = [...off].sort();
     if (unselected.join("\n") === [...set.unselected].sort().join("\n")) return;
     await ctx.db.patch(set._id, { unselected });
+    // Statistik: Häuser der neuen Zielgebiete zählen (was schon im Cache ist; der Rest folgt nach dem Vorladen).
+    await recountHouses(ctx, campaign._id);
     // Läuft oder lief ein Vorladen, die ausgewählten Gebiete zuerst (Kacheln im Cache kosten nichts).
     await replanPrefetch(ctx, campaign.slug);
   },
@@ -175,6 +178,7 @@ export const save = internalMutation({
       // Auswahl aus einem früheren Laden übernehmen, soweit es die Gebiete noch gibt.
       unselected: set.unselected.filter((id) => ids.has(id)),
     });
+    await resetAreaStats(ctx, campaignId);
     const campaign = await ctx.db.get(campaignId);
     if (campaign) await replanPrefetch(ctx, campaign.slug);
   },
