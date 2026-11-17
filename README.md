@@ -66,6 +66,14 @@ pnpm e2e                # Browser-Test; braucht laufendes `pnpm dev` + `npx conv
                         # (danach wieder entfernen: npx convex env remove OVERPASS_URLS)
 ```
 
+Gegen eine Vercel-Preview (eigenes Convex-Preview-Backend, echte Häuser von Overpass; nachgebildet ist nur die Ortssuche im Browser):
+
+```bash
+pnpm e2e:preview https://<preview>.vercel.app [ordner-für-screenshots]
+```
+
+In Previews (`VITE_VERCEL_ENV=preview`) stellt die Seite dafür die Karte als `window.__einwurfMap` bereit, in Produktion nicht.
+
 ## Deployen
 
 Es braucht zwei Teile: das Convex-Backend und die statischen Dateien des Frontends.

@@ -217,7 +217,9 @@ export function BuildingMap({
     map.touchZoomRotate.disableRotation();
     map.keyboard.disableRotation();
     mapRef.current = map;
-    if (import.meta.env.DEV) (window as unknown as { __einwurfMap?: maplibregl.Map }).__einwurfMap = map;
+    // Für Browser-Tests: lokal und in Vercel-Previews (e2e/preview.mjs), nicht in Produktion.
+    if (import.meta.env.DEV || import.meta.env.VITE_VERCEL_ENV === "preview")
+      (window as unknown as { __einwurfMap?: maplibregl.Map }).__einwurfMap = map;
 
     if (bbox && bbox.length === 4) {
       // Kleiner Ort (Straße, Ortsteil): ganz zeigen, aber nie weiter weg als Straßenansicht,
