@@ -151,9 +151,18 @@ export function CampaignPage({ slug, isNew, viewLink }: Props) {
 
   // Ein Tipp im Ansehen-Modus markiert nichts; ein kurzer Hinweis sagt, wie es geht.
   // Beim Ansehen-Link genügt der feste Hinweis „Nur ansehen“.
-  const onReadOnlyTap = useCallback(() => {
-    if (!viewOnly) showToast("Ansehen-Modus – zum Markieren auf Bearbeiten wechseln", "info");
-  }, [viewOnly, showToast]);
+  const onReadOnlyTap = useCallback(
+    (kind: "tap" | "note") => {
+      if (viewOnly) return;
+      showToast(
+        kind === "note"
+          ? "Ansehen-Modus – für Notizen auf Bearbeiten wechseln"
+          : "Ansehen-Modus – zum Markieren auf Bearbeiten wechseln",
+        "info",
+      );
+    },
+    [viewOnly, showToast],
+  );
 
   const onToggle = useCallback(
     (osmId: string, status: HouseStatus, center: number[]) => {
@@ -296,7 +305,7 @@ export function CampaignPage({ slug, isNew, viewLink }: Props) {
       {noteTarget && (
         <NoteSheet
           key={noteTarget.osmId}
-          readOnly={readOnly}
+          readOnly={viewOnly ? "link" : mode === "view" ? "mode" : false}
           houseNumber={noteTarget.houseNumber}
           note={openNote ? { text: openNote.text, updatedAt: openNote.updatedAt, pending: openNote.pending } : null}
           onSave={(text, expectedUpdatedAt) => {

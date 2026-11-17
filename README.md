@@ -15,7 +15,7 @@ Eine Karte für Verteilaktionen: Alle Häuser sind dunkelgrau. Wer einen Flyer e
 | Geste | Wirkung |
 | --- | --- |
 | Tippen auf ein Haus | weiterschalten: grau (offen) → gelb (Flyer drin) → dunkelgelb (nicht möglich) → grau (nach 0,3 s, siehe unten) |
-| Langes Drücken (0,5 s) oder Rechtsklick auf ein Haus | Notiz anlegen, ändern oder löschen (schaltet nichts weiter) |
+| Langes Drücken (0,5 s) oder Rechtsklick auf ein Haus | Notiz anlegen, ändern oder löschen (schaltet nichts weiter); beim Ansehen nur lesen |
 | Doppeltipp | hineinzoomen (markiert nichts) |
 | Doppeltipp und ziehen | mit einem Finger zoomen |
 | Ziehen, Pinch, Mausrad, +/− | schieben und zoomen |
@@ -36,7 +36,7 @@ Convex speichert je markiertem Haus nur die OSM-ID und den Mittelpunkt, einsorti
 | Link | Rolle | Was geht |
 | --- | --- | --- |
 | `/v/…` zum Mitmachen | edit | Häuser markieren, teilen, Gebiet vorladen |
-| `/a/…` nur ansehen | view | Karte und Markierungen live sehen, sonst nichts |
+| `/a/…` nur ansehen | view | Karte, Markierungen und Notizen live sehen (Tipp auf ein blaues Haus zeigt die Notiz), sonst nichts |
 
 Der Teilen-Dialog zeigt beide Links getrennt („Zum Mitmachen“ und „Nur ansehen“). Ältere Aktionen bekommen ihren Ansehen-Link, sobald jemand mit dem Link zum Mitmachen den Teilen-Dialog öffnet. Die beiden Schlüssel sind unabhängig voneinander zufällig, der eine lässt sich aus dem anderen nicht ableiten.
 

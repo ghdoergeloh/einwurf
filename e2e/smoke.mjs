@@ -583,6 +583,20 @@ try {
   await p.waitForTimeout(800);
   assert.equal(await statusAt(p, cx, cy), mBefore, "Ansehen-Modus: Tipp ändert nichts");
   await shot(p, "10-ansehen-modus");
+  // Notiz im Ansehen-Modus: nur lesen, mit Hinweis; Fokus im Dialog
+  await p.mouse.click(vnx, vny, { button: "right" });
+  const md = p.getByRole("dialog");
+  await md.waitFor({ timeout: 3000 });
+  assert.equal(await md.getByLabel("Text der Notiz").count(), 0, "Ansehen-Modus: kein Textfeld");
+  assert.equal(await md.getByRole("button", { name: "Notiz löschen" }).count(), 0, "Ansehen-Modus: kein Löschen");
+  await md.getByText("Ansehen-Modus – zum Ändern auf Bearbeiten wechseln.").waitFor();
+  assert.equal(await p.evaluate(() => !!document.activeElement?.closest("[role=dialog]")), true, "Fokus im Dialog");
+  await md.getByRole("button", { name: "Schließen" }).click();
+  await md.waitFor({ state: "hidden" });
+  // Rechtsklick auf ein Haus ohne Notiz: Hinweis statt Dialog
+  await p.mouse.click(cx + 120, cy + 120, { button: "right" });
+  await p.getByText("Ansehen-Modus – für Notizen auf Bearbeiten wechseln").waitFor({ timeout: 3000 });
+  assert.equal(await p.getByRole("dialog").count(), 0);
   await p.reload();
   await p.getByTestId("view-only").waitFor();
   assert.equal(

@@ -11,12 +11,13 @@ interface Props {
   onSave: (text: string, expectedUpdatedAt: number | null | undefined) => void;
   onDelete: (expectedUpdatedAt: number | null | undefined) => void;
   onClose: () => void;
-  /** Nur ansehen (Ansehen-Link oder Ansehen-Modus): Notiz nur lesen, nichts ändern. */
-  readOnly?: boolean;
+  /** Nur lesen: „link“ beim Ansehen-Link, „mode“ im Ansehen-Modus (mit Hinweis, wie man ändert). */
+  readOnly?: "link" | "mode" | false;
 }
 
 /** Notiz zu einem Haus anlegen, ändern oder löschen (langes Drücken oder Rechtsklick auf ein Haus). */
 export function NoteSheet({ houseNumber, note, onSave, onDelete, onClose, readOnly = false }: Props) {
+  const closeRef = useRef<HTMLButtonElement>(null);
   const [draft, setDraft] = useState(note?.text ?? "");
   const [touched, setTouched] = useState(false);
   /** Stand der Notiz, auf dem der Entwurf beruht; undefined = eigene, noch unbestätigte Notiz. */
@@ -43,8 +44,10 @@ export function NoteSheet({ houseNumber, note, onSave, onDelete, onClose, readOn
   useEffect(() => {
     const prev = document.activeElement as HTMLElement | null;
     const el = textRef.current;
-    el?.focus();
-    el?.setSelectionRange(el.value.length, el.value.length);
+    if (el) {
+      el.focus();
+      el.setSelectionRange(el.value.length, el.value.length);
+    } else closeRef.current?.focus();
     const onKey = (e: KeyboardEvent) => e.key === "Escape" && onClose();
     window.addEventListener("keydown", onKey);
     return () => {
@@ -89,76 +92,79 @@ export function NoteSheet({ houseNumber, note, onSave, onDelete, onClose, readOn
         </div>
         {readOnly ? (
           <>
-              <p className="mt-1 text-sm text-muted">{note ? `Zuletzt geändert ${ago(note.updatedAt)}.` : "Keine Notiz mehr."}</p>
-              <p className="mt-4 whitespace-pre-wrap break-words rounded-2xl bg-paper px-3.5 py-3 text-base leading-snug" data-testid="note-text">
-                {note?.text ?? "—"}
-              </p>
-              <div className="mt-4 flex justify-end">
-                <button type="button" onClick={onClose} className="rounded-2xl bg-ink px-5 py-3 text-sm font-semibold text-white hover:bg-ink-2">
-                  Schließen
-                </button>
-              </div>
+            <p className="mt-1 text-sm text-muted">{note ? `Zuletzt geändert ${ago(note.updatedAt)}.` : "Keine Notiz mehr."}</p>
+            <p className="mt-4 whitespace-pre-wrap break-words rounded-2xl bg-paper px-3.5 py-3 text-base leading-snug" data-testid="note-text">
+              {note?.text ?? "—"}
+            </p>
+            {readOnly === "mode" && (
+              <p className="mt-3 text-sm text-muted">Ansehen-Modus – zum Ändern auf Bearbeiten wechseln.</p>
+            )}
+            <div className="mt-4 flex justify-end">
+              <button ref={closeRef} type="button" onClick={onClose} className="rounded-2xl bg-ink px-5 py-3 text-sm font-semibold text-white hover:bg-ink-2">
+                Schließen
+              </button>
+            </div>
           </>
         ) : (
           <>
-          <p className="mt-1 text-sm text-muted">
-            {note
-              ? `Zuletzt geändert ${ago(note.updatedAt)}. Alle mit dem Link sehen sie.`
-              : "Zum Nacharbeiten, z. B. „Briefkasten 3 und 4 haben nichts bekommen“. Alle mit dem Link sehen sie."}
-          </p>
-          <textarea
-            ref={textRef}
-            value={draft}
-            onChange={(e) => {
-              setDraft(e.target.value);
-              setTouched(true);
-            }}
-            onKeyDown={(e) => {
-              // Strg/⌘ + Enter speichert, Enter allein macht eine neue Zeile.
-              if (e.key === "Enter" && (e.metaKey || e.ctrlKey)) {
-                e.preventDefault();
-                save();
-              }
-            }}
-            maxLength={MAX_NOTE_LENGTH}
-            rows={4}
-            aria-label="Text der Notiz"
-            placeholder="Was ist hier noch zu tun?"
-            className="mt-4 block w-full resize-none rounded-2xl border border-black/10 bg-paper px-3.5 py-3 text-base leading-snug outline-none focus:border-note focus:ring-2 focus:ring-note/25"
-          />
-          {changedElsewhere && (
-            <p role="alert" className="mt-3 rounded-xl bg-amber-50 px-3 py-2 text-sm text-amber-950">
+            <p className="mt-1 text-sm text-muted">
               {note
-                ? `Jemand anderes hat die Notiz gerade geändert: „${note.text}“. Speichern ersetzt sie.`
-                : "Jemand anderes hat die Notiz gerade gelöscht. Speichern legt sie neu an."}
+                ? `Zuletzt geändert ${ago(note.updatedAt)}. Alle mit dem Link sehen sie.`
+                : "Zum Nacharbeiten, z. B. „Briefkasten 3 und 4 haben nichts bekommen“. Alle mit dem Link sehen sie."}
             </p>
-          )}
-          <p className="mt-1 text-right text-xs tabular-nums text-muted" aria-live="polite">
-            {draft.length} / {MAX_NOTE_LENGTH}
-          </p>
-          <div className="mt-3 flex flex-wrap items-center gap-2">
-            {note && (
-              <button
-                type="button"
-                onClick={() => onDelete(expectedUpdatedAt(note))}
-                className="rounded-2xl px-3 py-3 text-sm font-medium text-red-700 hover:bg-red-50"
-              >
-                Notiz löschen
-              </button>
+            <textarea
+              ref={textRef}
+              value={draft}
+              onChange={(e) => {
+                setDraft(e.target.value);
+                setTouched(true);
+              }}
+              onKeyDown={(e) => {
+                // Strg/⌘ + Enter speichert, Enter allein macht eine neue Zeile.
+                if (e.key === "Enter" && (e.metaKey || e.ctrlKey)) {
+                  e.preventDefault();
+                  save();
+                }
+              }}
+              maxLength={MAX_NOTE_LENGTH}
+              rows={4}
+              aria-label="Text der Notiz"
+              placeholder="Was ist hier noch zu tun?"
+              className="mt-4 block w-full resize-none rounded-2xl border border-black/10 bg-paper px-3.5 py-3 text-base leading-snug outline-none focus:border-note focus:ring-2 focus:ring-note/25"
+            />
+            {changedElsewhere && (
+              <p role="alert" className="mt-3 rounded-xl bg-amber-50 px-3 py-2 text-sm text-amber-950">
+                {note
+                  ? `Jemand anderes hat die Notiz gerade geändert: „${note.text}“. Speichern ersetzt sie.`
+                  : "Jemand anderes hat die Notiz gerade gelöscht. Speichern legt sie neu an."}
+              </p>
             )}
-            <div className="ml-auto flex gap-2">
-              <button type="button" onClick={onClose} className="rounded-2xl px-4 py-3 text-sm font-medium text-ink-3 hover:bg-black/5">
-                Abbrechen
-              </button>
-              <button
-                type="submit"
-                disabled={!trimmed && !note}
-                className="rounded-2xl bg-note px-5 py-3 text-sm font-semibold text-white transition hover:brightness-95 disabled:opacity-40"
-              >
-                Speichern
-              </button>
+            <p className="mt-1 text-right text-xs tabular-nums text-muted" aria-live="polite">
+              {draft.length} / {MAX_NOTE_LENGTH}
+            </p>
+            <div className="mt-3 flex flex-wrap items-center gap-2">
+              {note && (
+                <button
+                  type="button"
+                  onClick={() => onDelete(expectedUpdatedAt(note))}
+                  className="rounded-2xl px-3 py-3 text-sm font-medium text-red-700 hover:bg-red-50"
+                >
+                  Notiz löschen
+                </button>
+              )}
+              <div className="ml-auto flex gap-2">
+                <button type="button" onClick={onClose} className="rounded-2xl px-4 py-3 text-sm font-medium text-ink-3 hover:bg-black/5">
+                  Abbrechen
+                </button>
+                <button
+                  type="submit"
+                  disabled={!trimmed && !note}
+                  className="rounded-2xl bg-note px-5 py-3 text-sm font-semibold text-white transition hover:brightness-95 disabled:opacity-40"
+                >
+                  Speichern
+                </button>
+              </div>
             </div>
-          </div>
           </>
         )}
       </form>

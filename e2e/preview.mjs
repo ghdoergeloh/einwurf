@@ -117,6 +117,7 @@ try {
   const p = await a.newPage();
   track(p);
   await p.goto(BASE);
+  // Die Karte ist nur in Previews für Tests erreichbar (VITE_VERCEL_ENV=preview, siehe BuildingMap.tsx).
   await p.fill("#place", "Bornheim");
   await p.getByRole("button", { name: "Suchen" }).click();
   await p.getByRole("button", { name: /Verteilaktion starten/ }).click();
@@ -135,6 +136,10 @@ try {
   const viewKey = viewUrl.split("/a/")[1];
   await shot(p, "p1-share-ansehen");
   await share.getByRole("button", { name: "Zur Karte" }).click();
+  await p.getByTestId("map").waitFor();
+  await p.waitForFunction(() => window.__einwurfMap, null, { timeout: 15_000 }).catch(() => {
+    throw new Error("window.__einwurfMap fehlt: Preview ohne VITE_VERCEL_ENV=preview gebaut?");
+  });
 
   const [h1, h2] = await pickHouses(p);
   assert.ok(h1 && h2, "zwei Häuser gefunden");
@@ -245,6 +250,8 @@ try {
   await tapHouse(p, h2);
   await p.getByRole("dialog").waitFor({ timeout: 3000 });
   assert.equal(await p.getByRole("dialog").getByLabel("Text der Notiz").count(), 0, "Ansehen-Modus: Notiz nur lesen");
+  await p.getByRole("dialog").getByText("Ansehen-Modus – zum Ändern auf Bearbeiten wechseln.").waitFor();
+  assert.equal(await p.evaluate(() => !!document.activeElement?.closest("[role=dialog]")), true, "Fokus im Dialog");
   await p.getByRole("dialog").getByRole("button", { name: "Schließen" }).click();
   await p.getByTestId("mode-switch").getByRole("button", { name: "Bearbeiten" }).click();
   await tapHouse(p, h1);

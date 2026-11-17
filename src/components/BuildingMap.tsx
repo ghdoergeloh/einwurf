@@ -119,7 +119,8 @@ interface Props {
    * Doppeltipp und Standort bleiben. Ein Tipp auf ein Haus meldet nur `onReadOnlyTap`.
    */
   readOnly?: boolean;
-  onReadOnlyTap?: () => void;
+  /** „tap“: Tipp (Markieren), „note“: langes Drücken oder Rechtsklick (Notiz). */
+  onReadOnlyTap?: (kind: "tap" | "note") => void;
   onLoadState: (s: LoadState) => void;
   /** Lädt die Häuser der Kacheln ("x:y"), über Convex mit gemeinsamem Cache. */
   loadBuildings: (cells: string[]) => Promise<BuildingFeature[]>;
@@ -706,7 +707,7 @@ export function BuildingMap({
       const osmId = osmIdAt(point);
       if (readOnlyRef.current) {
         // Nur ansehen: vorhandene Notiz zum Lesen zeigen, sonst nichts anlegen.
-        if (!showNoteReadOnly(osmId)) onReadOnlyTapRef.current?.();
+        if (!showNoteReadOnly(osmId)) onReadOnlyTapRef.current?.("note");
         return;
       }
       const center = osmId && centerFor(osmId);
@@ -735,7 +736,7 @@ export function BuildingMap({
       if (disposed || !tap) return;
       if (readOnlyRef.current) {
         // Nur ansehen: Ein Tipp auf ein blaues Haus zeigt seine Notiz, sonst ändert er nichts.
-        if (!showNoteReadOnly(tap.osmId)) onReadOnlyTapRef.current?.();
+        if (!showNoteReadOnly(tap.osmId)) onReadOnlyTapRef.current?.("tap");
         return;
       }
       const { at } = tap;
@@ -894,7 +895,9 @@ export function BuildingMap({
     });
 
     map.on("mousemove", (e) => {
-      const hit = !readOnlyRef.current && map.getZoom() >= BUILDING_MIN_ZOOM - 0.5 && pick(e.point);
+      // Beim Ansehen sind nur Häuser mit Notiz anklickbar (sie zeigen die Notiz).
+      const f = map.getZoom() >= BUILDING_MIN_ZOOM - 0.5 ? pick(e.point) : undefined;
+      const hit = f && (!readOnlyRef.current || notesRef.current.has(f.properties?.osmId as string));
       map.getCanvas().style.cursor = hit ? "pointer" : "";
     });
 
