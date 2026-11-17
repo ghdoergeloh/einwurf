@@ -81,7 +81,7 @@ export function ShareSheet({ slug, editUrl, viewUrl, title, isNew, showPrefetch,
         </div>
 
         {editUrl && (
-          <div role="tablist" aria-label="Welcher Link?" className="mt-4 grid grid-cols-2 gap-1 rounded-2xl bg-paper p-1">
+          <div role="group" aria-label="Welcher Link?" className="mt-4 grid grid-cols-2 gap-1 rounded-2xl bg-paper p-1">
             <KindTab active={kind === "edit"} onClick={() => setKind("edit")} label="Zum Mitmachen" hint="kann markieren" />
             <KindTab active={kind === "view"} onClick={() => setKind("view")} label="Nur ansehen" hint="kann nichts ändern" />
           </div>
@@ -133,8 +133,7 @@ function KindTab({ active, onClick, label, hint }: { active: boolean; onClick: (
   return (
     <button
       type="button"
-      role="tab"
-      aria-selected={active}
+      aria-pressed={active}
       onClick={onClick}
       className={`rounded-xl px-3 py-2 text-left transition ${active ? "bg-white shadow-sm" : "hover:bg-black/5"}`}
     >

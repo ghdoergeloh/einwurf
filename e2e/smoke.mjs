@@ -402,14 +402,14 @@ try {
   await p.goto(url);
   await p.waitForTimeout(2500);
   await p.getByRole("button", { name: "Link teilen" }).click();
-  await p.getByRole("tab", { name: /Nur ansehen/ }).click();
+  await p.getByRole("button", { name: /Nur ansehen/ }).click();
   const viewUrl = await p.getByLabel("Link zum Ansehen").inputValue();
   assert.match(viewUrl, /\/a\/[A-Za-z0-9]{22}$/, "eigener Ansehen-Link");
   assert.ok(!viewUrl.includes(editKey), "Ansehen-Link enthält den Bearbeiten-Schlüssel nicht");
   await shot(p, "8-share-ansehen");
   await p.getByRole("button", { name: "Schließen" }).last().click();
 
-  const vc = await browser.newContext(phone);
+  const vc = await browser.newContext({ ...phone, geolocation: { latitude: CENTER.lat + 0.001, longitude: CENTER.lng + 0.001 }, permissions: ["geolocation"] });
   await mockOsm(vc);
   const pv = await vc.newPage();
   track(pv);
@@ -438,6 +438,24 @@ try {
   await pv.waitForTimeout(1200);
   assert.ok(Math.abs((await zoom(pv)) - (zv + 1)) < 0.01, "Doppeltipp zoomt beim Ansehen");
   await shot(pv, "9-ansehen-link");
+  // Schieben und Standort gehen auch beim Ansehen
+  const centerOf = (page) => page.evaluate(() => window.__einwurfMap.getCenter().toArray());
+  const c0 = await centerOf(pv);
+  await pv.mouse.move(cx, cy + 100);
+  await pv.mouse.down();
+  await pv.mouse.move(cx + 120, cy + 100, { steps: 6 });
+  await pv.mouse.up();
+  await pv.waitForTimeout(600);
+  assert.notDeepEqual(await centerOf(pv), c0, "Schieben beim Ansehen");
+  await pv.locator(".maplibregl-ctrl-geolocate").click();
+  await pv.waitForFunction(
+    (c) => {
+      const m = window.__einwurfMap.getCenter();
+      return Math.abs(m.lat - c.lat) < 0.0002 && Math.abs(m.lng - c.lng) < 0.0002;
+    },
+    { lat: CENTER.lat + 0.001, lng: CENTER.lng + 0.001 },
+    { timeout: 10_000 },
+  );
   assert.ok(received.length > 0, "Convex-Antworten mitgeschnitten");
   assert.ok(!received.some((f) => f.includes(editKey)), "Bearbeiten-Schlüssel kommt beim Ansehen-Link nie an");
   assert.ok(!(await pv.content()).includes(editKey), "Bearbeiten-Schlüssel nicht in der Seite");
