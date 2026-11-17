@@ -22,7 +22,7 @@ import { nextStatus, statusOf, type HouseStatus, type MarkStatus } from "../../c
 import { addTap, cellsToWatch, settleTaps, type PendingTap } from "../lib/pendingTaps";
 import { cyclePlaceholder, resolvePlaceholderTaps, type PlaceholderTap } from "../lib/placeholderTaps";
 import { BURST_SECONDS, createBurst, drawBurst, type Burst } from "../lib/sparks";
-import { areaAt, selectionOf, visibleIn, type AreaWithCells, type Selection } from "../../convex/areaGeo";
+import { areaAt, overviewZoom, selectionOf, visibleIn, type AreaWithCells, type Selection } from "../../convex/areaGeo";
 
 // Ab MapLibre 6 braucht jeder Bundler den Pfad zum Worker.
 maplibregl.setWorkerUrl(workerUrl);
@@ -154,8 +154,6 @@ interface Props {
 
 const EMPTY: FeatureCollection = { type: "FeatureCollection", features: [] };
 const NO_AREAS: MapArea[] = [];
-/** Zoomstufe zum Bearbeiten der Gebiete: Ortsteile ringsum sind zu sehen. */
-const OVERVIEW_ZOOM = 12;
 /** Außerhalb der gewählten Gebiete: Grundkarte dezent abgedunkelt. */
 const COLOR_AREA_MASK = "#15171c";
 const COLOR_AREA_LINE = "#3a3e47";
@@ -508,7 +506,11 @@ export function BuildingMap({
       controlsRef.current = {
         retry: () => void loadVisible(true),
         showBBox: ([w, s, e, n]) => map.fitBounds([w, s, e, n], { padding: 40, maxZoom: 16, duration: 600 }),
-        overview: () => map.getZoom() > OVERVIEW_ZOOM && map.easeTo({ zoom: OVERVIEW_ZOOM, duration: 600 }),
+        overview: () => {
+          const c = map.getContainer();
+          const z = overviewZoom(c.clientWidth, c.clientHeight, map.getCenter().lat);
+          if (map.getZoom() > z) map.easeTo({ zoom: z, duration: 600 });
+        },
         flyTo: ({ lat, lng }) => map.flyTo({ center: [lng, lat], duration: 900 }),
       };
 

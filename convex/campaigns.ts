@@ -138,5 +138,8 @@ export const setPlace = mutation({
     assertLatLng(center.lat, center.lng);
     if (bbox) assertBBox(bbox);
     await ctx.db.patch(campaign._id, { placeLabel: cleanText(placeLabel, MAX_PLACE_LENGTH, "Ort"), center, bbox });
+    // Ohne gewählte Gebiete richtet sich das Vorladen nach dem Mittelpunkt: neu planen.
+    const job = await ctx.db.query("prefetchJobs").withIndex("by_slug", (q) => q.eq("slug", campaign.slug)).unique();
+    if (job) await startPrefetch(ctx, campaign.slug, { replan: true });
   },
 });

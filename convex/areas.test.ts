@@ -194,6 +194,19 @@ describe("Auswahl", () => {
     expect(areas!.map((a) => [a.name, a.selected])).toEqual([["Beuel", true], ["Roisdorf", true], ["Witterschlick", true]]);
   });
 
+  test("scheitert das Vorwählen beim Anlegen, holt es das erste Laden im Bearbeiten-Modus nach (S4)", async () => {
+    vi.stubGlobal("fetch", vi.fn(async () => new Response("busy", { status: 504 })));
+    const t = await create({ initial: true });
+    expect(await selected(t)).toEqual([]);
+    vi.stubGlobal("fetch", fakeOverpass());
+    await t.action(api.areas.loadTiles, { adminKey: ADMIN, tiles: [TILE_WEST] });
+    expect(await selected(t)).toEqual(["Roisdorf"]);
+    // Hat die Aktion schon Gebiete (auch abgewählte), wählt Laden nichts mehr von selbst.
+    await t.mutation(api.areas.select, { adminKey: ADMIN, ids: ["relation/11"], selected: false });
+    await t.action(api.areas.loadTiles, { adminKey: ADMIN, tiles: [TILE_WEST] });
+    expect(await selected(t)).toEqual([]);
+  });
+
   test("unbekannter Ortsteil wird abgelehnt", async () => {
     vi.stubGlobal("fetch", fakeOverpass());
     const t = await create();
@@ -214,7 +227,8 @@ describe("Admin-Link", () => {
         t.mutation(api.campaigns.setPlace, { adminKey: key, placeLabel: "X", center: { lat: 50, lng: 7 } }),
       ).rejects.toThrow(/Admin-Link/);
     }
-    expect(await selected(t)).toEqual([]);
+    // Nur das Laden mit dem Admin-Schlüssel hat den Ortsteil an der Adresse gewählt, sonst nichts.
+    expect(await selected(t)).toEqual(["Roisdorf"]);
   });
 
   test("Mittelpunkt nachträglich ändern", async () => {

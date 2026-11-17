@@ -164,9 +164,12 @@ async function replanPrefetch(ctx: MutationCtx, slug: string) {
 // ---------------------------------------------------------------------------
 
 /** Bearbeiten-Schlüssel zum Admin-Schlüssel (für das Kontingent), sonst Fehler. */
-export const adminSlug = internalQuery({
+export const adminCampaign = internalQuery({
   args: { adminKey: v.string() },
-  handler: async (ctx, { adminKey }) => (await requireRole(ctx, adminKey, "admin")).campaign.slug,
+  handler: async (ctx, { adminKey }) => {
+    const { campaign } = await requireRole(ctx, adminKey, "admin");
+    return { slug: campaign.slug, campaignId: campaign._id, center: [campaign.center.lng, campaign.center.lat] };
+  },
 });
 
 export const tileStatus = internalQuery({
@@ -301,8 +304,11 @@ export const loadTiles = action({
   args: { adminKey: v.string(), tiles: v.array(v.string()) },
   handler: async (ctx, { adminKey, tiles }): Promise<void> => {
     assertTiles(tiles, MAX_TILES_PER_LOAD);
-    const slug = await ctx.runQuery(internal.areas.adminSlug, { adminKey });
+    const { slug, campaignId, center } = await ctx.runQuery(internal.areas.adminCampaign, { adminKey });
     await loadBoundaryTiles(ctx, slug, tiles);
+    // Ist der Ortsteil an der Adresse beim Anlegen nicht vorgewählt worden (Overpass gestört),
+    // jetzt nachholen, sobald seine Kachel da ist. Wählt nur, solange die Aktion keine Gebiete hat.
+    if (tiles.includes(boundaryTileOf(center[0], center[1]))) await ctx.runMutation(internal.areas.selectAt, { campaignId, point: center });
   },
 });
 

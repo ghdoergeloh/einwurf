@@ -7,7 +7,8 @@ export const isSelected = (row: Doc<"areas">) => row.selected !== false;
 
 /**
  * Gespeicherte Gebiete einer Aktion samt Auswahl, ohne sie zu entpacken, nach Namen sortiert;
- * null, solange keins gewählt wurde. Die eine Stelle, die festlegt, was „gewählt“ heißt.
+ * null, solange die Aktion noch nie ein Gebiet hatte (abgewählte zählen mit). Die eine Stelle,
+ * die festlegt, was „gewählt“ heißt.
  */
 export async function areaRows(
   ctx: QueryCtx,
@@ -20,7 +21,8 @@ export async function areaRows(
 
 /**
  * Gebiete einer Aktion mit Auswahl, für serverseitige Auswertungen (Statistik je Gebiet).
- * Enthält auch abgewählte Gebiete (selected = false). null, solange keins gewählt wurde.
+ * Enthält auch abgewählte Gebiete (selected = false). null, solange die Aktion noch nie ein
+ * Gebiet hatte.
  * Zuordnen von Häusern: areaAt aus areaGeo.ts.
  */
 export async function campaignAreas(ctx: QueryCtx, campaignId: Id<"campaigns">): Promise<AreaWithCells[] | null> {

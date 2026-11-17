@@ -7,7 +7,7 @@
  *   - `Area` = { id, name, geometry, selected }
  *   - `areaAt(punkt, gebiete)` ordnet einen Punkt [lng, lat] (Haus, Markierung) einem Gebiet zu.
  *   - Serverseitig liefert `campaignAreas(ctx, campaignId)` aus convex/areaStore.ts die Gebiete,
- *     im Browser `toAreas(api.areas.list, api.areas.status)`.
+ *     im Browser `toAreas(api.areas.list)`.
  */
 import type { Position } from "geojson";
 import { CELL_SIZE, cellKey, joinRings, type BBox } from "./osm";
@@ -52,6 +52,26 @@ export function boundaryTilesIn([w, s, e, n]: BBox): string[] {
 export function boundaryTileBBox(tile: string): BBox {
   const [x, y] = tile.split(":").map(Number);
   return [x * BOUNDARY_TILE, y * BOUNDARY_TILE, (x + 1) * BOUNDARY_TILE, (y + 1) * BOUNDARY_TILE];
+}
+
+/** Zoomstufe zum Bearbeiten der Gebiete: so weit heraus wie möglich, höchstens Zoomstufe 12. */
+const OVERVIEW_ZOOM = 12;
+/** Höchstens so viele Grenz-Kacheln soll die Übersicht zeigen (= MAX_TILES_PER_VIEW in convex/areas.ts und src/components/AreaEditor.tsx). */
+const OVERVIEW_MAX_TILES = 12;
+
+/**
+ * Zoomstufe der Übersicht für dieses Fenster: höchstens 12, aber so nah, dass der Ausschnitt
+ * auch ungünstig liegend nicht mehr Grenz-Kacheln schneidet, als die Karte auf einmal zeigt
+ * (sonst sähe man am Desktop nur „Heranzoomen“).
+ */
+export function overviewZoom(widthPx: number, heightPx: number, lat: number): number {
+  for (let z = OVERVIEW_ZOOM; z < 16; z += 0.25) {
+    const degPerPx = 360 / (512 * 2 ** z);
+    const w = widthPx * degPerPx;
+    const h = heightPx * degPerPx * Math.cos((lat * Math.PI) / 180);
+    if ((Math.ceil(w / BOUNDARY_TILE) + 1) * (Math.ceil(h / BOUNDARY_TILE) + 1) <= OVERVIEW_MAX_TILES) return z;
+  }
+  return 16;
 }
 
 /** Gemeinden: Stufe 8; kreisfreie Städte und Kreise (6, 7) nur, wenn keine Gemeinde in ihnen liegt. */

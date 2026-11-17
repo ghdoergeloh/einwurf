@@ -8,6 +8,7 @@ import {
   boundaryTilesIn,
   boundaryTileBBox,
   unitQuery,
+  overviewZoom,
   areasOfUnit,
   chooseSubdivision,
   compactGeometry,
@@ -348,5 +349,20 @@ describe("Gemeinden und Grenz-Kacheln", () => {
     expect(boundaryTileOf(7.01, 50.71)).toBe("140:1014");
     expect(boundaryTileBBox("140:1014").map((x) => Math.round(x * 100) / 100)).toEqual([7, 50.7, 7.05, 50.75]);
     expect(boundaryTilesIn([7.01, 50.71, 7.06, 50.72]).sort()).toEqual(["140:1014", "141:1014"]);
+  });
+});
+
+describe("Übersicht im Bearbeiten-Modus (S1)", () => {
+  const tiles = (w: number, h: number, z: number, lat: number) => {
+    const d = 360 / (512 * 2 ** z);
+    return (Math.ceil((w * d) / 0.05) + 1) * (Math.ceil((h * d * Math.cos((lat * Math.PI) / 180)) / 0.05) + 1);
+  };
+  test("Handy: Zoomstufe 12; Desktop: so nah, dass höchstens 12 Grenz-Kacheln im Bild sind", () => {
+    expect(overviewZoom(390, 844, 50.76)).toBe(12);
+    for (const [w, h] of [[1280, 800], [1440, 900], [1920, 1080]]) {
+      const z = overviewZoom(w, h, 50.76);
+      expect(z).toBeGreaterThan(12);
+      expect(tiles(w, h, z, 50.76)).toBeLessThanOrEqual(12);
+    }
   });
 });
