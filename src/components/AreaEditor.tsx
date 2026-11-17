@@ -224,7 +224,7 @@ export function AreaEditBar({
           ) : (
             <>
               <span className="size-3 shrink-0 animate-spin rounded-full border-2 border-ink/20 border-t-ink" />
-              Ortsteile werden aus OpenStreetMap geladen … Beim ersten Mal in einer Gegend kann das bis zu 10 Minuten dauern, wenn die Server ausgelastet sind.
+              Ortsteile werden aus OpenStreetMap geladen … Beim ersten Mal in einer Gegend kann das über 10 Minuten dauern, wenn die Server ausgelastet sind.
             </>
           )}
         </div>

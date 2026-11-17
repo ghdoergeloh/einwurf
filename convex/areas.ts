@@ -364,18 +364,22 @@ export const storeLoaded = mutation({
     assertTiles(tiles.map((t) => t.tile), MAX_TILES_PER_LOAD);
     const own = campaign._id;
     const now = Date.now();
+    // Speicher je Aktion begrenzen (jeder kann eine Aktion anlegen): einmal zählen, nur frische.
+    let ownCount = (await ctx.db.query("osmAreas").withIndex("by_scope_unit", (q) => q.eq("campaignId", own)).take(MAX_OWN_AREAS * 2)).filter(
+      (r) => isFresh(r.fetchedAt, now),
+    ).length;
     for (const unit of units) {
       if (!Number.isInteger(unit.unitId) || unit.unitId <= 0) throw new ConvexError("Ungültige Gemeinde");
       if (unit.areas.length === 0 || unit.areas.length > MAX_AREAS_PER_UNIT) throw new ConvexError("Ungültige Gemeinde");
       // Schon frisch da (gemeinsam oder eigen): nichts überschreiben.
       if (await unitFresh(ctx, unit.unitId, own, now)) continue;
       const rows = unit.areas.map(checkedArea);
+      if (ownCount + rows.length > MAX_OWN_AREAS) throw new ConvexError("Zu viele Ortsteile für diese Aktion");
+      // Abgelaufene eigene Zeilen dieser Gemeinde ersetzen (sie zählen schon nicht mehr mit).
       const old = await ctx.db.query("osmAreas").withIndex("by_scope_unit", (q) => q.eq("campaignId", own).eq("unitId", unit.unitId)).collect();
       for (const o of old) await ctx.db.delete(o._id);
-      // Speicher je Aktion begrenzen (jeder kann eine Aktion anlegen).
-      const stored = await ctx.db.query("osmAreas").withIndex("by_scope_unit", (q) => q.eq("campaignId", own)).take(MAX_OWN_AREAS + 1);
-      if (stored.length + rows.length > MAX_OWN_AREAS) throw new ConvexError("Zu viele Ortsteile für diese Aktion");
       for (const r of rows) await ctx.db.insert("osmAreas", { campaignId: own, unitId: unit.unitId, fetchedAt: now, ...r });
+      ownCount += rows.length;
     }
     for (const { tile, unitIds } of tiles) {
       if (unitIds.length > MAX_UNITS_PER_STORE) throw new ConvexError("Zu viele Gemeinden");
@@ -472,8 +476,12 @@ export const cleanup = internalMutation({
   args: {},
   handler: async (ctx: MutationCtx) => {
     const cutoff = Date.now() - TILE_TTL_MS;
-    for (const t of await ctx.db.query("boundaryTiles").withIndex("by_fetchedAt", (q) => q.lt("fetchedAt", cutoff)).take(200)) await ctx.db.delete(t._id);
-    for (const a of await ctx.db.query("osmAreas").withIndex("by_fetchedAt", (q) => q.lt("fetchedAt", cutoff)).take(200)) await ctx.db.delete(a._id);
+    const tiles = await ctx.db.query("boundaryTiles").withIndex("by_fetchedAt", (q) => q.lt("fetchedAt", cutoff)).take(200);
+    for (const t of tiles) await ctx.db.delete(t._id);
+    const areas = await ctx.db.query("osmAreas").withIndex("by_fetchedAt", (q) => q.lt("fetchedAt", cutoff)).take(200);
+    for (const a of areas) await ctx.db.delete(a._id);
+    // Rückstand (jede Aktion hat eigene Kopien): gleich weiter.
+    if (tiles.length === 200 || areas.length === 200) await ctx.scheduler.runAfter(0, internal.areas.cleanup, {});
   },
 });
 

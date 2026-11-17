@@ -311,6 +311,17 @@ describe("Laden im Browser des Admins (storeLoaded)", () => {
     await expect(t.mutation(api.areas.storeLoaded, { adminKey: ADMIN, units: [unit(5)], tiles: [] })).rejects.toThrow(/Zu viele Ortsteile/);
   });
 
+  test("abgelaufene eigene Ortsteile blockieren das Speichern nicht (C17)", async () => {
+    const t = await create();
+    const unit = (id: number) => ({
+      unitId: id,
+      areas: Array.from({ length: 500 }, (_, i) => ({ areaId: `relation/${id * 1000 + i}`, name: `T${i}`, geometry: JSON.stringify([[box(7 + i * 1e-4, 50.7, 7 + (i + 1) * 1e-4, 50.71)]]) })),
+    });
+    for (const id of [1, 2, 3, 4]) await t.mutation(api.areas.storeLoaded, { adminKey: ADMIN, units: [unit(id)], tiles: [] });
+    vi.setSystemTime(Date.now() + 91 * 24 * 60 * 60 * 1000);
+    await t.mutation(api.areas.storeLoaded, { adminKey: ADMIN, units: [unit(5)], tiles: [] });
+  });
+
   test("prüft, was der Browser schickt, und berechnet Ausdehnung und Kacheln selbst", async () => {
     const t = await create();
     const store = (geometry: string, areaId = "relation/5") =>
