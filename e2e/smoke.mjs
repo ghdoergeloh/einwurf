@@ -238,8 +238,7 @@ try {
   assert.equal(await statusAt(p2, cx, cy), "done", "beim zweiten Helfer gelb");
   await shot(p2, "3-live");
 
-  // Gebiete: Grenzen und Namen sichtbar; Hersel abwählen → beim Helfer live nur noch Roisdorf
-  // Ein Haus in Hersel, gleich östlich der Grenze (Raster siehe fakeBuildings)
+  // Statistik je Gebiet: Helfer öffnet sie über den Zähler, Zahlen live, wenn der Admin tippt
   const herselAt = (page) =>
     page.evaluate(([lng, lat]) => {
       const m = window.__einwurfMap;
@@ -247,6 +246,39 @@ try {
       const q = m.project([lng, lat]);
       return [q.x + r.left, q.y + r.top];
     }, [CENTER.lng + 8 * GX, CENTER.lat]);
+  {
+    await p2.getByTestId("open-stats").click();
+    const stats = p2.getByTestId("stats-sheet");
+    const areaRow = (name) => stats.getByTestId("stats-area").filter({ hasText: name });
+    await stats.getByText("Alle 2 Zielgebiete").waitFor({ timeout: 15_000 });
+    // Vorladen ist fertig: Häuser gezählt, nichts mehr vorläufig
+    await stats.getByTestId("stats-sum").getByText(/^\d+ Häuser$/).waitFor({ timeout: 30_000 });
+    await stats.getByText("vorläufig").first().waitFor({ state: "detached", timeout: 30_000 });
+    assert.deepEqual(await stats.getByTestId("stats-area").locator("span.font-medium").allTextContents(), ["Hersel", "Roisdorf"]);
+    const housesIn = async (name) => Number((await areaRow(name).textContent()).match(/(\d+) Häuser/)?.[1] ?? 0);
+    assert.ok((await housesIn("Roisdorf")) > 50 && (await housesIn("Hersel")) > 50, "Häuser je Gebiet gezählt");
+    await areaRow("Roisdorf").getByText(/^2 Flyer drin/).waitFor();
+    await areaRow("Hersel").getByText(/^0 Flyer drin/).waitFor();
+    await shot(p2, "3a-statistik");
+
+    // Admin tippt ein Haus in Hersel: gelb → dunkelgelb → offen, beim Helfer live
+    const [ax, ay] = await herselAt(p);
+    await expectStatus(p, ax, ay, "none", "Haus in Hersel beim Admin geladen");
+    await p.mouse.click(ax, ay);
+    await areaRow("Hersel").getByText(/^1 Flyer drin/).waitFor({ timeout: 5_000 });
+    await p.waitForTimeout(700);
+    await p.mouse.click(ax, ay);
+    await areaRow("Hersel").getByText(/^1 nicht möglich$/).waitFor({ timeout: 5_000 });
+    await areaRow("Hersel").getByText(/^0 Flyer drin/).waitFor();
+    await p.waitForTimeout(700);
+    await p.mouse.click(ax, ay);
+    await areaRow("Hersel").getByText(/^0 nicht möglich$/).waitFor({ timeout: 5_000 });
+    await expectStatus(p, ax, ay, "none", "Haus wieder offen");
+    await stats.getByRole("button", { name: "Fertig" }).click();
+  }
+
+  // Gebiete: Grenzen und Namen sichtbar; Hersel abwählen → beim Helfer live nur noch Roisdorf
+  // Ein Haus in Hersel, gleich östlich der Grenze (Raster siehe fakeBuildings)
   const labels = (page) => page.evaluate(() => window.__einwurfMap.queryRenderedFeatures({ layers: ["area-labels"] }).map((f) => f.properties.name).sort());
   const [hx, hy] = await herselAt(p2);
   await expectStatus(p2, hx, hy, "none", "Haus in Hersel geladen");
