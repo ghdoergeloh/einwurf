@@ -75,6 +75,9 @@ pnpm e2e                # Browser-Test; braucht laufendes `pnpm dev` + `npx conv
                         # OSM-Dienste (auch die Grenzen der Gebiete) werden darin nachgebildet, Convex ist echt.
                         # Einmalig für den Test: npx convex env set OVERPASS_URLS http://127.0.0.1:8787/api/interpreter
                         # (danach wieder entfernen: npx convex env remove OVERPASS_URLS)
+node e2e/preview-gebiete.mjs <preview-url>
+                        # Gebiete mit echten OSM-Daten gegen ein Preview-Deployment (Bornheim, Bonn);
+                        # mit --mock-osm werden Ortssuche und Grundkarte nachgebildet
 node e2e/preview-stats.mjs <preview-url> [ortsteil]
                         # Statistik gegen ein Vercel-Preview (eigenes Convex-Preview-Backend, echte Overpass-Daten),
                         # Bornheim mit einem kleinen Ortsteil (Standard: Widdig); dauert wegen des gebremsten Vorladens einige Minuten.
