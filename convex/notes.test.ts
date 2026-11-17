@@ -111,7 +111,10 @@ describe("notes", () => {
       /leer/,
     );
     await t.mutation(api.notes.set, { slug: SLUG, osmId: "way/1", center: HOUSE, text: "a\u200Bb" });
-    expect((await inCell(t))[0].text).toBe("ab");
+    expect((await inCell(t))[0].text).toBe("a\u200Bb");
+    // Zusammengesetzte Emojis (mit Zero-Width-Joiner) bleiben ganz.
+    await t.mutation(api.notes.set, { slug: SLUG, osmId: "way/2", center: HOUSE, text: "a👨‍👩b" });
+    expect((await inCell(t)).find((n) => n.osmId === "way/2")!.text).toBe("a👨‍👩b");
   });
 
   test("gleichzeitig geändert: Speichern und Löschen mit veraltetem Stand werden abgelehnt", async () => {

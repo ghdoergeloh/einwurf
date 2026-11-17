@@ -1,14 +1,15 @@
 import { useEffect, useId, useRef, useState } from "react";
 import { MAX_NOTE_LENGTH } from "../../convex/validation";
+import { expectedUpdatedAt } from "../lib/noteState";
 
 interface Props {
   /** Hausnummer für die Überschrift, falls bekannt. */
   houseNumber: string | null;
   /** Vorhandene Notiz oder null. */
-  note: { text: string; updatedAt: number } | null;
+  note: { text: string; updatedAt: number; pending?: boolean } | null;
   /** `expectedUpdatedAt`: Stand, den der Helfer gerade sieht (null = keine Notiz), siehe convex/notes.ts. */
-  onSave: (text: string, expectedUpdatedAt: number | null) => void;
-  onDelete: (expectedUpdatedAt: number | null) => void;
+  onSave: (text: string, expectedUpdatedAt: number | null | undefined) => void;
+  onDelete: (expectedUpdatedAt: number | null | undefined) => void;
   onClose: () => void;
 }
 
@@ -16,18 +17,19 @@ interface Props {
 export function NoteSheet({ houseNumber, note, onSave, onDelete, onClose }: Props) {
   const [draft, setDraft] = useState(note?.text ?? "");
   const [touched, setTouched] = useState(false);
-  /** Stand der Notiz, auf dem der Entwurf beruht. */
-  const [base, setBase] = useState(note?.updatedAt ?? null);
+  /** Stand der Notiz, auf dem der Entwurf beruht; undefined = eigene, noch unbestätigte Notiz. */
+  const [base, setBase] = useState(expectedUpdatedAt(note));
   const current = note?.updatedAt ?? null;
   // Kommt die Notiz erst nach dem Öffnen (Zelle lädt noch) oder ändert sie jemand anderes, wird sie
   // übernommen, solange hier noch nichts getippt wurde. Sonst bleibt der Entwurf, mit Warnung.
   useEffect(() => {
     if (touched) return;
     setDraft(note?.text ?? "");
-    setBase(note?.updatedAt ?? null);
+    setBase(expectedUpdatedAt(note));
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [current]);
-  const changedElsewhere = touched && current !== base;
+  // Beruht der Entwurf auf der eigenen, unbestätigten Notiz, ist ihre Bestätigung keine fremde Änderung.
+  const changedElsewhere = touched && base !== undefined && current !== base;
   const textRef = useRef<HTMLTextAreaElement>(null);
   // Der Hintergrund schließt nur, wenn der Druck auf ihm begann; sonst schlösse das Loslassen
   // nach dem langen Drücken den Dialog gleich wieder.
@@ -50,8 +52,8 @@ export function NoteSheet({ houseNumber, note, onSave, onDelete, onClose }: Prop
   }, [onClose]);
 
   function save() {
-    if (!trimmed) return note ? onDelete(current) : onClose();
-    if (changed) onSave(trimmed, current);
+    if (!trimmed) return note ? onDelete(expectedUpdatedAt(note)) : onClose();
+    if (changed) onSave(trimmed, expectedUpdatedAt(note));
     else onClose();
   }
 
@@ -122,7 +124,7 @@ export function NoteSheet({ houseNumber, note, onSave, onDelete, onClose }: Prop
           {note && (
             <button
               type="button"
-              onClick={() => onDelete(current)}
+              onClick={() => onDelete(expectedUpdatedAt(note))}
               className="rounded-2xl px-3 py-3 text-sm font-medium text-red-700 hover:bg-red-50"
             >
               Notiz löschen

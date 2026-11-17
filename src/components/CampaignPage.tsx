@@ -85,7 +85,7 @@ export function CampaignPage({ slug, isNew }: Props) {
     const cell = markCellOf(args.center[0], args.center[1]);
     const list = store.getQuery(api.notes.inCell, { slug: args.slug, cell });
     if (list === undefined) return;
-    const note = { osmId: args.osmId, center: args.center, text: args.text.trim(), updatedAt: Date.now() };
+    const note = { osmId: args.osmId, center: args.center, text: args.text.trim(), updatedAt: Date.now(), pending: true };
     store.setQuery(api.notes.inCell, { slug: args.slug, cell }, [...list.filter((n) => n.osmId !== args.osmId), note]);
   });
   const removeNoteMutation = useMutation(api.notes.remove).withOptimisticUpdate((store, args) => {
@@ -249,7 +249,7 @@ export function CampaignPage({ slug, isNew }: Props) {
         <NoteSheet
           key={noteTarget.osmId}
           houseNumber={noteTarget.houseNumber}
-          note={openNote ? { text: openNote.text, updatedAt: openNote.updatedAt } : null}
+          note={openNote ? { text: openNote.text, updatedAt: openNote.updatedAt, pending: openNote.pending } : null}
           onSave={(text, expectedUpdatedAt) => {
             setNoteMutation({ slug, osmId: noteTarget.osmId, center: noteTarget.center, text, expectedUpdatedAt }).catch(
               saveFailed,

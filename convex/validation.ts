@@ -50,12 +50,14 @@ export function cleanText(value: string, max: number, field: string) {
 export function cleanNote(value: string) {
   const text = value
     .replace(/\r\n?/g, "\n")
-    // Steuer- und unsichtbare Formatzeichen (z. B. Leerzeichen der Breite null), nur der Zeilenumbruch bleibt.
-    .replace(/[\p{Cc}\p{Cf}]/gu, (c) => (c === "\n" ? c : ""))
+    // Steuerzeichen weg, nur der Zeilenumbruch bleibt.
+    .replace(/\p{Cc}/gu, (c) => (c === "\n" ? c : ""))
     .replace(/[ \t]+\n/g, "\n")
     .replace(/\n{3,}/g, "\n\n")
     .trim();
-  if (text.length === 0) throw new ConvexError("Die Notiz ist leer");
+  // Nur unsichtbare Formatzeichen (z. B. Leerzeichen der Breite null) gelten als leer. Im Text bleiben
+  // sie, sonst zerfielen zusammengesetzte Emojis (Zero-Width-Joiner).
+  if (text.replace(/[\p{Cf}\s]/gu, "").length === 0) throw new ConvexError("Die Notiz ist leer");
   if (text.length > MAX_NOTE_LENGTH) throw new ConvexError(`Die Notiz ist zu lang (höchstens ${MAX_NOTE_LENGTH} Zeichen)`);
   return text;
 }

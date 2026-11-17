@@ -74,6 +74,8 @@ export interface Note {
   center: number[];
   text: string;
   updatedAt: number;
+  /** Eigene Änderung, vom Server noch nicht bestätigt (optimistisch); updatedAt ist dann die Uhr des Handys. */
+  pending?: boolean;
 }
 
 /** Haus, zu dem die Notiz geöffnet werden soll. */
