@@ -17,6 +17,7 @@ import {
   type BuildingFeature,
 } from "./osm";
 import { SLUG_PATTERN } from "./validation";
+import { campaignForRead } from "./access";
 
 /**
  * Häuser aus OpenStreetMap, serverseitig über Overpass geladen und je Kachel für alle
@@ -68,10 +69,13 @@ const MAX_FETCH_CELLS = 30;
 const NEIGHBOUR_RING = 2;
 const WAIT_POLL_MS = 1_000;
 
-export const campaignExists = internalQuery({
+/**
+ * Bearbeiten-Schlüssel der Aktion zu einem Bearbeiten- oder Ansehen-Schlüssel, oder null.
+ * Nur intern: Er dient als Schlüssel des Kontingents, damit beide Links dasselbe teilen.
+ */
+export const rateKeyOf = internalQuery({
   args: { slug: v.string() },
-  handler: async (ctx, { slug }) =>
-    !!(await ctx.db.query("campaigns").withIndex("by_slug", (q) => q.eq("slug", slug)).unique()),
+  handler: async (ctx, { slug }) => (await campaignForRead(ctx, slug))?.campaign.slug ?? null,
 });
 
 export const cached = internalQuery({
@@ -409,7 +413,8 @@ async function loadCells(
 
 /**
  * Liefert die Häuser der angefragten Kacheln, in derselben Reihenfolge, je Kachel als
- * kompakter JSON-Text (siehe decodeBuildings).
+ * kompakter JSON-Text (siehe decodeBuildings). Mit Bearbeiten- oder Ansehen-Schlüssel,
+ * beide im Kontingent der Aktion.
  */
 export const load = action({
   args: { slug: v.string(), cells: v.array(v.string()) },
@@ -425,11 +430,10 @@ export const load = action({
       throw new ConvexError("Ausschnitt zu groß");
     }
     // Kein offener Proxy für Overpass: nur für bestehende Aktionen.
-    if (!SLUG_PATTERN.test(slug) || !(await ctx.runQuery(internal.buildings.campaignExists, { slug }))) {
-      throw new ConvexError("Verteilaktion nicht gefunden");
-    }
+    const rateKey = SLUG_PATTERN.test(slug) ? await ctx.runQuery(internal.buildings.rateKeyOf, { slug }) : null;
+    if (!rateKey) throw new ConvexError("Verteilaktion nicht gefunden");
 
-    return (await loadCells(ctx, slug, cells)).data;
+    return (await loadCells(ctx, rateKey, cells)).data;
   },
 });
 
@@ -505,7 +509,7 @@ export async function startPrefetch(ctx: MutationCtx, slug: string) {
   return jobId;
 }
 
-/** Knopf „Gebiet vorladen“ im Teilen-Dialog. */
+/** Knopf „Gebiet vorladen“ im Teilen-Dialog. Nur mit dem Bearbeiten-Schlüssel (startPrefetch sucht per slug). */
 export const prefetch = mutation({
   args: { slug: v.string() },
   handler: async (ctx, { slug }) => {
@@ -514,7 +518,7 @@ export const prefetch = mutation({
   },
 });
 
-/** Fortschritt des Vorladens, live für den Teilen-Dialog. */
+/** Fortschritt des Vorladens, live für den Teilen-Dialog. Nur mit dem Bearbeiten-Schlüssel. */
 export const prefetchStatus = query({
   args: { slug: v.string() },
   handler: async (ctx, { slug }) => {

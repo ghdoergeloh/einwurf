@@ -1,23 +1,25 @@
 import { mutation, query } from "./_generated/server";
 import { startPrefetch } from "./buildings";
+import { campaignForEdit, campaignForRead, keyTaken } from "./access";
 import { ConvexError, v } from "convex/values";
 import {
   MAX_CAMPAIGNS_PER_MINUTE,
   MAX_NAME_LENGTH,
   MAX_PLACE_LENGTH,
-  SLUG_PATTERN,
   assertLatLng,
   assertSlug,
   cleanText,
 } from "./validation";
 
 /**
- * Legt eine Verteilaktion an. Den geheimen Schlüssel erzeugt der Browser mit
+ * Legt eine Verteilaktion an. Die geheimen Schlüssel erzeugt der Browser mit
  * crypto.getRandomValues (Zufall in Convex-Mutationen ist deterministisch).
+ * `viewKey` fehlt nur bei noch geöffneten alten Seiten.
  */
 export const create = mutation({
   args: {
     slug: v.string(),
+    viewKey: v.optional(v.string()),
     name: v.string(),
     placeLabel: v.string(),
     center: v.object({ lat: v.number(), lng: v.number() }),
@@ -33,11 +35,13 @@ export const create = mutation({
       assertLatLng(n, e);
       if (!(w < e && s < n)) throw new ConvexError("Ungültiger Ausschnitt");
     }
-    const existing = await ctx.db
-      .query("campaigns")
-      .withIndex("by_slug", (q) => q.eq("slug", args.slug))
-      .unique();
-    if (existing) throw new ConvexError("Link existiert bereits");
+    if (await keyTaken(ctx, args.slug)) throw new ConvexError("Link existiert bereits");
+    if (args.viewKey !== undefined) {
+      assertSlug(args.viewKey);
+      if (args.viewKey === args.slug || (await keyTaken(ctx, args.viewKey))) {
+        throw new ConvexError("Link existiert bereits");
+      }
+    }
 
     // Einfache Bremse gegen Skripte, die massenhaft Aktionen anlegen.
     const recent = await ctx.db.query("campaigns").order("desc").take(MAX_CAMPAIGNS_PER_MINUTE);
@@ -48,6 +52,7 @@ export const create = mutation({
 
     await ctx.db.insert("campaigns", {
       slug: args.slug,
+      viewKey: args.viewKey,
       name: cleanText(args.name, MAX_NAME_LENGTH, "Name"),
       placeLabel: cleanText(args.placeLabel, MAX_PLACE_LENGTH, "Ort"),
       center: args.center,
@@ -62,18 +67,18 @@ export const create = mutation({
   },
 });
 
-/** Liefert die Aktion zum Schlüssel oder null. Es gibt bewusst keine Liste aller Aktionen. */
+/**
+ * Liefert die Aktion zum Bearbeiten- oder Ansehen-Schlüssel, oder null.
+ * Mit dem Ansehen-Schlüssel ohne `slug` und `viewKey`: Aus dem Ansehen-Link darf sich der
+ * Bearbeiten-Link nicht erfahren lassen. Es gibt bewusst keine Liste aller Aktionen.
+ */
 export const get = query({
   args: { slug: v.string() },
   handler: async (ctx, { slug }) => {
-    if (!SLUG_PATTERN.test(slug)) return null;
-    const campaign = await ctx.db
-      .query("campaigns")
-      .withIndex("by_slug", (q) => q.eq("slug", slug))
-      .unique();
-    if (!campaign) return null;
-    return {
-      slug: campaign.slug,
+    const found = await campaignForRead(ctx, slug);
+    if (!found) return null;
+    const { campaign, access } = found;
+    const shared = {
       name: campaign.name,
       placeLabel: campaign.placeLabel,
       center: campaign.center,
@@ -82,5 +87,24 @@ export const get = query({
       blockedCount: campaign.blockedCount ?? 0,
       createdAt: campaign._creationTime,
     };
+    if (access === "view") return { access, ...shared };
+    return { access, slug: campaign.slug, viewKey: campaign.viewKey ?? null, ...shared };
+  },
+});
+
+/**
+ * Gibt einer älteren Aktion ihren Ansehen-Schlüssel (Teilen-Dialog, nur mit Bearbeiten-Link).
+ * Hat sie schon einen, bleibt er; zurück kommt der gültige Schlüssel.
+ */
+export const ensureViewKey = mutation({
+  args: { slug: v.string(), viewKey: v.string() },
+  handler: async (ctx, { slug, viewKey }) => {
+    const campaign = await campaignForEdit(ctx, slug);
+    if (!campaign) throw new ConvexError("Verteilaktion nicht gefunden");
+    if (campaign.viewKey) return campaign.viewKey;
+    assertSlug(viewKey);
+    if (await keyTaken(ctx, viewKey)) throw new ConvexError("Link existiert bereits");
+    await ctx.db.patch(campaign._id, { viewKey });
+    return viewKey;
   },
 });
