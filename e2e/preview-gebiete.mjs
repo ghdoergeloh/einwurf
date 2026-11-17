@@ -53,8 +53,8 @@ async function createAndLoadAreas(query) {
   const sheet = p.getByTestId("areas-sheet");
   // Overpass in der Cloud: bis zu drei Versuche mit Pausen; großzügig warten.
   const started = Date.now();
-  // Bis zu drei Versuche über alle Server mit Pausen: höchstens etwa 10 Minuten.
-  await sheet.getByRole("checkbox").first().or(sheet.getByText("konnten nicht geladen werden")).waitFor({ timeout: 660_000 });
+  // Bis zu drei Versuche über alle Server (je bis 7 min) mit Pausen: höchstens etwa 23 Minuten.
+  await sheet.getByRole("checkbox").first().or(sheet.getByText("konnten nicht geladen werden")).waitFor({ timeout: 1_500_000 });
   if (await sheet.getByText("konnten nicht geladen werden").count()) {
     const why = (await sheet.getByTestId("areas-error").count()) ? await sheet.getByTestId("areas-error").innerText() : "(keine Angabe)";
     throw new Error(`${query}: Gebiete nicht geladen. Antwort der Overpass-Server: ${why}`);
