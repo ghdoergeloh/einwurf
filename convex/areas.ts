@@ -1,5 +1,5 @@
-import { action, internalAction, internalMutation, internalQuery, mutation, query, type ActionCtx, type MutationCtx } from "./_generated/server";
-import type { Id } from "./_generated/dataModel";
+import { action, internalAction, internalMutation, internalQuery, mutation, query, type ActionCtx, type MutationCtx, type QueryCtx } from "./_generated/server";
+import type { Doc, Id } from "./_generated/dataModel";
 import { internal } from "./_generated/api";
 import { ConvexError, v } from "convex/values";
 import {
@@ -54,6 +54,21 @@ const MAX_AREA_BYTES = 200_000;
 const INITIAL_ATTEMPTS = 3;
 const INITIAL_RETRY_MS = 30_000;
 
+/**
+ * Ist die Grenz-Kachel vollständig und frisch im Cache: Kachel nicht abgelaufen und Ortsteile
+ * jeder ihrer Gemeinden vorhanden und nicht abgelaufen (Gemeinden haben eigene Zeitstempel und
+ * werden von cleanup getrennt gelöscht)? Für `nearby` und `tileStatus` gleich.
+ */
+async function tileFresh(ctx: QueryCtx, tile: string, now: number): Promise<Doc<"boundaryTiles"> | null> {
+  const row = await ctx.db.query("boundaryTiles").withIndex("by_tile", (q) => q.eq("tile", tile)).unique();
+  if (!row || now - row.fetchedAt > TILE_TTL_MS) return null;
+  for (const unitId of row.unitIds) {
+    const a = await ctx.db.query("osmAreas").withIndex("by_unit", (q) => q.eq("unitId", unitId)).first();
+    if (!a || now - a.fetchedAt > TILE_TTL_MS) return null;
+  }
+  return row;
+}
+
 function assertTiles(tiles: string[], max: number) {
   if (tiles.length > max) throw new ConvexError("Zu viele Kacheln auf einmal");
   for (const t of tiles) if (!BOUNDARY_TILE_PATTERN.test(t)) throw new ConvexError("Ungültige Kachel");
@@ -92,8 +107,10 @@ export const nearby = query({
     assertTiles(tiles, MAX_TILES_PER_VIEW);
     const loaded: string[] = [];
     const units = new Set<number>();
+    const now = Date.now();
     for (const tile of tiles) {
-      const row = await ctx.db.query("boundaryTiles").withIndex("by_tile", (q) => q.eq("tile", tile)).unique();
+      // Unvollständige oder abgelaufene Kacheln gelten als nicht geladen: Die Karte lädt sie dann neu.
+      const row = await tileFresh(ctx, tile, now);
       if (!row) continue;
       loaded.push(tile);
       row.unitIds.forEach((u) => units.add(u));
@@ -175,22 +192,7 @@ export const tileStatus = internalQuery({
   handler: async (ctx, { tiles }) => {
     const now = Date.now();
     const missing: string[] = [];
-    tiles: for (const tile of tiles) {
-      const row = await ctx.db.query("boundaryTiles").withIndex("by_tile", (q) => q.eq("tile", tile)).unique();
-      if (!row || now - row.fetchedAt > TILE_TTL_MS) {
-        missing.push(tile);
-        continue;
-      }
-      // Kachel noch frisch, aber Ortsteile einer ihrer Gemeinden schon abgelaufen (eigener
-      // Zeitstempel, siehe cleanup): neu laden, sonst fehlten sie bis zum Ablauf der Kachel.
-      for (const unitId of row.unitIds) {
-        const a = await ctx.db.query("osmAreas").withIndex("by_unit", (q) => q.eq("unitId", unitId)).first();
-        if (!a || now - a.fetchedAt > TILE_TTL_MS) {
-          missing.push(tile);
-          continue tiles;
-        }
-      }
-    }
+    for (const tile of tiles) if (!(await tileFresh(ctx, tile, now))) missing.push(tile);
     return missing;
   },
 });
@@ -278,7 +280,8 @@ async function loadBoundaryTiles(ctx: ActionCtx, rateKey: string, tiles: string[
   const units = chooseUnits(await ask("Gemeinden", unitQuery(union(tileBoxes)), parseCandidates));
   const known = new Set(await ctx.runQuery(internal.areas.knownUnits, { unitIds: units.map((u) => u.id) }));
   const fresh = units.filter((u) => !known.has(u.id));
-  let deferred: number[] = [];
+  /** Gemeinden mit Ortsteilen im Cache (bekannt oder jetzt geladen); nur sie kommen in die Kacheln. */
+  const stored = new Set<number>(known);
 
   if (fresh.length > 0) {
     const candidates = await ask(
@@ -286,36 +289,42 @@ async function loadBoundaryTiles(ctx: ActionCtx, rateKey: string, tiles: string[
       candidateQuery(Math.min(...fresh.map((u) => u.level)), union(fresh.map((u) => u.bbox))),
       parseCandidates,
     );
-    const perUnit = new Map<number, ParentCandidate[]>(fresh.map((u) => [u.id, preselect(u, candidates)]));
-    // Höchstens MAX_CANDIDATES Grenzen je Abruf, aber nie eine Gemeinde nur zum Teil: Was nicht
-    // mehr passt, bleibt für den nächsten Abruf (die Kacheln gelten dann noch als fehlend).
-    const ids = new Set<number>();
-    const batch: ParentCandidate[] = [];
-    for (const unit of fresh) {
-      const own = [unit.id, ...perUnit.get(unit.id)!.map((c) => c.id)].filter((id) => !ids.has(id));
-      if (batch.length > 0 && ids.size + own.length > MAX_CANDIDATES) continue;
-      own.forEach((id) => ids.add(id));
-      batch.push(unit);
-    }
-    deferred = fresh.filter((u) => !batch.includes(u)).map((u) => u.id);
-    const boundaries = await ask("Ortsteile (Grenzen)", geometryQuery([...ids]), parseBoundaries);
-    for (const unit of batch) {
-      const own = boundaries.find((b) => b.id === unit.id);
-      if (!own) continue;
-      const mine = new Set(perUnit.get(unit.id)!.map((c) => c.id));
-      const parts = areasOfUnit(own, boundaries.filter((b) => mine.has(b.id)));
-      const rows = parts.map((p) => {
-        const geometry = compactGeometry(p.geometry, MAX_AREA_BYTES);
-        const g = decodeGeometry(geometry);
-        return { areaId: `relation/${p.id}`, name: p.name, geometry, bbox: bboxOf(g), labelAt: interiorPoint(g), cells: encodeCells(touchedCells(g)) };
-      });
-      await ctx.runMutation(internal.areas.storeUnit, { unitId: unit.id, areas: rows });
+    // Je Gemeinde höchstens MAX_CANDIDATES Grenzen (auch eine sehr große Gemeinde).
+    const perUnit = new Map<number, ParentCandidate[]>(fresh.map((u) => [u.id, preselect(u, candidates).slice(0, MAX_CANDIDATES - 1)]));
+    // In Abrufen von höchstens MAX_CANDIDATES Grenzen, nie eine Gemeinde nur zum Teil.
+    let todo = [...fresh];
+    while (todo.length > 0) {
+      const ids = new Set<number>();
+      const batch: ParentCandidate[] = [];
+      for (const unit of todo) {
+        const own = [unit.id, ...perUnit.get(unit.id)!.map((c) => c.id)].filter((id) => !ids.has(id));
+        if (batch.length > 0 && ids.size + own.length > MAX_CANDIDATES) continue;
+        own.forEach((id) => ids.add(id));
+        batch.push(unit);
+      }
+      todo = todo.filter((u) => !batch.includes(u));
+      const boundaries = await ask("Ortsteile (Grenzen)", geometryQuery([...ids]), parseBoundaries);
+      for (const unit of batch) {
+        const own = boundaries.find((b) => b.id === unit.id);
+        // Ohne eigene Grenze kein Angebot; die Gemeinde kommt dann auch nicht in die Kachel.
+        if (!own) continue;
+        const mine = new Set(perUnit.get(unit.id)!.map((c) => c.id));
+        const parts = areasOfUnit(own, boundaries.filter((b) => mine.has(b.id)));
+        const rows = parts.map((p) => {
+          const geometry = compactGeometry(p.geometry, MAX_AREA_BYTES);
+          const g = decodeGeometry(geometry);
+          return { areaId: `relation/${p.id}`, name: p.name, geometry, bbox: bboxOf(g), labelAt: interiorPoint(g), cells: encodeCells(touchedCells(g)) };
+        });
+        await ctx.runMutation(internal.areas.storeUnit, { unitId: unit.id, areas: rows });
+        stored.add(unit.id);
+      }
     }
   }
-  const tileUnits = missing.map((tile, i) => ({ tile, unitIds: units.filter((u) => intersects(u.bbox, tileBoxes[i])).map((u) => u.id) }));
   await ctx.runMutation(internal.areas.storeTiles, {
-    // Kacheln mit noch nicht geladenen Gemeinden nicht als fertig speichern.
-    tiles: tileUnits.filter((t) => !t.unitIds.some((id) => deferred.includes(id))),
+    tiles: missing.map((tile, i) => ({
+      tile,
+      unitIds: units.filter((u) => stored.has(u.id) && intersects(u.bbox, tileBoxes[i])).map((u) => u.id),
+    })),
   });
 }
 
