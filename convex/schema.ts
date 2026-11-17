@@ -10,6 +10,11 @@ export default defineSchema({
      * Fehlt bei älteren Aktionen, bis jemand mit Bearbeiten-Link den Teilen-Dialog öffnet.
      */
     viewKey: v.optional(v.string()),
+    /**
+     * Geheimer Admin-Schlüssel (Gebietsauswahl, siehe #2 und access.ts). Wird über den
+     * Bearbeiten- und den Ansehen-Link nie herausgegeben.
+     */
+    adminKey: v.optional(v.string()),
     name: v.string(),
     placeLabel: v.string(),
     center: v.object({ lat: v.number(), lng: v.number() }),
@@ -21,7 +26,8 @@ export default defineSchema({
     blockedCount: v.optional(v.number()),
   })
     .index("by_slug", ["slug"])
-    .index("by_viewKey", ["viewKey"]),
+    .index("by_viewKey", ["viewKey"])
+    .index("by_adminKey", ["adminKey"]),
 
   marks: defineTable({
     campaignId: v.id("campaigns"),

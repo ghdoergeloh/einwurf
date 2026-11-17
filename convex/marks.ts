@@ -1,5 +1,5 @@
 import { mutation, query } from "./_generated/server";
-import { campaignForEdit, campaignForRead } from "./access";
+import { campaignByKey, requireRole } from "./access";
 import { ConvexError, v } from "convex/values";
 import { markCellOf } from "./cells";
 import { countDelta, statusOf, type HouseStatus } from "./status";
@@ -15,14 +15,14 @@ import {
 /**
  * Markierte Häuser einer Rasterzelle, live über die Convex-Subscription.
  * Der Browser abonniert nur die sichtbaren Zellen, damit ein Tipp nicht allen
- * Helfern die ganze Aktion neu schickt. Mit Bearbeiten- oder Ansehen-Schlüssel.
+ * Helfern die ganze Aktion neu schickt. Mit jedem Schlüssel (auch Ansehen).
  */
 export const inCell = query({
   args: { slug: v.string(), cell: v.string() },
   handler: async (ctx, { slug, cell }) => {
     if (!SLUG_PATTERN.test(slug)) return [];
     assertCell(cell);
-    const campaign = (await campaignForRead(ctx, slug))?.campaign;
+    const campaign = (await campaignByKey(ctx, slug))?.campaign;
     if (!campaign) return [];
     const marks = await ctx.db
       .query("marks")
@@ -39,7 +39,7 @@ export const inCell = query({
  * gleichzeitig auf dasselbe Haus tippen, es nicht doppelt weiterschalten.
  * `center` ist der Mittelpunkt des Hauses [lng, lat].
  * `marked` ist die ältere Form (true = done, false = none) für noch geöffnete alte Seiten.
- * Nur mit dem Bearbeiten-Schlüssel.
+ * Ab Rolle edit (Bearbeiten- oder Admin-Schlüssel).
  */
 export const set = mutation({
   args: {
@@ -56,8 +56,7 @@ export const set = mutation({
     assertLatLng(center[1], center[0]);
     const target: HouseStatus | undefined = status ?? (marked === undefined ? undefined : marked ? "done" : "none");
     if (!target) throw new ConvexError("Zustand fehlt");
-    const campaign = await campaignForEdit(ctx, slug);
-    if (!campaign) throw new ConvexError("Verteilaktion nicht gefunden");
+    const { campaign } = await requireRole(ctx, slug, "edit");
 
     const existing = await ctx.db
       .query("marks")

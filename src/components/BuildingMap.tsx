@@ -85,6 +85,12 @@ interface Props {
   onConflict: () => void;
   /** Kurzer Hinweis für den Helfer. */
   onNotice: (text: string) => void;
+  /**
+   * Nur ansehen (Ansehen-Link oder Ansehen-Modus): Tippen markiert nichts. Schieben, Zoomen,
+   * Doppeltipp und Standort bleiben. Ein Tipp auf ein Haus meldet nur `onReadOnlyTap`.
+   */
+  readOnly?: boolean;
+  onReadOnlyTap?: () => void;
   onLoadState: (s: LoadState) => void;
   /** Lädt die Häuser der Kacheln ("x:y"), über Convex mit gemeinsamem Cache. */
   loadBuildings: (cells: string[]) => Promise<BuildingFeature[]>;
@@ -101,6 +107,8 @@ export function BuildingMap({
   onToggle,
   onConflict,
   onNotice,
+  readOnly = false,
+  onReadOnlyTap,
   onLoadState,
   loadBuildings,
   loadedMarkCells,
@@ -126,6 +134,10 @@ export function BuildingMap({
   onConflictRef.current = onConflict;
   const onNoticeRef = useRef(onNotice);
   onNoticeRef.current = onNotice;
+  const readOnlyRef = useRef(readOnly);
+  readOnlyRef.current = readOnly;
+  const onReadOnlyTapRef = useRef(onReadOnlyTap);
+  onReadOnlyTapRef.current = onReadOnlyTap;
   onLoadStateRef.current = onLoadState;
   onCellsChangeRef.current = onCellsChange;
 
@@ -561,6 +573,10 @@ export function BuildingMap({
 
     function toggle(tap: Tap, { quiet = false } = {}) {
       if (disposed || !tap) return;
+      if (readOnlyRef.current) {
+        onReadOnlyTapRef.current?.();
+        return;
+      }
       const { at } = tap;
       if (tap.placeholder) {
         // Platzhalter: sofort färben und weiterschalten; übernommen wird, wenn das Haus da ist.
@@ -691,7 +707,7 @@ export function BuildingMap({
     });
 
     map.on("mousemove", (e) => {
-      const hit = map.getZoom() >= BUILDING_MIN_ZOOM - 0.5 && pick(e.point);
+      const hit = !readOnlyRef.current && map.getZoom() >= BUILDING_MIN_ZOOM - 0.5 && pick(e.point);
       map.getCanvas().style.cursor = hit ? "pointer" : "";
     });
 

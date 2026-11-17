@@ -10,7 +10,7 @@ export function App() {
   if (route.page === "campaign")
     return (
       <Suspense fallback={<div className="fixed inset-0 bg-[#e9e7e1]" />}>
-        <CampaignPage key={route.slug} slug={route.slug} isNew={route.isNew} />
+        <CampaignPage key={route.slug} slug={route.slug} isNew={route.isNew} viewLink={route.view} />
       </Suspense>
     );
   return <HomePage />;

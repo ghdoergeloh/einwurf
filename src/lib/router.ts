@@ -1,15 +1,22 @@
 import { useEffect, useState } from "react";
 
-export type Route = { page: "home" } | { page: "campaign"; slug: string; isNew: boolean };
+/** `view`: Ansehen-Link `/a/…`, sonst Bearbeiten-Link `/v/…` (siehe convex/access.ts). */
+export type Route = { page: "home" } | { page: "campaign"; slug: string; isNew: boolean; view: boolean };
 
 export function parseRoute(pathname: string, search = ""): Route {
-  const m = pathname.match(/^\/v\/([A-Za-z0-9]+)\/?$/);
-  if (m) return { page: "campaign", slug: m[1], isNew: new URLSearchParams(search).has("neu") };
-  return { page: "home" };
+  const m = pathname.match(/^\/([va])\/([A-Za-z0-9]+)\/?$/);
+  if (!m) return { page: "home" };
+  const view = m[1] === "a";
+  return { page: "campaign", slug: m[2], isNew: !view && new URLSearchParams(search).has("neu"), view };
 }
 
 export function campaignPath(slug: string) {
   return `/v/${slug}`;
+}
+
+/** Link zum Ansehen (nur lesen) mit dem Ansehen-Schlüssel. */
+export function viewPath(viewKey: string) {
+  return `/a/${viewKey}`;
 }
 
 export function navigate(to: string, replace = false) {

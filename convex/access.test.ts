@@ -25,7 +25,7 @@ describe("Ansehen-Schlüssel", () => {
   test("liest die Aktion, ohne den Bearbeiten-Schlüssel zu verraten", async () => {
     const t = await setup();
     const c = await t.query(api.campaigns.get, { slug: VIEW });
-    expect(c).toMatchObject({ access: "view", name: "Test", markCount: 1 });
+    expect(c).toMatchObject({ role: "view", name: "Test", markCount: 1 });
     expect(JSON.stringify(c)).not.toContain(SLUG);
     expect(c).not.toHaveProperty("slug");
     expect(c).not.toHaveProperty("viewKey");
@@ -33,7 +33,7 @@ describe("Ansehen-Schlüssel", () => {
 
   test("mit dem Bearbeiten-Schlüssel gibt es beide Schlüssel", async () => {
     const t = await setup();
-    expect(await t.query(api.campaigns.get, { slug: SLUG })).toMatchObject({ access: "edit", slug: SLUG, viewKey: VIEW });
+    expect(await t.query(api.campaigns.get, { slug: SLUG })).toMatchObject({ role: "edit", slug: SLUG, viewKey: VIEW });
   });
 
   test("sieht die Markierungen live", async () => {
@@ -47,14 +47,14 @@ describe("Ansehen-Schlüssel", () => {
     const t = await setup();
     await expect(
       t.mutation(api.marks.set, { slug: VIEW, osmId: "way/1", status: "none", center: HOUSE }),
-    ).rejects.toThrow(/nicht gefunden/);
+    ).rejects.toThrow(/nichts ändern/);
     await expect(
       t.mutation(api.marks.set, { slug: VIEW, osmId: "way/2", status: "done", center: HOUSE }),
-    ).rejects.toThrow(/nicht gefunden/);
-    await expect(t.mutation(api.buildings.prefetch, { slug: VIEW })).rejects.toThrow(/nicht gefunden/);
+    ).rejects.toThrow(/nichts ändern/);
+    await expect(t.mutation(api.buildings.prefetch, { slug: VIEW })).rejects.toThrow(/nichts ändern/);
     await expect(
       t.mutation(api.campaigns.ensureViewKey, { slug: VIEW, viewKey: "ZweiterSchluesselXYZ12" }),
-    ).rejects.toThrow(/nicht gefunden/);
+    ).rejects.toThrow(/nichts ändern/);
     // Nichts hat sich geändert.
     expect(await t.query(api.marks.inCell, { slug: SLUG, cell: CELL })).toHaveLength(1);
     expect(await t.query(api.campaigns.get, { slug: SLUG })).toMatchObject({ markCount: 1, viewKey: VIEW });
@@ -75,7 +75,7 @@ describe("Ansehen-Schlüssel", () => {
     expect(await t.mutation(api.campaigns.ensureViewKey, { slug: SLUG, viewKey: VIEW })).toBe(VIEW);
     // Ein zweites Gerät gleichzeitig: Der erste Schlüssel gilt.
     expect(await t.mutation(api.campaigns.ensureViewKey, { slug: SLUG, viewKey: "ZweiterSchluesselXYZ12" })).toBe(VIEW);
-    expect(await t.query(api.campaigns.get, { slug: VIEW })).toMatchObject({ access: "view" });
+    expect(await t.query(api.campaigns.get, { slug: VIEW })).toMatchObject({ role: "view" });
     expect(await t.query(api.campaigns.get, { slug: "ZweiterSchluesselXYZ12" })).toBeNull();
   });
 
@@ -100,6 +100,51 @@ describe("Ansehen-Schlüssel", () => {
     expect(await t.action(api.buildings.load, { slug: VIEW, cells: ["1398:10152"] })).toEqual(["[]"]);
     const rateKeys = await t.run(async (ctx) => (await ctx.db.query("overpassFetches").collect()).map((f) => f.slug));
     expect(rateKeys).toEqual([SLUG]);
+  });
+});
+
+const ADMIN = "AdMiNkEyAdMiNkEyAdMiN1";
+
+/** Den Admin-Schlüssel legt #2 an; hier direkt in der Datenbank gesetzt. */
+async function setupWithAdmin() {
+  const t = await setup();
+  await t.run(async (ctx) => {
+    const c = (await ctx.db.query("campaigns").first())!;
+    await ctx.db.patch(c._id, { adminKey: ADMIN });
+  });
+  return t;
+}
+
+describe("Admin-Schlüssel", () => {
+  test("Admin darf alles, was Bearbeiten darf, und sieht Bearbeiten- und Ansehen-Link", async () => {
+    const t = await setupWithAdmin();
+    expect(await t.query(api.campaigns.get, { slug: ADMIN })).toMatchObject({ role: "admin", slug: SLUG, viewKey: VIEW });
+    await t.mutation(api.marks.set, { slug: ADMIN, osmId: "way/2", status: "blocked", center: HOUSE });
+    expect(await t.query(api.marks.inCell, { slug: VIEW, cell: CELL })).toHaveLength(2);
+    await t.mutation(api.buildings.prefetch, { slug: ADMIN });
+    expect(await t.query(api.buildings.prefetchStatus, { slug: ADMIN })).not.toBeNull();
+    expect(await t.query(api.buildings.prefetchStatus, { slug: SLUG })).not.toBeNull();
+  });
+
+  test("ist über Bearbeiten- und Ansehen-Link nicht zu erfahren", async () => {
+    const t = await setupWithAdmin();
+    await t.mutation(api.buildings.prefetch, { slug: SLUG });
+    for (const key of [SLUG, VIEW, ADMIN]) {
+      const results = [
+        await t.query(api.campaigns.get, { slug: key }),
+        await t.query(api.marks.inCell, { slug: key, cell: CELL }),
+        await t.query(api.buildings.prefetchStatus, { slug: key }),
+      ];
+      expect(JSON.stringify(results)).not.toContain(ADMIN);
+      if (key === VIEW) expect(JSON.stringify(results)).not.toContain(SLUG);
+    }
+  });
+
+  test("neue Schlüssel dürfen keinen Admin-Schlüssel treffen", async () => {
+    const t = await setupWithAdmin();
+    const other = "ZyXwVuTsRqPoNmLkJiHgFe";
+    await expect(t.mutation(api.campaigns.create, { ...base, slug: ADMIN })).rejects.toThrow();
+    await expect(t.mutation(api.campaigns.create, { ...base, slug: other, viewKey: ADMIN })).rejects.toThrow();
   });
 });
 
