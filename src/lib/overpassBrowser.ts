@@ -7,6 +7,10 @@ import { DEFAULT_OVERPASS_ENDPOINTS, type Ask } from "../../convex/areaLoad";
  * Server der Reihe nach; jeder darf so lange brauchen, ausgelastete Server antworten spät.
  */
 const TIMEOUT_MS = 120_000;
+/** Über alle Server zusammen höchstens so lange je Abfrage, damit die Leiste nicht ewig „lädt“. */
+const TOTAL_MS = 180_000;
+/** Ein weiterer Server lohnt nur, wenn noch so viel Zeit bleibt. */
+const MIN_ATTEMPT_MS = 15_000;
 /** Größere Antworten verwerfen (wie in convex/buildings.ts). */
 const MAX_RESPONSE_CHARS = 40_000_000;
 
@@ -25,9 +29,15 @@ export function overpassEndpoints(): string[] {
 
 export const browserAsk: Ask = async (step, query, parse) => {
   const problems: string[] = [];
+  const deadline = Date.now() + TOTAL_MS;
   for (const url of overpassEndpoints()) {
+    const left = deadline - Date.now();
+    if (left < MIN_ATTEMPT_MS) {
+      problems.push("keine Zeit mehr für weitere Server");
+      break;
+    }
     const ctrl = new AbortController();
-    const timer = setTimeout(() => ctrl.abort(), TIMEOUT_MS);
+    const timer = setTimeout(() => ctrl.abort(), Math.min(TIMEOUT_MS, left));
     try {
       const res = await fetch(url, {
         method: "POST",

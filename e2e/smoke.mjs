@@ -103,6 +103,7 @@ await new Promise((r) => overpass.listen(8787, "127.0.0.1", r));
 
 let browserCalledOverpass = false;
 let browserBoundaryCalls = 0;
+let browserSentReferer = false;
 async function mockOsm(ctx, { styleFails = false } = {}) {
   await ctx.route("https://nominatim.openstreetmap.org/**", (r) =>
     r.fulfill({
@@ -153,6 +154,8 @@ async function mockOsm(ctx, { styleFails = false } = {}) {
     const q = new URLSearchParams(r.request().postData() ?? "").get("data") ?? "";
     if (q.includes("out tags bb") || q.includes("rel(id:")) {
       browserBoundaryCalls++;
+      // overpass-api.de lehnt Anfragen mit Referer ab (406): Der Browser darf keinen schicken.
+      if (r.request().headers()["referer"]) browserSentReferer = true;
       return r.fulfill({ json: fakeAreas(q), headers: { "Access-Control-Allow-Origin": "*" } });
     }
     browserCalledOverpass = true;
@@ -786,6 +789,8 @@ try {
 
   assert.deepEqual(errors, [], "keine Fehler in der Konsole");
   assert.equal(browserCalledOverpass, false, "Browser fragt Overpass nicht nach Häusern");
+  assert.ok(browserBoundaryCalls > 0, "Grenzen der Ortsteile holt der Browser des Admins selbst");
+  assert.equal(browserSentReferer, false, "Overpass-Abfragen aus dem Browser ohne Referer");
   assert.ok(overpassCalls > 0, "Convex hat Overpass gefragt");
   console.log("OK");
 } finally {
