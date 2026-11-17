@@ -67,6 +67,8 @@ export default defineSchema({
     /** Nicht ausgewählte Gebiete (areaId). Neue Aktionen: alle ausgewählt. */
     unselected: v.array(v.string()),
     failures: v.number(),
+    /** Antwort der Overpass-Server beim letzten Fehlschlag (gekürzt), für den Hinweis im Panel. */
+    lastError: v.optional(v.string()),
     updatedAt: v.number(),
     /** Laufnummer; ein älterer Ladevorgang speichert nichts mehr. */
     run: v.number(),

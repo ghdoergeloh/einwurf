@@ -148,12 +148,17 @@ describe("Gebiete ermitteln", () => {
     const down = vi.fn(async () => new Response("busy", { status: 504 }));
     vi.stubGlobal("fetch", down);
     const t2 = await create(A);
-    expect(await t2.query(api.areas.status, { slug: SLUG })).toMatchObject({ status: "failed" });
+    const failed = (await t2.query(api.areas.status, { slug: SLUG }))!;
+    expect(failed).toMatchObject({ status: "failed" });
+    // Die Antwort der Server steht für die Diagnose im Panel.
+    expect(failed.lastError).toContain("https://eins.example/api: HTTP 504");
+    expect(failed.lastError).toContain("https://zwei.example/api: HTTP 504");
     expect(await t2.query(api.areas.list, { slug: SLUG })).toEqual([]);
     vi.stubGlobal("fetch", overpassFor(A));
     await t2.mutation(api.areas.load, { adminKey: ADMIN });
     await t2.finishAllScheduledFunctions(vi.runAllTimers);
     expect(await names(t2)).toHaveLength(4);
+    expect((await t2.query(api.areas.status, { slug: SLUG }))!.lastError).toBeNull();
   });
 });
 

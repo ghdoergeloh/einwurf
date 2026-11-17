@@ -246,6 +246,18 @@ function fetchOverpass(
   return askServers(buildQuery(bbox), parseOverpass, { ...opts, failure: "Die Gebäudedaten (OpenStreetMap) sind gerade nicht erreichbar. Bitte gleich noch einmal versuchen." });
 }
 
+/** Fehler „kein Server hat geantwortet“, mit den Antworten der einzelnen Server für die Diagnose. */
+function overpassFailure(message: string, problems: string[]) {
+  return Object.assign(new ConvexError(message), { details: problems.join(" · ") });
+}
+
+/** Antworten der Overpass-Server zu einem Fehler aus askServers (für Diagnose und Hinweise), sonst die Meldung. */
+export function overpassDetails(e: unknown): string {
+  const details = (e as { details?: unknown })?.details;
+  if (typeof details === "string" && details) return details;
+  return e instanceof Error ? e.message : String(e);
+}
+
 /** Frist für einen Abruf ohne Sperre (z. B. Gebiete): so lange, wie alle Server zusammen höchstens brauchen. */
 export const overpassDeadline = () => Date.now() + lockMs();
 
@@ -304,7 +316,7 @@ export function askServers<T>(
           if (!launch() && running.size === 0) {
             finish();
             console.warn("Overpass nicht erreichbar", problems);
-            reject(new ConvexError(failure));
+            reject(overpassFailure(failure, problems));
           }
         },
       );
@@ -313,7 +325,7 @@ export function askServers<T>(
     if (!launch()) {
       // Frist schon vorbei (z. B. Auffrischen kam spät dran): gar nicht erst fragen.
       finish();
-      reject(new ConvexError(failure));
+      reject(overpassFailure(failure, ["keine Zeit mehr für einen Abruf"]));
     }
   });
 }

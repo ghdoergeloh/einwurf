@@ -7,7 +7,14 @@ import type { MapArea } from "./BuildingMap";
 
 interface Props {
   adminKey: string;
-  status: { status: "none" | "loading" | "done" | "failed"; whole: boolean; unselected: string[]; updatedAt: number; staleAfterMs: number };
+  status: {
+    status: "none" | "loading" | "done" | "failed";
+    whole: boolean;
+    unselected: string[];
+    updatedAt: number;
+    staleAfterMs: number;
+    lastError: string | null;
+  };
   areas: MapArea[];
   /** Gebiet auf der Karte zeigen. */
   onShow: (bbox: number[]) => void;
@@ -109,7 +116,14 @@ export function AreaSheet({ adminKey, status, areas, onShow, onClose }: Props) {
         )}
         {failed && (
           <div className="mt-5 flex items-center justify-between gap-3 rounded-2xl bg-paper p-4 text-sm" role="alert">
-            <span className="text-muted">Die Ortsteile konnten nicht geladen werden (OpenStreetMap überlastet).</span>
+            <span className="min-w-0 text-muted">
+              Die Ortsteile konnten nicht geladen werden (OpenStreetMap überlastet).
+              {status.lastError && (
+                <span className="mt-1 block break-words font-mono text-[11px] text-muted/80" data-testid="areas-error">
+                  {status.lastError}
+                </span>
+              )}
+            </span>
             <button
               type="button"
               onClick={() => load({ adminKey }).catch(() => setError("Konnte nicht gestartet werden."))}
