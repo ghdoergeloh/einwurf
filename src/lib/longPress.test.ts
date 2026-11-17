@@ -55,6 +55,20 @@ describe("LongPress", () => {
     expect(fired).toEqual([]);
   });
 
+  test("zweiter Finger bricht einen laufenden Druck ab und startet keinen eigenen", () => {
+    lp.down(1, 100, 100);
+    vi.advanceTimersByTime(200);
+    lp.down(2, 200, 200, { primary: false });
+    vi.advanceTimersByTime(LONG_PRESS_MS);
+    expect(fired).toEqual([]);
+  });
+
+  test("Doppeltipp-und-halten ist Zoom, kein langes Drücken", () => {
+    lp.down(1, 100, 100, { double: true });
+    vi.advanceTimersByTime(LONG_PRESS_MS);
+    expect(fired).toEqual([]);
+  });
+
   test("Bewegung eines anderen Zeigers stört nicht", () => {
     lp.down(1, 100, 100);
     lp.move(2, 300, 300);

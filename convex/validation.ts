@@ -24,6 +24,12 @@ export function assertCell(cell: string) {
   if (!MARK_CELL_PATTERN.test(cell)) throw new ConvexError("Ungültiger Kartenausschnitt");
 }
 
+/** Mittelpunkt eines Hauses [lng, lat]. */
+export function assertCenter(center: number[]) {
+  if (center.length !== 2) throw new ConvexError("Ungültige Koordinaten");
+  assertLatLng(center[1], center[0]);
+}
+
 export function assertLatLng(lat: number, lng: number) {
   if (!Number.isFinite(lat) || !Number.isFinite(lng) || Math.abs(lat) > 90 || Math.abs(lng) > 180) {
     throw new ConvexError("Ungültige Koordinaten");
@@ -44,8 +50,8 @@ export function cleanText(value: string, max: number, field: string) {
 export function cleanNote(value: string) {
   const text = value
     .replace(/\r\n?/g, "\n")
-    // eslint-disable-next-line no-control-regex
-    .replace(/[\u0000-\u0009\u000B-\u001F\u007F]/g, "")
+    // Steuer- und unsichtbare Formatzeichen (z. B. Leerzeichen der Breite null), nur der Zeilenumbruch bleibt.
+    .replace(/[\p{Cc}\p{Cf}]/gu, (c) => (c === "\n" ? c : ""))
     .replace(/[ \t]+\n/g, "\n")
     .replace(/\n{3,}/g, "\n\n")
     .trim();

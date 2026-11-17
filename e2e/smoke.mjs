@@ -232,6 +232,10 @@ try {
   const dots = await p3.evaluate(() => window.__einwurfMap.queryRenderedFeatures({ layers: ["mark-points"] }).length);
   assert.ok(dots >= 1, "Punkte rausgezoomt");
   await p3.getByText("Heranzoomen, um Häuser zu sehen").waitFor();
+  // Rausgezoomt gibt es keine Notiz, nur einen Hinweis
+  await p3.mouse.click(cx, cy, { button: "right" });
+  await p3.getByText("Für eine Notiz näher heranzoomen.").waitFor({ timeout: 5000 });
+  assert.equal(await p3.getByRole("dialog").count(), 0);
   await shot(p3, "3b-zoomed-out");
 
   // Der zweite Helfer tippt ein gelbes Haus nochmal an: „nicht möglich“ (dunkelgelb), bei allen
@@ -428,6 +432,10 @@ try {
   await pp.evaluate((c) => window.__einwurfMap.jumpTo({ center: [c.lng, c.lat] }), FAR);
   await pp.waitForTimeout(1200);
   assert.equal(await statusAt(pp, cx, cy), null, "Haus noch nicht geladen");
+  // Notiz an einem Haus, das noch lädt: Hinweis statt Dialog
+  await pp.mouse.click(cx, cy, { button: "right" });
+  await pp.getByText("Dieses Haus lädt noch.", { exact: false }).waitFor({ timeout: 5000 });
+  assert.equal(await pp.getByRole("dialog").count(), 0, "kein Notiz-Dialog auf Platzhalter");
   const tapShape = () =>
     pp.evaluate(([x, y]) => {
       const m = window.__einwurfMap;

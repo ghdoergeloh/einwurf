@@ -14,10 +14,15 @@ export class LongPress {
 
   constructor(private readonly onFire: (at: { x: number; y: number }) => void) {}
 
-  /** Neuer Druck (pointerdown des ersten Fingers bzw. der linken Maustaste). */
-  down(id: number, x: number, y: number) {
+  /**
+   * Neuer Druck (pointerdown). Ein zweiter Finger (Pinch) bricht ab und startet nichts, ebenso der
+   * zweite Druck eines Doppeltipps (Doppeltipp-und-halten zoomt).
+   */
+  down(id: number, x: number, y: number, { primary = true, double = false } = {}) {
     this.cancel();
+    if (!primary) return;
     this.fired = false;
+    if (double) return;
     this.start = { id, x, y };
     this.timer = setTimeout(() => this.fireNow(), LONG_PRESS_MS);
   }

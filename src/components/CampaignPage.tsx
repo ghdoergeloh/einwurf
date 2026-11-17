@@ -250,12 +250,14 @@ export function CampaignPage({ slug, isNew }: Props) {
           key={noteTarget.osmId}
           houseNumber={noteTarget.houseNumber}
           note={openNote ? { text: openNote.text, updatedAt: openNote.updatedAt } : null}
-          onSave={(text) => {
-            setNoteMutation({ slug, osmId: noteTarget.osmId, center: noteTarget.center, text }).catch(saveFailed);
+          onSave={(text, expectedUpdatedAt) => {
+            setNoteMutation({ slug, osmId: noteTarget.osmId, center: noteTarget.center, text, expectedUpdatedAt }).catch(
+              saveFailed,
+            );
             closeNote();
           }}
-          onDelete={() => {
-            removeNoteMutation({ slug, osmId: noteTarget.osmId }).catch(saveFailed);
+          onDelete={(expectedUpdatedAt) => {
+            removeNoteMutation({ slug, osmId: noteTarget.osmId, expectedUpdatedAt }).catch(saveFailed);
             closeNote();
           }}
           onClose={closeNote}

@@ -105,6 +105,37 @@ describe("notes", () => {
     expect(await count()).toBe(1);
   });
 
+  test("nur unsichtbare Zeichen gilt als leer", async () => {
+    const t = await setup();
+    await expect(t.mutation(api.notes.set, { slug: SLUG, osmId: "way/1", center: HOUSE, text: "\u200B\u2060\uFEFF" })).rejects.toThrow(
+      /leer/,
+    );
+    await t.mutation(api.notes.set, { slug: SLUG, osmId: "way/1", center: HOUSE, text: "a\u200Bb" });
+    expect((await inCell(t))[0].text).toBe("ab");
+  });
+
+  test("gleichzeitig geändert: Speichern und Löschen mit veraltetem Stand werden abgelehnt", async () => {
+    const t = await setup();
+    // Erwartet „keine Notiz“, aber jemand war schneller.
+    await t.mutation(api.notes.set, { slug: SLUG, osmId: "way/1", center: HOUSE, text: "a", expectedUpdatedAt: null });
+    await expect(
+      t.mutation(api.notes.set, { slug: SLUG, osmId: "way/1", center: HOUSE, text: "b", expectedUpdatedAt: null }),
+    ).rejects.toThrow(/inzwischen/);
+    const seen = (await inCell(t))[0].updatedAt;
+    await expect(
+      t.mutation(api.notes.set, { slug: SLUG, osmId: "way/1", center: HOUSE, text: "b", expectedUpdatedAt: seen - 1 }),
+    ).rejects.toThrow(/inzwischen/);
+    await expect(t.mutation(api.notes.remove, { slug: SLUG, osmId: "way/1", expectedUpdatedAt: seen - 1 })).rejects.toThrow(
+      /inzwischen/,
+    );
+    await t.mutation(api.notes.set, { slug: SLUG, osmId: "way/1", center: HOUSE, text: "b", expectedUpdatedAt: seen });
+    expect((await inCell(t))[0].text).toBe("b");
+    await t.mutation(api.notes.remove, { slug: SLUG, osmId: "way/1", expectedUpdatedAt: (await inCell(t))[0].updatedAt });
+    expect(await inCell(t)).toEqual([]);
+    // Schon gelöscht: Löschen mit altem Stand ist dann einfach erledigt.
+    await t.mutation(api.notes.remove, { slug: SLUG, osmId: "way/1", expectedUpdatedAt: seen });
+  });
+
   test("ungültige Zelle oder unbekannte Aktion", async () => {
     const t = await setup();
     await expect(t.query(api.notes.inCell, { slug: SLUG, cell: "x" })).rejects.toThrow();

@@ -6,15 +6,28 @@ interface Props {
   houseNumber: string | null;
   /** Vorhandene Notiz oder null. */
   note: { text: string; updatedAt: number } | null;
-  onSave: (text: string) => void;
-  onDelete: () => void;
+  /** `expectedUpdatedAt`: Stand, den der Helfer gerade sieht (null = keine Notiz), siehe convex/notes.ts. */
+  onSave: (text: string, expectedUpdatedAt: number | null) => void;
+  onDelete: (expectedUpdatedAt: number | null) => void;
   onClose: () => void;
 }
 
 /** Notiz zu einem Haus anlegen, ändern oder löschen (langes Drücken oder Rechtsklick auf ein Haus). */
 export function NoteSheet({ houseNumber, note, onSave, onDelete, onClose }: Props) {
-  // Der Entwurf bleibt, auch wenn jemand anderes die Notiz gleichzeitig ändert.
   const [draft, setDraft] = useState(note?.text ?? "");
+  const [touched, setTouched] = useState(false);
+  /** Stand der Notiz, auf dem der Entwurf beruht. */
+  const [base, setBase] = useState(note?.updatedAt ?? null);
+  const current = note?.updatedAt ?? null;
+  // Kommt die Notiz erst nach dem Öffnen (Zelle lädt noch) oder ändert sie jemand anderes, wird sie
+  // übernommen, solange hier noch nichts getippt wurde. Sonst bleibt der Entwurf, mit Warnung.
+  useEffect(() => {
+    if (touched) return;
+    setDraft(note?.text ?? "");
+    setBase(note?.updatedAt ?? null);
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [current]);
+  const changedElsewhere = touched && current !== base;
   const textRef = useRef<HTMLTextAreaElement>(null);
   // Der Hintergrund schließt nur, wenn der Druck auf ihm begann; sonst schlösse das Loslassen
   // nach dem langen Drücken den Dialog gleich wieder.
@@ -37,8 +50,8 @@ export function NoteSheet({ houseNumber, note, onSave, onDelete, onClose }: Prop
   }, [onClose]);
 
   function save() {
-    if (!trimmed) return note ? onDelete() : onClose();
-    if (changed) onSave(trimmed);
+    if (!trimmed) return note ? onDelete(current) : onClose();
+    if (changed) onSave(trimmed, current);
     else onClose();
   }
 
@@ -78,7 +91,10 @@ export function NoteSheet({ houseNumber, note, onSave, onDelete, onClose }: Prop
         <textarea
           ref={textRef}
           value={draft}
-          onChange={(e) => setDraft(e.target.value)}
+          onChange={(e) => {
+            setDraft(e.target.value);
+            setTouched(true);
+          }}
           onKeyDown={(e) => {
             // Strg/⌘ + Enter speichert, Enter allein macht eine neue Zeile.
             if (e.key === "Enter" && (e.metaKey || e.ctrlKey)) {
@@ -92,6 +108,13 @@ export function NoteSheet({ houseNumber, note, onSave, onDelete, onClose }: Prop
           placeholder="Was ist hier noch zu tun?"
           className="mt-4 block w-full resize-none rounded-2xl border border-black/10 bg-paper px-3.5 py-3 text-base leading-snug outline-none focus:border-note focus:ring-2 focus:ring-note/25"
         />
+        {changedElsewhere && (
+          <p role="alert" className="mt-3 rounded-xl bg-amber-50 px-3 py-2 text-sm text-amber-950">
+            {note
+              ? `Jemand anderes hat die Notiz gerade geändert: „${note.text}“. Speichern ersetzt sie.`
+              : "Jemand anderes hat die Notiz gerade gelöscht. Speichern legt sie neu an."}
+          </p>
+        )}
         <p className="mt-1 text-right text-xs tabular-nums text-muted" aria-live="polite">
           {draft.length} / {MAX_NOTE_LENGTH}
         </p>
@@ -99,7 +122,7 @@ export function NoteSheet({ houseNumber, note, onSave, onDelete, onClose }: Prop
           {note && (
             <button
               type="button"
-              onClick={onDelete}
+              onClick={() => onDelete(current)}
               className="rounded-2xl px-3 py-3 text-sm font-medium text-red-700 hover:bg-red-50"
             >
               Notiz löschen

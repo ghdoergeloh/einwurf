@@ -1,26 +1,30 @@
 import { mutation, query, type QueryCtx } from "./_generated/server";
+import { campaignBySlug } from "./marks";
 import { ConvexError, v } from "convex/values";
 import type { Id } from "./_generated/dataModel";
 import { markCellOf } from "./cells";
-import { MAX_NOTES_PER_CAMPAIGN, SLUG_PATTERN, assertCell, assertLatLng, assertOsmId, assertSlug, cleanNote } from "./validation";
+import { MAX_NOTES_PER_CAMPAIGN, SLUG_PATTERN, assertCell, assertCenter, assertOsmId, assertSlug, cleanNote } from "./validation";
 
 /**
  * Notizen an Häusern, z. B. „Briefkasten 3 und 4 haben nichts bekommen“. Ein Haus mit Notiz
  * zeigt die Karte blau. Abonniert wird wie bei den Markierungen nur je sichtbarer Zelle.
  */
 
-async function campaignBySlug(ctx: QueryCtx, slug: string) {
-  return await ctx.db
-    .query("campaigns")
-    .withIndex("by_slug", (q) => q.eq("slug", slug))
-    .unique();
-}
-
 async function noteOf(ctx: QueryCtx, campaignId: Id<"campaigns">, osmId: string) {
   return await ctx.db
     .query("notes")
     .withIndex("by_campaign_osm", (q) => q.eq("campaignId", campaignId).eq("osmId", osmId))
     .first();
+}
+
+/**
+ * Stand, den der Helfer im Dialog gesehen hat: updatedAt der Notiz oder null für „keine Notiz“.
+ * Fehlt er (ältere Seiten), gilt die letzte Speicherung.
+ */
+const expectedUpdatedAt = v.optional(v.union(v.number(), v.null()));
+function assertUnchanged(existing: { updatedAt: number } | null, expected: number | null | undefined) {
+  if (expected === undefined || (existing?.updatedAt ?? null) === expected) return;
+  throw new ConvexError("Die Notiz wurde inzwischen von jemand anderem geändert. Bitte nochmal öffnen.");
 }
 
 /** Notizen einer Rasterzelle, live über die Convex-Subscription. */
@@ -41,19 +45,20 @@ export const inCell = query({
 
 /** Legt die Notiz eines Hauses an oder ersetzt sie. `center` ist der Mittelpunkt [lng, lat]. */
 export const set = mutation({
-  args: { slug: v.string(), osmId: v.string(), center: v.array(v.number()), text: v.string() },
-  handler: async (ctx, { slug, osmId, center, text }) => {
+  args: { slug: v.string(), osmId: v.string(), center: v.array(v.number()), text: v.string(), expectedUpdatedAt },
+  handler: async (ctx, { slug, osmId, center, text, expectedUpdatedAt }) => {
     assertSlug(slug);
     assertOsmId(osmId);
-    if (center.length !== 2) throw new ConvexError("Ungültige Koordinaten");
-    assertLatLng(center[1], center[0]);
+    assertCenter(center);
     const clean = cleanNote(text);
     const campaign = await campaignBySlug(ctx, slug);
     if (!campaign) throw new ConvexError("Verteilaktion nicht gefunden");
 
     const existing = await noteOf(ctx, campaign._id, osmId);
+    assertUnchanged(existing, expectedUpdatedAt);
     if (existing) {
-      await ctx.db.patch(existing._id, { text: clean, updatedAt: Date.now() });
+      // Streng steigend, damit auch zwei Speicherungen in derselben Millisekunde unterscheidbar sind.
+      await ctx.db.patch(existing._id, { text: clean, updatedAt: Math.max(Date.now(), existing.updatedAt + 1) });
       return;
     }
     const count = campaign.noteCount ?? 0;
@@ -72,14 +77,15 @@ export const set = mutation({
 
 /** Löscht die Notiz eines Hauses; ohne Notiz passiert nichts. */
 export const remove = mutation({
-  args: { slug: v.string(), osmId: v.string() },
-  handler: async (ctx, { slug, osmId }) => {
+  args: { slug: v.string(), osmId: v.string(), expectedUpdatedAt },
+  handler: async (ctx, { slug, osmId, expectedUpdatedAt }) => {
     assertSlug(slug);
     assertOsmId(osmId);
     const campaign = await campaignBySlug(ctx, slug);
     if (!campaign) throw new ConvexError("Verteilaktion nicht gefunden");
     const existing = await noteOf(ctx, campaign._id, osmId);
     if (!existing) return;
+    assertUnchanged(existing, expectedUpdatedAt);
     await ctx.db.delete(existing._id);
     await ctx.db.patch(campaign._id, { noteCount: Math.max(0, (campaign.noteCount ?? 0) - 1) });
   },

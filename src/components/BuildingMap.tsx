@@ -556,14 +556,24 @@ export function BuildingMap({
         maxzoom: BUILDING_MIN_ZOOM - 0.5,
         paint: notePaint(["interpolate", ["linear"], ["zoom"], 10, 1.5, 14, 3]),
       });
+      const nearRadius: ExpressionSpecification = ["interpolate", ["linear"], ["zoom"], 15, 3, 18, 6];
+      // Ohne Umriss (noch nicht geladen): Punkt in der Mitte, antippbar wie mark-points-noshape.
+      map.addLayer({
+        id: "note-points-noshape",
+        type: "circle",
+        source: "note-points",
+        minzoom: BUILDING_MIN_ZOOM - 0.5,
+        filter: ["==", ["get", "shape"], false],
+        paint: notePaint(nearRadius),
+      });
       map.addLayer({
         id: "note-points-near",
         type: "circle",
         source: "note-points",
         minzoom: BUILDING_MIN_ZOOM - 0.5,
-        filter: ["any", ["==", ["get", "shape"], false], ["!=", ["get", "status"], "none"]],
+        filter: ["all", ["==", ["get", "shape"], true], ["!=", ["get", "status"], "none"]],
         paint: {
-          ...notePaint(["interpolate", ["linear"], ["zoom"], 15, 3, 18, 6]),
+          ...notePaint(nearRadius),
           // Ab Zoomstufe 17 stehen Hausnummern in der Mitte; der Punkt rückt dann darüber.
           "circle-translate": ["interpolate", ["linear"], ["zoom"], 16.5, ["literal", [0, 0]], 17, ["literal", [0, -12]]],
         },
@@ -597,7 +607,8 @@ export function BuildingMap({
     // ---------- Antippen ----------
 
     function pick(point: maplibregl.Point): MapGeoJSONFeature | undefined {
-      const layers = ["buildings-fill", "mark-points-noshape", "note-points-near"];
+      // Der blaue Punkt auf markierten Häusern zählt nicht: Ab Zoomstufe 17 ragt er über das Haus hinaus.
+      const layers = ["buildings-fill", "mark-points-noshape", "note-points-noshape"];
       const exact = map.queryRenderedFeatures(point, { layers });
       if (exact.length) return exact[0];
       // Etwas Toleranz für Finger: nächstes Haus im Umkreis von 8 px.
@@ -761,7 +772,7 @@ export function BuildingMap({
       if (e.pointerType === "mouse" && e.button !== 0) return;
       if (!e.isPrimary) {
         // Zweiter Finger (Pinch): kein Tipp, kein langes Drücken.
-        longPress.cancel();
+        longPress.down(e.pointerId, 0, 0, { primary: false });
         clearPending();
         doubleArmed = false;
         endDragZoom();
@@ -788,9 +799,7 @@ export function BuildingMap({
         clearPending();
         toggle(action.previous);
       }
-      // Doppeltipp-und-halten ist Zoom, kein langes Drücken.
-      if (action.kind === "double") longPress.cancel();
-      else longPress.down(e.pointerId, press.x, press.y);
+      longPress.down(e.pointerId, press.x, press.y, { double: action.kind === "double" });
     };
     const onPointerMove = (e: PointerEvent) => {
       const r = canvas.getBoundingClientRect();
