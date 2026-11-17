@@ -349,6 +349,32 @@ describe("Statistik je Gebiet", () => {
     expect(await row(t, "a")).toMatchObject({ done: 0 });
   });
 
+  test("Überlappung: Auswahl geändert, Häuser und Markierungen wechseln gemeinsam zum gewählten Gebiet", async () => {
+    const t = convexTest(schema, modules);
+    const houses = grid([7.0, 50.7, SPLIT, 50.71]);
+    await storeHouses(t, houses, [WEST]);
+    await setup(t, [["a", "Alt", WEST], ["w", "West", WEST]]);
+    await settle(t);
+    await tap(t, "way/1", [7.005, 50.705], "done");
+    expect(await row(t, "a")).toMatchObject({ houses: houses.length, done: 1 });
+    await t.mutation(api.areas.select, { adminKey: ADMIN, ids: ["a"], selected: false });
+    await settle(t);
+    expect(await row(t, "w")).toMatchObject({ houses: houses.length, done: 1, target: true });
+    expect(await row(t, "a")).toMatchObject({ done: 0, target: false });
+  });
+
+  test("ein Ortsteil kommt dazu: die übrigen behalten ihre Häuserzahl, bis neu gezählt ist", async () => {
+    const t = convexTest(schema, modules);
+    const houses = grid([7.0, 50.7, SPLIT, 50.71]);
+    await storeHouses(t, houses, [WEST, FAR]);
+    await setup(t, [["w", "West", WEST]]);
+    await settle(t);
+    await addAreas(t, [["f", "Fern", FAR]]);
+    expect((await row(t, "w")).houses).toBe(houses.length); // vor dem Neuzählen
+    await settle(t);
+    expect((await row(t, "w")).houses).toBe(houses.length);
+  });
+
   test("Neu zählen per refresh ab Rolle edit und gebremst", async () => {
     const t = convexTest(schema, modules);
     await setup(t, [["w", "West", WEST]]);

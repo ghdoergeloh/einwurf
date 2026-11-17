@@ -131,6 +131,8 @@ export default defineSchema({
     bbox: v.array(v.number()),
     /** statsJobs.run, zu dem diese Zeile gehört. */
     run: v.number(),
+    /** Gewählt beim Anlegen der Zeile (Auswahl ändern beginnt einen neuen Lauf); fehlt bei älteren Ständen. */
+    selected: v.optional(v.boolean()),
     done: v.number(),
     blocked: v.number(),
     /** Häuser mit Mittelpunkt im Gebiet, aus dem Gebäude-Cache; fehlt, bis einmal gezählt wurde. */
@@ -149,9 +151,9 @@ export default defineSchema({
   /** Hintergrund-Zählungen der Statistik je Aktion: Markierungen zuordnen, Häuser zählen. */
   statsJobs: defineTable({
     campaignId: v.id("campaigns"),
-    /** Laufnummer: steigt, wenn Gebiete dazukommen oder wegfallen (dann wird neu zugeordnet). */
+    /** Laufnummer: steigt, wenn sich Gebiete oder Auswahl ändern (dann wird neu zugeordnet). */
     run: v.number(),
-    /** Gebiete, für die die Zeilen angelegt sind (ids in `areas`, sortiert); fehlt bei älteren Ständen. */
+    /** Gebiete samt Auswahl, für die die Zeilen angelegt sind (stats.keyOf); fehlt bei älteren Ständen. */
     areaKey: v.optional(v.string()),
     /** Zuordnen älterer Markierungen: Cursor der Seite, null = fertig. */
     marksCursor: v.union(v.string(), v.null()),

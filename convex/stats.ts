@@ -36,8 +36,12 @@ const REFRESH_MIN_MS = 60_000;
 /** Gebiete der Aktion (gewählte und abgewählte). */
 const areaDocs = (ctx: QueryCtx, campaignId: Id<"campaigns">) =>
   ctx.db.query("areas").withIndex("by_campaign", (q) => q.eq("campaignId", campaignId)).collect();
-/** Fingerabdruck der Gebiete: ändert er sich, passen die Statistik-Zeilen nicht mehr. */
-const keyOf = (docs: Doc<"areas">[]) => docs.map((d) => d._id).sort().join(" ");
+/** Fingerabdruck der Gebiete samt Auswahl: ändert er sich, passen die Statistik-Zeilen nicht mehr. */
+const keyOf = (docs: Doc<"areas">[]) =>
+  docs
+    .map((d) => `${d._id}:${isSelected(d) ? 1 : 0}`)
+    .sort()
+    .join(" ");
 const jobOf = (ctx: QueryCtx, campaignId: Id<"campaigns">) =>
   ctx.db.query("statsJobs").withIndex("by_campaign", (q) => q.eq("campaignId", campaignId)).unique();
 const byName = <A extends { name: string }>(a: A, b: A) => a.name.localeCompare(b.name, "de");
@@ -48,10 +52,8 @@ async function statRows(ctx: QueryCtx, campaignId: Id<"campaigns">, run: number)
   return rows.filter((r) => r.run === run).sort(byName);
 }
 
-/** Abgewählte Gebiete (areaId). */
-async function unselectedOf(ctx: QueryCtx, campaignId: Id<"campaigns">) {
-  return new Set((await areaDocs(ctx, campaignId)).filter((d) => !isSelected(d)).map((d) => d.areaId));
-}
+/** Abgewählte Gebiete (areaId), wie beim Anlegen der Zeilen. */
+const unselectedOf = (rows: Doc<"areaStats">[]) => new Set(rows.filter((r) => r.selected === false).map((r) => r.areaId));
 
 /** Reihenfolge für die Zuordnung: gewählte Gebiete zuerst, dann die übrigen, je nach Namen. */
 function preferSelected(rows: Doc<"areaStats">[], off: Set<string>) {
@@ -59,15 +61,17 @@ function preferSelected(rows: Doc<"areaStats">[], off: Set<string>) {
 }
 
 /**
- * Stand der Statistik: der Auftrag, wenn seine Zeilen zu den Gebieten passen, sonst null (keine
- * Gebiete, oder Gebiete vor der Statistik angelegt bzw. ohne Anpassung geändert).
+ * Auftrag der Statistik, wenn sie zum aktuellen Modell angelegt ist, sonst null. Jede Änderung
+ * an Gebieten oder Auswahl führt syncAreaStats nach; deshalb liest ein Tipp hier keine Grenzen.
  */
 async function current(ctx: QueryCtx, campaignId: Id<"campaigns">) {
-  const docs = await areaDocs(ctx, campaignId);
-  if (docs.length === 0) return { docs, job: null };
   const job = await jobOf(ctx, campaignId);
-  return { docs, job: job && job.areaKey === keyOf(docs) ? job : null };
+  return job && job.areaKey !== undefined ? job : null;
 }
+
+/** Hat die Aktion Gebiete (gewählte oder abgewählte)? Liest höchstens ein Gebiet. */
+const hasAreas = async (ctx: QueryCtx, campaignId: Id<"campaigns">) =>
+  !!(await ctx.db.query("areas").withIndex("by_campaign", (q) => q.eq("campaignId", campaignId)).first());
 
 type Located = { id: string; name: string; geometry: AreaGeometry; bbox: number[]; cells?: Set<string> };
 
@@ -107,23 +111,29 @@ async function addCounts(ctx: MutationCtx, rows: Doc<"areaStats">[], deltas: Map
 
 /**
  * Nach jeder Änderung der Gebiete einer Aktion (areas.select, Ortsteil an der Adresse): Kam ein
- * Gebiet dazu oder fiel eins weg, Zeilen neu anlegen, Markierungen neu zuordnen und Häuser
- * zählen; wurde nur die Auswahl geändert, Häuser der neuen Zielgebiete zählen.
+ * Gebiet dazu, fiel eins weg oder änderte sich die Auswahl, Zeilen neu anlegen, Markierungen neu
+ * zuordnen (bei Überlappung zählt das gewählte Gebiet, für Häuser und Markierungen gleich) und
+ * Häuser der Zielgebiete zählen.
  */
 export async function syncAreaStats(ctx: MutationCtx, campaignId: Id<"campaigns">) {
-  const { docs, job } = await current(ctx, campaignId);
+  const docs = await areaDocs(ctx, campaignId);
   if (docs.length === 0) return;
-  if (job) return await recountHouses(ctx, campaignId);
+  if ((await jobOf(ctx, campaignId))?.areaKey === keyOf(docs)) return;
   await resetAreaStats(ctx, campaignId);
 }
 
-/** Zeilen neu anlegen, alle Markierungen (neu) zuordnen, Häuser zählen. */
+/**
+ * Zeilen neu anlegen, alle Markierungen (neu) zuordnen, Häuser zählen. Die letzte Häuserzahl je
+ * Gebiet bleibt stehen, bis neu gezählt ist.
+ */
 async function resetAreaStats(ctx: MutationCtx, campaignId: Id<"campaigns">) {
   const docs = await areaDocs(ctx, campaignId);
   if (docs.length === 0) return;
   const old = await jobOf(ctx, campaignId);
   const run = (old?.run ?? 0) + 1;
+  const counted = new Map<string, { houses?: number; cellsCounted: number }>();
   for (const row of await ctx.db.query("areaStats").withIndex("by_campaign", (q) => q.eq("campaignId", campaignId)).collect()) {
+    if (row.houses !== undefined) counted.set(row.areaDoc, { houses: row.houses, cellsCounted: row.cellsCounted });
     await ctx.db.delete(row._id);
   }
   for (const a of docs) {
@@ -134,9 +144,11 @@ async function resetAreaStats(ctx: MutationCtx, campaignId: Id<"campaigns">) {
       areaDoc: a._id,
       bbox: a.bbox,
       run,
+      selected: isSelected(a),
       done: 0,
       blocked: 0,
-      cellsCounted: 0,
+      houses: counted.get(a._id)?.houses,
+      cellsCounted: counted.get(a._id)?.cellsCounted ?? 0,
       cellsTotal: decodeCells(a.cells).length,
     });
   }
@@ -152,10 +164,10 @@ async function resetAreaStats(ctx: MutationCtx, campaignId: Id<"campaigns">) {
  * geladen, also auch nicht gezählt; ist keins gewählt, gilt der ganze Ort und nichts wird gezählt.
  */
 async function recountHouses(ctx: MutationCtx, campaignId: Id<"campaigns">) {
-  const { job } = await current(ctx, campaignId);
+  const job = await current(ctx, campaignId);
   if (!job) return;
   const rows = await statRows(ctx, campaignId, job.run);
-  const off = await unselectedOf(ctx, campaignId);
+  const off = unselectedOf(rows);
   // Ist keins gewählt, gilt der ganze Ort; dann ist kein Ortsteil Ziel (ihre Häuser werden nicht gezielt geladen).
   const targets = rows.filter((r) => !off.has(r.areaId));
   const cells = new Set<string>();
@@ -192,7 +204,7 @@ export async function trackMark(
   center: [number, number],
 ): Promise<{ area?: string; areaRun?: number }> {
   // Noch keine Statistik für diesen Stand: nichts festlegen, das Nachziehen ordnet später zu.
-  const { job } = await current(ctx, campaignId);
+  const job = await current(ctx, campaignId);
   if (!job) return {};
   const run = job.run;
   const counted = !!existing && existing.areaRun === run;
@@ -200,7 +212,8 @@ export async function trackMark(
   let rows: Doc<"areaStats">[] | null = null;
   if (counted) area = existing.area ?? "";
   else {
-    rows = preferSelected(await statRows(ctx, campaignId, run), await unselectedOf(ctx, campaignId));
+    const all = await statRows(ctx, campaignId, run);
+    rows = preferSelected(all, unselectedOf(all));
     area = locate(center, await withGeometry(ctx, rows.filter((r) => inBox(center, r.bbox))));
   }
   const d = countDelta(counted ? statusOf(existing) : "none", target);
@@ -222,14 +235,14 @@ export async function trackMark(
 export const assignStep = internalMutation({
   args: { campaignId: v.id("campaigns"), run: v.number() },
   handler: async (ctx, { campaignId, run }) => {
-    const { job } = await current(ctx, campaignId);
+    const job = await current(ctx, campaignId);
     if (!job || job.run !== run || job.marksDone) return;
     const page = await ctx.db
       .query("marks")
       .withIndex("by_campaign_osm", (q) => q.eq("campaignId", campaignId))
       .paginate({ cursor: job.marksCursor, numItems: ASSIGN_BATCH });
     const rows = await statRows(ctx, campaignId, run);
-    const areas = await withGeometry(ctx, preferSelected(rows, await unselectedOf(ctx, campaignId)));
+    const areas = await withGeometry(ctx, preferSelected(rows, unselectedOf(rows)));
     const deltas = new Map<string, { done: number; blocked: number }>();
     for (const m of page.page) {
       if (m.areaRun === run) continue;
@@ -250,14 +263,14 @@ export const assignStep = internalMutation({
 export const countStep = internalMutation({
   args: { campaignId: v.id("campaigns"), seq: v.number() },
   handler: async (ctx, { campaignId, seq }) => {
-    const { job } = await current(ctx, campaignId);
+    const job = await current(ctx, campaignId);
     if (!job || job.seq !== seq) return;
     const cells = decodeCells(job.cells);
     const batch = cells.slice(0, COUNT_BATCH);
     const rows = await statRows(ctx, campaignId, job.run);
     const targets = new Set(job.targets ? job.targets.split(" ") : []);
     // Alle Gebiete für die Zuordnung (gewählte zuerst), gezählt nur die Ziele.
-    const areas = await withGeometry(ctx, preferSelected(rows, await unselectedOf(ctx, campaignId)), { cells: true });
+    const areas = await withGeometry(ctx, preferSelected(rows, unselectedOf(rows)), { cells: true });
     const houses = new Map<string, number>();
     const cached = new Map<string, number>();
     for (const cell of batch) {
@@ -301,12 +314,13 @@ export const byArea = query({
     const campaign = (await campaignByKey(ctx, slug))?.campaign;
     if (!campaign) return null;
     const total = { done: campaign.markCount ?? 0, blocked: campaign.blockedCount ?? 0 };
-    const { docs, job } = await current(ctx, campaign._id);
-    if (docs.length === 0) return { areas: null, needsSetup: false, total };
+    const job = await current(ctx, campaign._id);
     const rows = job ? await statRows(ctx, campaign._id, job.run) : [];
-    // Gebiete da, aber keine passende Statistik (vor ihr angelegt): Browser stößt refresh an.
-    if (!job || rows.length === 0) return { areas: null, needsSetup: true, total };
-    const off = new Set(docs.filter((d) => !isSelected(d)).map((d) => d.areaId));
+    if (!job || rows.length === 0) {
+      // Gebiete da, aber keine passende Statistik (vor ihr angelegt): Browser stößt refresh an.
+      return { areas: null, needsSetup: await hasAreas(ctx, campaign._id), total };
+    }
+    const off = unselectedOf(rows);
     const noneSelected = rows.every((r) => off.has(r.areaId));
     const list = rows.map((r) => {
       const selected = !off.has(r.areaId);
@@ -343,9 +357,8 @@ export const refresh = mutation({
   args: { slug: v.string() },
   handler: async (ctx, { slug }) => {
     const { campaign } = await requireRole(ctx, slug, "edit");
-    const { docs, job } = await current(ctx, campaign._id);
-    if (docs.length === 0) return;
-    if (!job) return await resetAreaStats(ctx, campaign._id);
+    const job = await current(ctx, campaign._id);
+    if (!job) return await syncAreaStats(ctx, campaign._id);
     if (job.cells !== "" || Date.now() - job.countedAt < REFRESH_MIN_MS) return;
     await recountHouses(ctx, campaign._id);
   },
