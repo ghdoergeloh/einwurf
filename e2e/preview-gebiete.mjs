@@ -54,12 +54,19 @@ try {
 
   // Angebot und Vorauswahl: Bis Overpass geantwortet hat, kann es dauern (öffentliche Server).
   const started = Date.now();
+  let retries = 0;
   const status = async () => (await bar.innerText()).replace(/\s+/g, " ");
   for (;;) {
     const s = await status();
-    if (/Erneut versuchen/.test(s)) throw new Error(`Ortsteile nicht geladen: ${s}`);
+    if (/Erneut versuchen/.test(s)) {
+      // Öffentliche Overpass-Server sind oft überlastet: wie ein Nutzer erneut versuchen.
+      if (++retries > 4) throw new Error(`Ortsteile nicht geladen: ${s}`);
+      console.log(`Fehlschlag ${retries}, erneut:`, s.slice(s.indexOf("Die Ortsteile")));
+      await p.waitForTimeout(30_000);
+      await bar.getByRole("button", { name: "Erneut versuchen" }).click();
+    }
     if (!/werden aus OpenStreetMap geladen/.test(s) && /\d+ gewählt/.test(s)) break;
-    if (Date.now() - started > 900_000) throw new Error(`Zeitüberschreitung: ${s}`);
+    if (Date.now() - started > 2_400_000) throw new Error(`Zeitüberschreitung: ${s}`);
     await p.waitForTimeout(5000);
   }
   console.log(`Geladen nach ${Math.round((Date.now() - started) / 1000)} s:`, await status());
