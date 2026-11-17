@@ -4,14 +4,9 @@
 // gezählt sind, dann tippt der Admin ein Haus gelb → dunkelgelb → offen, und ein zweites Gerät
 // sieht die Zahlen live.
 // Aufruf: node e2e/preview-stats.mjs <preview-url> [ortsteil] [ordner-für-screenshots]
-// Ist das Preview geschützt (Vercel Deployment Protection): VERCEL_BYPASS_FILE=<datei mit dem
-// „Protection Bypass for Automation“-Geheimnis> oder VERCEL_BYPASS=<geheimnis> setzen.
 import { chromium } from "playwright";
 import assert from "node:assert/strict";
 import { readFileSync } from "node:fs";
-
-const BYPASS = process.env.VERCEL_BYPASS_FILE ? readFileSync(process.env.VERCEL_BYPASS_FILE, "utf8").trim() : process.env.VERCEL_BYPASS;
-const bypassHeaders = BYPASS ? { "x-vercel-protection-bypass": BYPASS, "x-vercel-set-bypass-cookie": "true" } : {};
 
 const GLYPHS = readFileSync(new URL("./fixtures/noto-sans-bold-0-255.pbf", import.meta.url));
 const BASE = process.argv[2];
@@ -20,11 +15,6 @@ const SHOTS = process.argv[4];
 if (!BASE) throw new Error("Aufruf: node e2e/preview-stats.mjs <preview-url> [ortsteil] [ordner]");
 
 async function mockBrowserOsm(ctx) {
-  // Bypass-Geheimnis nur an das Preview selbst schicken, nie an Convex oder andere Dienste.
-  if (BYPASS) {
-    const host = new URL(BASE).host;
-    await ctx.route((u) => u.host === host, (r) => r.continue({ headers: { ...r.request().headers(), ...bypassHeaders } }));
-  }
   // Ortssuche: Bornheim (Rheinland), echte Koordinaten.
   await ctx.route("https://nominatim.openstreetmap.org/**", (r) =>
     r.fulfill({
