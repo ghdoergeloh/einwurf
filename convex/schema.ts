@@ -62,10 +62,17 @@ export default defineSchema({
     labelAt: v.array(v.number()),
     /** Gebäude-Kacheln, die das Gebiet berühren, durch Leerzeichen getrennt (areaGeo.touchedCells). */
     cells: v.string(),
-    selected: v.boolean(),
+    /** Fehlt nur bei Vorabständen aus PR #7 und heißt dann „gewählt“ (siehe areaStore.isSelected). */
+    selected: v.optional(v.boolean()),
   })
     .index("by_campaign", ["campaignId"])
     .index("by_campaign_area", ["campaignId", "areaId"]),
+
+  /**
+   * Veraltet: Ladezustand aus einem Vorabstand von PR #7, nur noch in Preview-Datenbanken.
+   * Wird nicht mehr benutzt; nach dem Merge entfernen (Produktion hatte die Tabelle nie).
+   */
+  areaSets: defineTable(v.any()),
 
   /** Gemeinsamer Cache der Ortsteile aus OSM, für alle Aktionen (convex/areas.ts). */
   osmAreas: defineTable({
