@@ -165,8 +165,9 @@ export const MIN_COVERAGE = 0.9;
 
 /**
  * Wählt die Unterteilung des Ortes: die feinste Verwaltungsstufe, deren Gebiete (mindestens zwei)
- * den Ort lückenlos und ohne nennenswerte Überlappung abdecken; erst danach boundary=place als
- * Ersatz. Gebiete der Nachbarorte, die nur die Grenze berühren, fallen weg.
+ * den Ort lückenlos und ohne nennenswerte Überlappung abdecken; sonst eine Mischung der Stufen
+ * (gröbere zuerst, Lücken mit feineren gefüllt); erst danach boundary=place als Ersatz.
+ * Gebiete der Nachbarorte, die nur die Grenze berühren, fallen weg.
  * null = keine Unterteilung, der ganze Ort ist ein Gebiet.
  */
 export function chooseSubdivision(parent: Boundary, candidates: Boundary[]): Boundary[] | null {
@@ -178,15 +179,27 @@ export function chooseSubdivision(parent: Boundary, candidates: Boundary[]): Bou
     if (!pointInGeometry(interiorPoint(c.geometry), parent.geometry)) continue;
     byLevel.set(c.level, [...(byLevel.get(c.level) ?? []), c]);
   }
-  // Verwaltungsstufen von fein nach grob, boundary=place zuletzt.
-  const order = [...byLevel.keys()].sort((a, b) => (a === PLACE_LEVEL ? 1 : b === PLACE_LEVEL ? -1 : b - a));
-  for (const level of order) {
-    const list = byLevel.get(level)!;
-    if (list.length < 2) continue;
+  const fits = (list: Boundary[]) => {
+    if (list.length < 2) return false;
     const { covered, overlap } = coverage(samples, list);
-    if (covered >= MIN_COVERAGE && overlap <= MAX_OVERLAP) return list;
-  }
-  return null;
+    return covered >= MIN_COVERAGE && overlap <= MAX_OVERLAP;
+  };
+  const admin = [...byLevel.keys()].filter((l) => l !== PLACE_LEVEL).sort((a, b) => a - b);
+  // 1. Eine Verwaltungsstufe allein, von fein nach grob (z. B. Stadtbezirke einer Großstadt).
+  for (const level of [...admin].reverse()) if (fits(byLevel.get(level)!)) return byLevel.get(level)!;
+  // 2. Gemischte Stufen: Oft sind Ortsteile teils auf der einen, teils auf der nächsten Stufe
+  //    erfasst (in Bornheim etwa Hersel auf 9, Brenig auf 10). Von grob nach fein auffüllen:
+  //    Ein Gebiet kommt dazu, wenn sein Inneres noch in keinem gröberen liegt.
+  const mixed: Boundary[] = [];
+  for (const level of admin)
+    for (const c of byLevel.get(level)!) {
+      const inner = interiorPoint(c.geometry);
+      if (!mixed.some((m) => pointInGeometry(inner, m.geometry))) mixed.push(c);
+    }
+  if (mixed.some((m) => m.level !== mixed[0].level) && fits(mixed)) return mixed;
+  // 3. Ersatz: boundary=place, wenn es den Ort lückenlos teilt.
+  const place = byLevel.get(PLACE_LEVEL);
+  return place && fits(place) ? place : null;
 }
 
 /** Höchstens so viel des Ortes darf in mehr als einem Gebiet einer Stufe liegen (doppelte oder verschachtelte Grenzen). */
