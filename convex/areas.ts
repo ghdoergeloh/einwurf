@@ -15,6 +15,7 @@ import { MAX_AREA_BYTES, areaRow, computeTiles, type Ask } from "./areaLoad";
 import { askServers, overpassDetails, startPrefetch, takeOverpassQuota } from "./buildings";
 import { campaignByKey, requireRole } from "./access";
 import { isSelected } from "./areaStore";
+import { syncAreaStats } from "./stats";
 
 /**
  * Gebiete (Ortsteile). Das Angebot kommt aus einem gemeinsamen Cache: je Grenz-Kachel (etwa
@@ -173,6 +174,8 @@ export const select = mutation({
     for (const id of ids) await selectArea(ctx, campaign._id, id, selected);
     const count = (await ctx.db.query("areas").withIndex("by_campaign", (q) => q.eq("campaignId", campaign._id)).collect()).length;
     if (count > MAX_AREAS) throw new ConvexError("Zu viele Gebiete");
+    // Statistik: neue Gebiete anlegen und Markierungen zuordnen, Häuser der Zielgebiete zählen.
+    await syncAreaStats(ctx, campaign._id);
     await replanPrefetch(ctx, campaign.slug);
   },
 });
@@ -441,6 +444,7 @@ async function selectAtPoint(ctx: MutationCtx, campaignId: Id<"campaigns">, poin
     for (const a of await unitRows(ctx, unitId, campaignId, now)) {
       if (pointInGeometry(point, decodeGeometry(a.geometry))) {
         await selectArea(ctx, campaignId, a.areaId, true);
+        await syncAreaStats(ctx, campaignId);
         const campaign = await ctx.db.get(campaignId);
         if (campaign) await replanPrefetch(ctx, campaign.slug);
         return;

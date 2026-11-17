@@ -1,5 +1,6 @@
 import { mutation, query } from "./_generated/server";
 import { campaignByKey, requireRole } from "./access";
+import { trackMark } from "./stats";
 import { ConvexError, v } from "convex/values";
 import { markCellOf } from "./cells";
 import { countDelta, statusOf, type HouseStatus } from "./status";
@@ -64,10 +65,12 @@ export const set = mutation({
     const from = statusOf(existing);
     if (from === target) return;
 
+    // Statistik je Gebiet mitzählen (convex/stats.ts).
+    const area = await trackMark(ctx, campaign._id, existing, target, [center[0], center[1]]);
     if (target === "none") {
       await ctx.db.delete(existing!._id);
     } else if (existing) {
-      await ctx.db.patch(existing._id, { status: target });
+      await ctx.db.patch(existing._id, { status: target, ...area });
     } else {
       const total = (campaign.markCount ?? 0) + (campaign.blockedCount ?? 0);
       if (total >= MAX_MARKS_PER_CAMPAIGN) throw new ConvexError("Diese Aktion hat schon zu viele Markierungen");
@@ -77,6 +80,7 @@ export const set = mutation({
         center: [center[0], center[1]],
         cell: markCellOf(center[0], center[1]),
         status: target,
+        ...area,
       });
     }
     const d = countDelta(from, target);

@@ -166,6 +166,7 @@ const MUTATIONS_REJECTING_VIEW_KEY: Record<string, (t: T) => Promise<unknown>> =
   "campaigns:ensureViewKey": (t) => t.mutation(api.campaigns.ensureViewKey, { slug: VIEW, viewKey: "ZweiterSchluesselXYZ12" }),
   "notes:set": (t) => t.mutation(api.notes.set, { slug: VIEW, osmId: "way/2", center: HOUSE, text: "von außen" }),
   "notes:remove": (t) => t.mutation(api.notes.remove, { slug: VIEW, osmId: "way/1" }),
+  "stats:refresh": (t) => t.mutation(api.stats.refresh, { slug: VIEW }),
 };
 /** Öffentliche Mutationen nur für den Admin-Schlüssel (Gebiete, #2), je mit einem anderen Schlüssel aufgerufen. */
 const ADMIN_ONLY: Record<string, { kind: "mutation" | "action" | "query"; call: (t: T, key: string) => Promise<unknown> }> = {
@@ -199,6 +200,7 @@ const QUERIES: Record<string, (t: T, key: string) => Promise<unknown>> = {
   "notes:inCell": (t, key) => t.query(api.notes.inCell, { slug: key, cell: CELL }),
   "buildings:prefetchStatus": (t, key) => t.query(api.buildings.prefetchStatus, { slug: key }),
   "areas:list": (t, key) => t.query(api.areas.list, { slug: key }),
+  "stats:byArea": (t, key) => t.query(api.stats.byArea, { slug: key }),
 };
 
 /** Alles, was ein Ansehen-Schlüssel ändern könnte, als Abzug der Datenbank. */
@@ -211,6 +213,8 @@ const snapshot = (t: T) =>
       await ctx.db.query("prefetchJobs").collect(),
       await ctx.db.query("areas").collect(),
       await ctx.db.query("osmAreas").collect(),
+      await ctx.db.query("areaStats").collect(),
+      await ctx.db.query("statsJobs").collect(),
     ]),
   );
 

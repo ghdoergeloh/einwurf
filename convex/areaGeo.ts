@@ -472,6 +472,9 @@ export function toAreas(
   }));
 }
 
+/** Liegt der Punkt [lng, lat] im Ausschnitt [west, süd, ost, nord]? */
+export const inBox = ([x, y]: Position, b: number[]) => x >= b[0] && x <= b[2] && y >= b[1] && y <= b[3];
+
 /** Gewählte Gebiete als Filter für Kacheln und Häuser. */
 export interface Selection {
   /** Umschließender Ausschnitt aller gewählten Gebiete. */
@@ -499,7 +502,6 @@ export function selectionOf(
     Math.max(...chosen.map((c) => c.b[2])),
     Math.max(...chosen.map((c) => c.b[3])),
   ];
-  const inBox = ([x, y]: Position, b: BBox) => x >= b[0] && x <= b[2] && y >= b[1] && y <= b[3];
   return {
     bbox,
     touches: (cell) => cells.has(cell),

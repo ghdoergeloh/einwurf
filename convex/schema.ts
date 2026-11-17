@@ -41,6 +41,10 @@ export default defineSchema({
     cell: v.string(),
     /** Zustand, siehe status.ts. Fehlt bei älteren Markierungen und heißt dann „done“. */
     status: v.optional(v.union(v.literal("done"), v.literal("blocked"))),
+    /** Gebiet (areaId) für die Statistik, "" = in keinem Gebiet; gilt nur, wenn areaRun zum Laden der Gebiete passt. */
+    area: v.optional(v.string()),
+    /** statsJobs.run, zu dem `area` bestimmt und mitgezählt wurde (convex/stats.ts). */
+    areaRun: v.optional(v.number()),
   })
     .index("by_campaign_osm", ["campaignId", "osmId"])
     .index("by_campaign_cell", ["campaignId", "cell"]),
@@ -113,6 +117,54 @@ export default defineSchema({
   })
     .index("by_scope_tile", ["campaignId", "tile"])
     .index("by_fetchedAt", ["fetchedAt"]),
+
+  /**
+   * Statistik je Gebiet (convex/stats.ts): eine Zeile je Gebiet, beim Laden der Gebiete neu angelegt.
+   * Markierungen werden beim Setzen mitgezählt, Häuser im Hintergrund aus dem Gebäude-Cache gezählt.
+   */
+  areaStats: defineTable({
+    campaignId: v.id("campaigns"),
+    areaId: v.string(),
+    name: v.string(),
+    /** Das Gebiet in `areas` (Grenze für die Zuordnung). */
+    areaDoc: v.id("areas"),
+    bbox: v.array(v.number()),
+    /** statsJobs.run, zu dem diese Zeile gehört. */
+    run: v.number(),
+    /** Gewählt beim Anlegen der Zeile (Auswahl ändern beginnt einen neuen Lauf); fehlt bei älteren Ständen. */
+    selected: v.optional(v.boolean()),
+    done: v.number(),
+    blocked: v.number(),
+    /** Häuser mit Mittelpunkt im Gebiet, aus dem Gebäude-Cache; fehlt, bis einmal gezählt wurde. */
+    houses: v.optional(v.number()),
+    /** Kacheln des Gebiets, die beim Zählen im Cache waren, und alle Kacheln des Gebiets. */
+    cellsCounted: v.number(),
+    cellsTotal: v.number(),
+    /** Zwischenstand der laufenden Zählung (statsJobs.seq). */
+    countSeq: v.optional(v.number()),
+    housesNext: v.optional(v.number()),
+    cellsNext: v.optional(v.number()),
+  })
+    .index("by_campaign", ["campaignId"])
+    .index("by_campaign_area", ["campaignId", "areaId"]),
+
+  /** Hintergrund-Zählungen der Statistik je Aktion: Markierungen zuordnen, Häuser zählen. */
+  statsJobs: defineTable({
+    campaignId: v.id("campaigns"),
+    /** Laufnummer: steigt, wenn sich Gebiete oder Auswahl ändern (dann wird neu zugeordnet). */
+    run: v.number(),
+    /** Gebiete samt Auswahl, für die die Zeilen angelegt sind (stats.keyOf); fehlt bei älteren Ständen. */
+    areaKey: v.optional(v.string()),
+    /** Zuordnen älterer Markierungen: Cursor der Seite, null = fertig. */
+    marksCursor: v.union(v.string(), v.null()),
+    marksDone: v.boolean(),
+    /** Häuser zählen: Laufnummer und noch offene Kacheln (durch Leerzeichen getrennt). */
+    seq: v.number(),
+    cells: v.string(),
+    /** Gebiete, deren Häuser gezählt werden (areaId, durch Leerzeichen getrennt). */
+    targets: v.string(),
+    countedAt: v.number(),
+  }).index("by_campaign", ["campaignId"]),
 
   /** Notiz eines Helfers an einem Haus (convex/notes.ts); das Haus erscheint dann blau. */
   notes: defineTable({

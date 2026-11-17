@@ -10,6 +10,7 @@ import { BuildingMap, type LoadState, type MapArea, type MapControls, type Mark,
 import { NoteSheet } from "./NoteSheet";
 import { ShareSheet } from "./ShareSheet";
 import { AreaEditBar, PlaceDialog, useAreaEditor } from "./AreaEditor";
+import { StatsSheet } from "./StatsSheet";
 import type { BBox } from "../../convex/osm";
 import { LogoMark } from "./Logo";
 import { adminPath, campaignPath, navigate, viewPath } from "../lib/router";
@@ -103,6 +104,7 @@ export function CampaignPage({ slug, isNew, viewLink, adminKey }: Props) {
   // Beim Wechsel auf die saubere Adresse ändert sich isNew; die Begrüßung soll bleiben.
   const [welcome] = useState(isNew);
   const [shareOpen, setShareOpen] = useState(isNew);
+  const [statsOpen, setStatsOpen] = useState(false);
   const [loadState, setLoadState] = useState<LoadState>("idle");
   const [toast, setToast] = useState<Toast | null>(null);
   const toastTimer = useRef<ReturnType<typeof setTimeout> | null>(null);
@@ -291,35 +293,41 @@ export function CampaignPage({ slug, isNew, viewLink, adminKey }: Props) {
               {campaign?.placeLabel ?? "Lädt …"}
             </p>
           </div>
-          <div
-            className="flex shrink-0 items-center gap-1.5 rounded-xl bg-sun px-2.5 py-1.5 text-ink"
-            title="Häuser mit Flyer"
-            aria-live="polite"
+          {/* Zähler: öffnet die Statistik je Gebiet. */}
+          <button
+            type="button"
+            onClick={() => setStatsOpen(true)}
+            className="flex shrink-0 items-center rounded-xl transition hover:brightness-95 focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-white"
+            aria-label={`Statistik: ${count} Häuser mit Flyer${blocked > 0 ? `, ${blocked} nicht möglich` : ""}`}
+            title="Statistik"
+            data-testid="open-stats"
           >
-            <svg viewBox="0 0 24 24" className="size-4" fill="currentColor" aria-hidden="true">
-              <path d="M3 11 12 3l9 8v9a1 1 0 0 1-1 1H4a1 1 0 0 1-1-1Z" />
-            </svg>
-            <span className="text-sm font-semibold tabular-nums" data-testid="count">
-              {count}
-            </span>
-            <span className="sr-only">Häuser mit Flyer</span>
-          </div>
-          {blocked > 0 && (
-            <div
-              className="-ml-1.5 flex shrink-0 items-center gap-1 rounded-xl bg-blocked px-2 py-1.5 text-ink"
-              title="Einwerfen nicht möglich"
+            <span
+              className="flex shrink-0 items-center gap-1.5 rounded-xl bg-sun px-2.5 py-1.5 text-ink"
               aria-live="polite"
             >
-              <svg viewBox="0 0 24 24" className="size-3.5" fill="none" stroke="currentColor" strokeWidth="2.5" aria-hidden="true">
-                <circle cx="12" cy="12" r="8" />
-                <path d="m6.5 6.5 11 11" />
+              <svg viewBox="0 0 24 24" className="size-4" fill="currentColor" aria-hidden="true">
+                <path d="M3 11 12 3l9 8v9a1 1 0 0 1-1 1H4a1 1 0 0 1-1-1Z" />
               </svg>
-              <span className="text-sm font-semibold tabular-nums" data-testid="blocked-count">
-                {blocked}
+              <span className="text-sm font-semibold tabular-nums" data-testid="count">
+                {count}
               </span>
-              <span className="sr-only">Häuser, bei denen Einwerfen nicht möglich war</span>
-            </div>
-          )}
+            </span>
+            {blocked > 0 && (
+              <span
+                className="ml-1.5 flex shrink-0 items-center gap-1 rounded-xl bg-blocked px-2 py-1.5 text-ink"
+                aria-live="polite"
+              >
+                <svg viewBox="0 0 24 24" className="size-3.5" fill="none" stroke="currentColor" strokeWidth="2.5" aria-hidden="true">
+                  <circle cx="12" cy="12" r="8" />
+                  <path d="m6.5 6.5 11 11" />
+                </svg>
+                <span className="text-sm font-semibold tabular-nums" data-testid="blocked-count">
+                  {blocked}
+                </span>
+              </span>
+            )}
+          </button>
           {adminKey && (
             <button
               type="button"
@@ -414,6 +422,18 @@ export function CampaignPage({ slug, isNew, viewLink, adminKey }: Props) {
           onClose={() => setShareOpen(false)}
           adminUrl={adminKey ? `${location.origin}${adminPath(adminKey)}` : undefined}
           onChooseAreas={adminKey ? startEditAreas : undefined}
+        />
+      )}
+      {statsOpen && (
+        <StatsSheet
+          slug={slug}
+          canRefresh={!viewOnly}
+          areas={areas}
+          onShow={(bbox) => {
+            setStatsOpen(false);
+            controls.current?.showBBox(bbox);
+          }}
+          onClose={() => setStatsOpen(false)}
         />
       )}
       {placeOpen && adminKey && (
