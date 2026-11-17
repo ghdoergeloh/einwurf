@@ -432,10 +432,6 @@ try {
   await pp.evaluate((c) => window.__einwurfMap.jumpTo({ center: [c.lng, c.lat] }), FAR);
   await pp.waitForTimeout(1200);
   assert.equal(await statusAt(pp, cx, cy), null, "Haus noch nicht geladen");
-  // Notiz an einem Haus, das noch lädt: Hinweis statt Dialog
-  await pp.mouse.click(cx, cy, { button: "right" });
-  await pp.getByText("Dieses Haus lädt noch.", { exact: false }).waitFor({ timeout: 5000 });
-  assert.equal(await pp.getByRole("dialog").count(), 0, "kein Notiz-Dialog auf Platzhalter");
   const tapShape = () =>
     pp.evaluate(([x, y]) => {
       const m = window.__einwurfMap;
@@ -462,6 +458,10 @@ try {
     const q = m.project([c.lng + 3 * 0.0004, c.lat + 3 * 0.0003]);
     return [q.x + r.left, q.y + r.top];
   }, FAR);
+  // Notiz an einem hellgrauen Platzhalter: Hinweis statt Dialog
+  await pp.mouse.click(gap[0], gap[1], { button: "right" });
+  await pp.getByText("Dieses Haus lädt noch.", { exact: false }).waitFor({ timeout: 5000 });
+  assert.equal(await pp.getByRole("dialog").count(), 0, "kein Notiz-Dialog auf Platzhalter");
   await pp.mouse.click(gap[0], gap[1]);
   await pp.getByText("An dieser Stelle gibt es kein Haus zum Markieren.").waitFor({ timeout: 5000 });
   overpassDelayMs = 0;
