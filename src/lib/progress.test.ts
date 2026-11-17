@@ -11,8 +11,9 @@ describe("Fortschritt je Gebiet", () => {
     expect(progressOf({ houses: 100, done: 29, blocked: 0, complete: true }).percent).toBe(29);
     for (let of = 1; of <= 1000; of++)
       for (let n = 0; n <= of; n++) {
-        const want = Math.floor((n * 100) / of);
-        if (progressOf({ houses: of, done: n, blocked: 0, complete: true }).percent !== want) throw new Error(`${n}/${of}`);
+        // Abgerundet heißt: p ≤ n/of·100 < p + 1, in ganzen Zahlen geprüft.
+        const p = progressOf({ houses: of, done: n, blocked: 0, complete: true }).percent!;
+        if (!(p * of <= n * 100 && n * 100 < (p + 1) * of)) throw new Error(`${n}/${of} → ${p}`);
       }
   });
   test("100 % erst, wenn wirklich alles erreicht ist", () => {
