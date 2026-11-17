@@ -5,7 +5,8 @@ import { api } from "../../convex/_generated/api";
 import { markCellOf } from "../../convex/cells";
 import { countDelta, statusOf, type HouseStatus } from "../../convex/status";
 import { decodeBuildings } from "../../convex/osm";
-import { BuildingMap, type LoadState, type MapControls, type Mark } from "./BuildingMap";
+import { BuildingMap, type LoadState, type MapControls, type Mark, type Note, type NoteTarget } from "./BuildingMap";
+import { NoteSheet } from "./NoteSheet";
 import { ShareSheet } from "./ShareSheet";
 import { LogoMark } from "./Logo";
 import { campaignPath, navigate, viewPath } from "../lib/router";
@@ -45,6 +46,14 @@ export function CampaignPage({ slug, isNew, viewLink }: Props) {
       [cells, slug],
     ),
   );
+  // Notizen ebenso je Zelle, getrennt abonniert: Eine neue Notiz schickt die Markierungen nicht neu.
+  const noteResults = useQueries(
+    useMemo(
+      () =>
+        Object.fromEntries((cells ?? []).map((cell) => [cell, { query: api.notes.inCell, args: { slug, cell } }])),
+      [cells, slug],
+    ),
+  );
   const loadedMarkCells = useMemo(
     () => new Set(Object.entries(cellResults).filter(([, r]) => Array.isArray(r)).map(([cell]) => cell)),
     [cellResults],
@@ -52,6 +61,10 @@ export function CampaignPage({ slug, isNew, viewLink }: Props) {
   const marks = useMemo<Mark[]>(
     () => Object.values(cellResults).flatMap((r) => (Array.isArray(r) ? (r as Mark[]) : [])),
     [cellResults],
+  );
+  const notes = useMemo<Note[]>(
+    () => Object.values(noteResults).flatMap((r) => (Array.isArray(r) ? (r as Note[]) : [])),
+    [noteResults],
   );
   const connection = useConvexConnectionState();
   const offline = connection.hasEverConnected && !connection.isWebSocketConnected;
@@ -63,6 +76,7 @@ export function CampaignPage({ slug, isNew, viewLink }: Props) {
   const [toast, setToast] = useState<Toast | null>(null);
   const toastTimer = useRef<ReturnType<typeof setTimeout> | null>(null);
   const controls = useRef<MapControls | null>(null);
+  const [noteTarget, setNoteTarget] = useState<NoteTarget | null>(null);
 
   const setMark = useMutation(api.marks.set).withOptimisticUpdate((store, args) => {
     const cell = markCellOf(args.center[0], args.center[1]);
@@ -84,6 +98,20 @@ export function CampaignPage({ slug, isNew, viewLink }: Props) {
         markCount: Math.max(0, c.markCount + d.done),
         blockedCount: Math.max(0, c.blockedCount + d.blocked),
       });
+  });
+
+  const setNoteMutation = useMutation(api.notes.set).withOptimisticUpdate((store, args) => {
+    const cell = markCellOf(args.center[0], args.center[1]);
+    const list = store.getQuery(api.notes.inCell, { slug: args.slug, cell });
+    if (list === undefined) return;
+    const note = { osmId: args.osmId, center: args.center, text: args.text.trim(), updatedAt: Date.now(), pending: true };
+    store.setQuery(api.notes.inCell, { slug: args.slug, cell }, [...list.filter((n) => n.osmId !== args.osmId), note]);
+  });
+  const removeNoteMutation = useMutation(api.notes.remove).withOptimisticUpdate((store, args) => {
+    for (const { args: q, value } of store.getAllQueries(api.notes.inCell)) {
+      if (q.slug !== args.slug || !value?.some((n) => n.osmId === args.osmId)) continue;
+      store.setQuery(api.notes.inCell, q, value.filter((n) => n.osmId !== args.osmId));
+    }
   });
 
   useEffect(() => {
@@ -140,6 +168,16 @@ export function CampaignPage({ slug, isNew, viewLink }: Props) {
     [setMark, slug, showToast],
   );
 
+  const saveFailed = useCallback(
+    (err: unknown) =>
+      showToast(
+        err instanceof ConvexError && typeof err.data === "string" ? err.data : "Notiz konnte nicht gespeichert werden.",
+      ),
+    [showToast],
+  );
+  const closeNote = useCallback(() => setNoteTarget(null), []);
+  const openNote = noteTarget && notes.find((n) => n.osmId === noteTarget.osmId);
+
   const onConflict = useCallback(
     () => showToast("Ein Haus wurde inzwischen von jemand anderem geändert. Dieser Stand gilt."),
     [showToast],
@@ -163,6 +201,8 @@ export function CampaignPage({ slug, isNew, viewLink }: Props) {
           center={campaign.center}
           bbox={campaign.bbox}
           marks={marks}
+          notes={notes}
+          onNoteRequest={setNoteTarget}
           onCellsChange={setCells}
           onToggle={onToggle}
           onConflict={onConflict}
@@ -252,6 +292,26 @@ export function CampaignPage({ slug, isNew, viewLink }: Props) {
           onEdit={() => setMode("edit")}
         />
       </div>
+
+      {noteTarget && (
+        <NoteSheet
+          key={noteTarget.osmId}
+          readOnly={readOnly}
+          houseNumber={noteTarget.houseNumber}
+          note={openNote ? { text: openNote.text, updatedAt: openNote.updatedAt, pending: openNote.pending } : null}
+          onSave={(text, expectedUpdatedAt) => {
+            setNoteMutation({ slug, osmId: noteTarget.osmId, center: noteTarget.center, text, expectedUpdatedAt }).catch(
+              saveFailed,
+            );
+            closeNote();
+          }}
+          onDelete={(expectedUpdatedAt) => {
+            removeNoteMutation({ slug, osmId: noteTarget.osmId, expectedUpdatedAt }).catch(saveFailed);
+            closeNote();
+          }}
+          onClose={closeNote}
+        />
+      )}
 
       {shareOpen && campaign && (
         <ShareSheet
@@ -409,7 +469,7 @@ function StatusPill({
         <EyeIcon className="size-5 shrink-0" />
         <span>
           Nur ansehen
-          <span className="block text-white/60">Gelb: Flyer drin. Dunkelgelb: nicht möglich. Der Stand ist live.</span>
+          <span className="block text-white/60">Gelb: Flyer drin. Dunkelgelb: nicht möglich. Blau: Notiz, antippen zum Lesen. Der Stand ist live.</span>
         </span>
       </div>
     );
@@ -419,7 +479,7 @@ function StatusPill({
         <EyeIcon className="size-5 shrink-0" />
         <span>
           Ansehen-Modus
-          <span className="block text-white/60">Antippen markiert nichts.</span>
+          <span className="block text-white/60">Antippen markiert nichts, blaue Häuser zeigen ihre Notiz.</span>
         </span>
         <button type="button" onClick={onEdit} className="shrink-0 rounded-full bg-sun px-3 py-1 text-xs font-semibold text-ink">
           Bearbeiten
@@ -431,12 +491,14 @@ function StatusPill({
       <span className="flex shrink-0 flex-col gap-1" aria-hidden="true">
         <span className="size-3 rounded-[3px] bg-sun" />
         <span className="size-3 rounded-[3px] bg-blocked" />
+        <span className="size-3 rounded-[3px] bg-note" />
       </span>
       <span>
         Haus antippen, wenn der Flyer drin ist.
         <span className="block text-white/60">
           Kurz danach nochmal: nicht möglich (z. B. „Keine Werbung“). Nochmal: wieder offen.
         </span>
+        <span className="block text-white/60">Lange drücken oder Rechtsklick: Notiz (Haus wird blau).</span>
       </span>
     </div>
   );

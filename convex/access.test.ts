@@ -16,6 +16,7 @@ async function setup() {
   const t = convexTest(schema, modules);
   await t.mutation(api.campaigns.create, { ...base, slug: SLUG, viewKey: VIEW });
   await t.mutation(api.marks.set, { slug: SLUG, osmId: "way/1", status: "done", center: HOUSE });
+  await t.mutation(api.notes.set, { slug: SLUG, osmId: "way/1", center: HOUSE, text: "Kasten 3 leer" });
   return t;
 }
 
@@ -41,6 +42,11 @@ describe("Ansehen-Schlüssel", () => {
     expect(await t.query(api.marks.inCell, { slug: VIEW, cell: CELL })).toEqual([
       { osmId: "way/1", center: HOUSE, status: "done" },
     ]);
+  });
+
+  test("sieht die Notizen live", async () => {
+    const t = await setup();
+    expect(await t.query(api.notes.inCell, { slug: VIEW, cell: CELL })).toMatchObject([{ osmId: "way/1", text: "Kasten 3 leer" }]);
   });
 
   test("kann nichts ändern", async () => {
@@ -158,6 +164,8 @@ const MUTATIONS_REJECTING_VIEW_KEY: Record<string, (t: T) => Promise<unknown>> =
   "marks:set": (t) => t.mutation(api.marks.set, { slug: VIEW, osmId: "way/1", status: "none", center: HOUSE }),
   "buildings:prefetch": (t) => t.mutation(api.buildings.prefetch, { slug: VIEW }),
   "campaigns:ensureViewKey": (t) => t.mutation(api.campaigns.ensureViewKey, { slug: VIEW, viewKey: "ZweiterSchluesselXYZ12" }),
+  "notes:set": (t) => t.mutation(api.notes.set, { slug: VIEW, osmId: "way/2", center: HOUSE, text: "von außen" }),
+  "notes:remove": (t) => t.mutation(api.notes.remove, { slug: VIEW, osmId: "way/1" }),
 };
 /** Öffentliche Mutationen, die keine bestehende Aktion ändern. */
 const MUTATIONS_WITHOUT_CAMPAIGN = ["campaigns:create"];
@@ -167,6 +175,7 @@ const ACTIONS_READ_ONLY = ["buildings:load"];
 const QUERIES: Record<string, (t: T, key: string) => Promise<unknown>> = {
   "campaigns:get": (t, key) => t.query(api.campaigns.get, { slug: key }),
   "marks:inCell": (t, key) => t.query(api.marks.inCell, { slug: key, cell: CELL }),
+  "notes:inCell": (t, key) => t.query(api.notes.inCell, { slug: key, cell: CELL }),
   "buildings:prefetchStatus": (t, key) => t.query(api.buildings.prefetchStatus, { slug: key }),
 };
 
@@ -176,6 +185,7 @@ const snapshot = (t: T) =>
     JSON.stringify([
       await ctx.db.query("campaigns").collect(),
       await ctx.db.query("marks").collect(),
+      await ctx.db.query("notes").collect(),
       await ctx.db.query("prefetchJobs").collect(),
     ]),
   );
