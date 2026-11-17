@@ -67,7 +67,13 @@ try {
   // Nur einen kleinen Ortsteil wählen (echte Grenzen aus OSM).
   await p.getByRole("button", { name: /Ortsteile festlegen/ }).click();
   const areas = p.getByTestId("areas-sheet");
-  await areas.getByLabel(AREA).waitFor({ timeout: 180_000 });
+  // Gebiete kommen von Overpass über Convex (zwei Abfragen, bis zu drei Versuche); Fehler gleich melden.
+  await Promise.race([
+    areas.getByLabel(AREA).waitFor({ timeout: 480_000 }),
+    areas.getByText("konnten nicht geladen werden").waitFor({ timeout: 480_000 }).then(() => {
+      throw new Error("Ortsteile konnten nicht geladen werden (Overpass vom Convex-Backend aus)");
+    }),
+  ]);
   log("Ortsteile:", (await areas.getByRole("checkbox").count()));
   await areas.getByRole("button", { name: "Keine" }).click();
   await areas.getByLabel(AREA).check();
@@ -90,7 +96,16 @@ try {
   await stats.getByRole("button", { name: "Fertig" }).click();
   await p.getByRole("button", { name: "Gebiete" }).click();
   await areas.getByRole("button", { name: `${AREA} auf der Karte zeigen` }).click();
-  await p.evaluate(() => window.__einwurfMap.jumpTo({ zoom: 17.5 }));
+  // Hineinzoomen bis die Häuser antippbar sind (die Karte selbst ist im Preview-Build nicht erreichbar).
+  const mapBox = await p.getByTestId("map").boundingBox();
+  const cx = mapBox.x + mapBox.width / 2;
+  const cy = mapBox.y + mapBox.height / 2;
+  await p.mouse.move(cx, cy);
+  for (let i = 0; i < 8; i++) {
+    await p.mouse.wheel(0, -300);
+    await p.waitForTimeout(250);
+  }
+  await p.getByText("Haus antippen, wenn der Flyer drin ist.").waitFor({ timeout: 180_000 });
 
   // Zweites Gerät mit dem Link zum Mitmachen öffnet die Statistik.
   const b = await browser.newContext(phone);
@@ -107,30 +122,19 @@ try {
   };
   const before = await counts();
 
-  // Ein offenes Haus nahe der Bildmitte beim Admin antippen.
+  // Ein Haus beim Admin finden: Punkte um die Bildmitte antippen, bis der Zähler oben steigt.
+  const adminCount = async () => Number(await p.getByTestId("count").textContent());
+  const start = await adminCount();
   const target = await (async () => {
-    const until = Date.now() + 60_000;
-    while (Date.now() < until) {
-      const pt = await p.evaluate(() => {
-        const m = window.__einwurfMap;
-        const r = m.getCanvasContainer().getBoundingClientRect();
-        const c = [r.width / 2, r.height / 2];
-        const fs = m.queryRenderedFeatures([[c[0] - 120, c[1] - 160], [c[0] + 120, c[1] + 160]], { layers: ["buildings-fill"] });
-        for (const f of fs) {
-          if ((m.getFeatureState({ source: "buildings", id: f.properties.osmId }).status ?? "none") !== "none") continue;
-          const ring = f.geometry.type === "Polygon" ? f.geometry.coordinates[0] : f.geometry.coordinates[0][0];
-          const lng = ring.reduce((s, q) => s + q[0], 0) / ring.length;
-          const lat = ring.reduce((s, q) => s + q[1], 0) / ring.length;
-          const q = m.project([lng, lat]);
-          const hit = m.queryRenderedFeatures([q.x, q.y], { layers: ["buildings-fill"] })[0];
-          if (hit?.properties.osmId === f.properties.osmId) return [q.x + r.left, q.y + r.top];
+    for (let r = 0; r <= 6; r++)
+      for (let dx = -r; dx <= r; dx++)
+        for (const dy of r === 0 ? [0] : Math.abs(dx) === r ? [...Array(2 * r + 1).keys()].map((k) => k - r) : [-r, r]) {
+          const pt = [cx + dx * 30, cy + dy * 30];
+          await p.mouse.click(...pt);
+          await p.waitForTimeout(1200);
+          if ((await adminCount()) > start) return pt;
         }
-        return null;
-      });
-      if (pt) return pt;
-      await p.waitForTimeout(1000);
-    }
-    throw new Error("Kein offenes Haus gefunden");
+    throw new Error("Kein Haus nahe der Bildmitte gefunden");
   })();
   const waitCounts = async (want, msg) => {
     const until = Date.now() + 15_000;
@@ -141,7 +145,6 @@ try {
     }
     assert.deepEqual(got, want, msg);
   };
-  await p.mouse.click(...target);
   await waitCounts({ done: before.done + 1, blocked: before.blocked }, "gelb live beim zweiten Gerät");
   await p.waitForTimeout(700);
   await p.mouse.click(...target);
