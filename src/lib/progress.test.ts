@@ -1,5 +1,5 @@
 import { describe, expect, test } from "vitest";
-import { progressOf, sumProgress } from "./progress";
+import { progressOf, sumProgress, wantsRefresh } from "./progress";
 
 describe("Fortschritt je Gebiet", () => {
   test("erreicht = (gelb + dunkelgelb) / alle Häuser, abgerundet", () => {
@@ -41,5 +41,11 @@ describe("Fortschritt je Gebiet", () => {
     ]);
     expect(partial).toMatchObject({ houses: 100, done: 10, percent: 10, provisional: true });
     expect(sumProgress([]).percent).toBeNull();
+  });
+  test("Neu zählen nur, wer ändern darf, und nur wenn nötig", () => {
+    expect(wantsRefresh({ canRefresh: false, needsSetup: true, provisional: true })).toBe(false);
+    expect(wantsRefresh({ canRefresh: true, needsSetup: true, provisional: false })).toBe(true);
+    expect(wantsRefresh({ canRefresh: true, needsSetup: false, provisional: true })).toBe(true);
+    expect(wantsRefresh({ canRefresh: true, needsSetup: false, provisional: false })).toBe(false);
   });
 });

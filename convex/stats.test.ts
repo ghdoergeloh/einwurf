@@ -286,6 +286,13 @@ describe("Statistik je Gebiet", () => {
     const mark = await t.run(async (ctx) => (await ctx.db.query("marks").collect())[0]);
     expect(mark.areaRun).toBeUndefined();
     expect(await stats(t)).toMatchObject({ areas: null, needsSetup: true });
+    // Der Ansehen-Link darf die Statistik nicht anlegen (das wäre eine Änderung).
+    await t.run(async (ctx) => {
+      const c = (await ctx.db.query("campaigns").collect())[0];
+      await ctx.db.patch(c._id, { viewKey: VIEW_KEY });
+    });
+    await expect(t.mutation(api.stats.refresh, { slug: VIEW_KEY })).rejects.toThrow(/nichts ändern/);
+    expect(await t.run(async (ctx) => (await ctx.db.query("statsJobs").collect()).length)).toBe(0);
     await t.mutation(api.stats.refresh, { slug: SLUG });
     await settle(t);
     expect(await row(t, "w")).toMatchObject({ done: 1 });

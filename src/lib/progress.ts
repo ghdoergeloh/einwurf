@@ -54,3 +54,11 @@ export function sumProgress(rows: Counts[]): Progress {
     complete: rows.length > 0 && rows.every((r) => r.complete),
   });
 }
+
+/**
+ * Soll das Panel die Statistik anlegen bzw. neu zählen lassen? Nur, wer ändern darf (nicht der
+ * Ansehen-Link), und nur wenn sie fehlt oder vorläufig ist.
+ */
+export function wantsRefresh({ canRefresh, needsSetup, provisional }: { canRefresh: boolean; needsSetup: boolean; provisional: boolean }) {
+  return canRefresh && (needsSetup || provisional);
+}

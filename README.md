@@ -59,12 +59,13 @@ Convex speichert je markiertem Haus nur die OSM-ID und den Mittelpunkt, einsorti
 
 | Link | Rolle | Was geht |
 | --- | --- | --- |
-| `/v/…` zum Mitmachen | edit | Häuser markieren, teilen, Gebiet vorladen |
-| `/a/…` nur ansehen | view | Karte, Markierungen und Notizen live sehen (Tipp auf ein blaues Haus zeigt die Notiz), sonst nichts |
+| `/admin/…` für den Organisator | admin | alles, was der Link zum Mitmachen kann, dazu die Gebietsauswahl |
+| `/v/…` zum Mitmachen | edit | Häuser markieren, teilen, Gebiet vorladen, Statistik |
+| `/a/…` nur ansehen | view | Karte, Markierungen, Notizen und Statistik live sehen (Tipp auf ein blaues Haus zeigt die Notiz), sonst nichts |
 
 Der Teilen-Dialog zeigt beide Links getrennt („Zum Mitmachen“ und „Nur ansehen“). Ältere Aktionen bekommen ihren Ansehen-Link, sobald jemand mit dem Link zum Mitmachen den Teilen-Dialog öffnet. Die beiden Schlüssel sind unabhängig voneinander zufällig, der eine lässt sich aus dem anderen nicht ableiten.
 
-Durchgesetzt wird das im Backend (`convex/access.ts`): Jede Mutation an einer bestehenden Aktion verlangt mindestens die Rolle edit, mit dem Ansehen-Schlüssel gehen nur lesende Queries und das Laden der Häuser (im selben Kontingent wie die Aktion). Keine Query, die mit dem Ansehen-Schlüssel aufrufbar ist, liefert den Schlüssel zum Mitmachen. Ein Test (`convex/access.test.ts`) prüft jede öffentliche Mutation, Action und Query; kommt eine neue dazu, schlägt er fehl, bis ihre Rechte dort geprüft sind. Für eine dritte Rolle admin (Admin-Link, Gebietsauswahl) ist die Prüfung schon vorbereitet.
+Durchgesetzt wird das im Backend (`convex/access.ts`): Jede Mutation an einer bestehenden Aktion verlangt mindestens die Rolle edit, mit dem Ansehen-Schlüssel gehen nur lesende Queries und das Laden der Häuser (im selben Kontingent wie die Aktion). Keine Query, die mit dem Ansehen-Schlüssel aufrufbar ist, liefert den Schlüssel zum Mitmachen. Ein Test (`convex/access.test.ts`) prüft jede öffentliche Mutation, Action und Query; kommt eine neue dazu, schlägt er fehl, bis ihre Rechte dort geprüft sind. Die Gebietsauswahl verlangt die Rolle admin.
 
 Mit dem Link zum Mitmachen gibt es oben rechts den Umschalter **Bearbeiten / Ansehen**. Im Modus „Ansehen“ verhält sich die Karte wie beim Ansehen-Link, etwa damit beim Schieben in der Tasche oder beim Zeigen nichts markiert wird. Ein Tipp auf ein Haus zeigt dann nur einen Hinweis; ein Tipp oder langes Drücken auf ein blaues Haus zeigt seine Notiz zum Lesen (wie beim Ansehen-Link), ohne Bearbeiten. Das Handy merkt sich den Modus je Aktion; Standard ist „Bearbeiten“. Schieben, Zoomen, Doppeltipp und Standort funktionieren in beiden Ansichten.
 

@@ -198,6 +198,8 @@ const snapshot = (t: T) =>
       await ctx.db.query("prefetchJobs").collect(),
       await ctx.db.query("areas").collect(),
       await ctx.db.query("areaSets").collect(),
+      await ctx.db.query("areaStats").collect(),
+      await ctx.db.query("statsJobs").collect(),
     ]),
   );
 

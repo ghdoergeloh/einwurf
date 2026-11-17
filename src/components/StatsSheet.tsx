@@ -2,7 +2,7 @@ import { useEffect, useRef } from "react";
 import { useMutation, useQuery } from "convex/react";
 import { api } from "../../convex/_generated/api";
 import { bboxOf } from "../../convex/areaGeo";
-import { progressOf, sumProgress, type Progress } from "../lib/progress";
+import { progressOf, sumProgress, wantsRefresh, type Progress } from "../lib/progress";
 import type { MapArea } from "./BuildingMap";
 
 interface Props {
@@ -41,7 +41,7 @@ export function StatsSheet({ slug, canRefresh, areas, onShow, onClose }: Props) 
   const provisional = !!stats?.areas?.rows.some((r) => r.target && !r.complete);
   const needsSetup = !!stats?.needsSetup;
   useEffect(() => {
-    if (canRefresh && (provisional || needsSetup)) refresh({ slug }).catch(() => {});
+    if (wantsRefresh({ canRefresh, needsSetup, provisional })) refresh({ slug }).catch(() => {});
     // Nur beim Öffnen und wenn es vorläufig wird, nicht bei jedem Tipp.
   }, [canRefresh, provisional, needsSetup, refresh, slug]);
 
