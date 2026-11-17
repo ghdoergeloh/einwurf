@@ -260,6 +260,15 @@ try {
 
   assert.deepEqual(errors, [], "keine Fehler in der Konsole");
   console.log("OK");
+} catch (e) {
+  // Diagnose: Bildschirm, Statuszeile und Fehler aller offenen Seiten
+  for (const [i, page] of browser.contexts().flatMap((c) => c.pages()).entries()) {
+    await shot(page, `fehler-${i}`).catch(() => {});
+    const status = await page.locator("[role=status], [role=alert]").allTextContents().catch(() => []);
+    console.error(`Seite ${i}: ${page.url()} – ${status.join(" | ")}`);
+  }
+  console.error("Konsole:", errors);
+  throw e;
 } finally {
   await browser.close();
 }
