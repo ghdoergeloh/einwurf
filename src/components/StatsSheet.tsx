@@ -118,28 +118,32 @@ export function StatsSheet({ slug, canRefresh, areas, onShow, onClose }: Props) 
 
           {stats?.areas && (
             <>
-              <section className="rounded-2xl bg-paper p-4" data-testid="stats-sum" aria-label="Alle Zielgebiete">
-                <div className="flex items-baseline justify-between gap-3">
-                  <h3 className="text-sm font-medium">
-                    {stats.areas.noneSelected ? "Alle Gebiete" : targets.length === 1 ? targets[0].name : `Alle ${targets.length} Zielgebiete`}
-                  </h3>
-                  <Percent p={sum} large />
-                </div>
-                <Bar p={sum} />
-                <Numbers p={sum} />
-              </section>
-
-              {stats.areas.noneSelected && (
-                <p className="mt-3 text-xs text-muted">Keine Gebiete gewählt: Gezählt werden alle Gebiete.</p>
+              {stats.areas.noneSelected ? (
+                <>
+                  <Totals done={stats.total.done} blocked={stats.total.blocked} />
+                  <p className="mt-3 text-sm text-muted">
+                    Keine Ortsteile gewählt: Es gilt der ganze Ort. Prozente gibt es, sobald der Organisator Ortsteile wählt.
+                  </p>
+                </>
+              ) : (
+                <section className="rounded-2xl bg-paper p-4" data-testid="stats-sum" aria-label="Alle Zielgebiete">
+                  <div className="flex items-baseline justify-between gap-3">
+                    <h3 className="text-sm font-medium">{targets.length === 1 ? targets[0].name : `Alle ${targets.length} Zielgebiete`}</h3>
+                    <Percent p={sum} large />
+                  </div>
+                  <Bar p={sum} />
+                  <Numbers p={sum} />
+                </section>
               )}
-              {outside > 0 && !stats.areas.assigning && (
+
+              {outside > 0 && !stats.areas.assigning && !stats.areas.noneSelected && (
                 <p className="mt-3 text-xs text-muted">
                   {outside} {outside === 1 ? "Markierung liegt" : "Markierungen liegen"} außerhalb der Gebiete. Die Zähler oben zählen sie mit, hier nicht.
                 </p>
               )}
               {stats.areas.assigning && (
                 <p className="mt-3 text-xs text-muted" role="status">
-                  Ältere Markierungen werden den Gebieten zugeordnet …
+                  Markierungen werden den Gebieten zugeordnet …
                 </p>
               )}
 

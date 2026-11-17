@@ -1,10 +1,10 @@
 // @vitest-environment edge-runtime
 import { convexTest } from "convex-test";
 import { afterEach, beforeEach, describe, expect, test, vi } from "vitest";
-import { api } from "./_generated/api";
+import { api, internal } from "./_generated/api";
 import schema from "./schema";
 import { BUILDINGS_FORMAT, cellKeyOf, encodeBuildings, type BuildingFeature } from "./osm";
-import { bboxOf, encodeCells, touchedCells, type AreaGeometry } from "./areaGeo";
+import { bboxOf, boundaryTileOf, encodeCells, touchedCells, type AreaGeometry } from "./areaGeo";
 
 const modules = import.meta.glob("./**/*.ts");
 const SLUG = "AbCdEfGhIjKlMnOpQrStUv";
@@ -252,6 +252,39 @@ describe("Statistik je Gebiet", () => {
     expect((await row(t, "e")).target).toBe(false);
     expect((await row(t, "f")).target).toBe(true);
     expect((await row(t, "f")).houses).toBe(0);
+  });
+
+  test("alle abgewählt: es gilt der ganze Ort, kein Ortsteil ist Ziel (eingeklappt, ohne Häuserzahl)", async () => {
+    const t = convexTest(schema, modules);
+    await storeHouses(t, grid([7.0, 50.7, 7.02, 50.71]), [WEST, EAST]);
+    await setup(t, [["w", "West", WEST], ["e", "Ost", EAST]]);
+    await settle(t);
+    await t.mutation(api.areas.select, { adminKey: ADMIN, ids: ["w", "e"], selected: false });
+    await settle(t);
+    await tap(t, "way/1", [7.005, 50.705], "done");
+    const s = (await stats(t))!;
+    expect(s.areas!.noneSelected).toBe(true);
+    expect(s.areas!.rows.map((r) => [r.id, r.target, r.houses])).toEqual([["e", false, null], ["w", false, null]]);
+    expect(await row(t, "w")).toMatchObject({ done: 1 });
+    expect(s.total).toEqual({ done: 1, blocked: 0 });
+  });
+
+  test("Ortsteil an der Adresse beim Anlegen vorgewählt: Statistik steht sofort, ohne refresh", async () => {
+    const t = convexTest(schema, modules);
+    await storeHouses(t, grid([7.0, 50.7, SPLIT, 50.71]), [WEST]);
+    const campaignId = await setup(t, []);
+    await t.run(async (ctx) => {
+      await ctx.db.insert("osmAreas", {
+        areaId: "w", unitId: 1, name: "West", geometry: JSON.stringify(WEST), bbox: bboxOf(WEST),
+        labelAt: [7.0, 50.7], cells: encodeCells(touchedCells(WEST)), fetchedAt: Date.now(),
+      });
+      await ctx.db.insert("boundaryTiles", { tile: boundaryTileOf(7.005, 50.705), unitIds: [1], fetchedAt: Date.now() });
+    });
+    await t.mutation(internal.areas.selectAt, { campaignId, point: [7.005, 50.705] });
+    await settle(t);
+    const s = (await stats(t))!;
+    expect(s.needsSetup).toBe(false);
+    expect(await row(t, "w")).toMatchObject({ target: true, houses: grid([7.0, 50.7, SPLIT, 50.71]).length, complete: true });
   });
 
   test("lesbar mit Admin-, Bearbeiten- und Ansehen-Schlüssel, nicht mit unbekanntem", async () => {

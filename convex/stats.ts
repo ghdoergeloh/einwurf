@@ -148,16 +148,16 @@ async function resetAreaStats(ctx: MutationCtx, campaignId: Id<"campaigns">) {
 }
 
 /**
- * Häuser der Zielgebiete neu zählen: der gewählten, oder aller, wenn keins gewählt ist (dann
- * gilt der ganze Ort). Nicht gewählte Gebiete werden nicht geladen, also auch nicht gezählt.
+ * Häuser der Zielgebiete (der gewählten) neu zählen. Nicht gewählte Gebiete werden nicht
+ * geladen, also auch nicht gezählt; ist keins gewählt, gilt der ganze Ort und nichts wird gezählt.
  */
 async function recountHouses(ctx: MutationCtx, campaignId: Id<"campaigns">) {
   const { job } = await current(ctx, campaignId);
   if (!job) return;
   const rows = await statRows(ctx, campaignId, job.run);
   const off = await unselectedOf(ctx, campaignId);
-  const picked = rows.filter((r) => !off.has(r.areaId));
-  const targets = picked.length ? picked : rows;
+  // Ist keins gewählt, gilt der ganze Ort; dann ist kein Ortsteil Ziel (ihre Häuser werden nicht gezielt geladen).
+  const targets = rows.filter((r) => !off.has(r.areaId));
   const cells = new Set<string>();
   for (const r of targets) {
     const doc = await ctx.db.get(r.areaDoc);
@@ -291,7 +291,7 @@ export const countStep = internalMutation({
 /**
  * Statistik einer Aktion, live. `total` sind die Zähler der ganzen Aktion (auch außerhalb der
  * Gebiete). `areas` ist null, solange es keine Gebiete gibt. Je Gebiet: `target` = gezählt
- * (gewählt, oder alle, wenn keins gewählt ist), `houses` nur für Ziele und erst nach der
+ * (gewählt; ist keins gewählt, gilt der ganze Ort und keins ist Ziel), `houses` nur für Ziele und erst nach der
  * ersten Zählung, `complete` = alle Kacheln des Gebiets waren beim Zählen im Cache.
  * Liest keine Grenzen, damit ein Tipp nur wenige kleine Zeilen neu schickt.
  */
@@ -310,7 +310,7 @@ export const byArea = query({
     const noneSelected = rows.every((r) => off.has(r.areaId));
     const list = rows.map((r) => {
       const selected = !off.has(r.areaId);
-      const target = noneSelected || selected;
+      const target = selected;
       return {
         id: r.areaId,
         name: r.name,
