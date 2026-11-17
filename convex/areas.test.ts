@@ -135,7 +135,7 @@ describe("Angebot an Ortsteilen je Grenz-Kachel", () => {
     const geometryQuery = fetchMock.mock.calls
       .map((c) => new URLSearchParams(String((c[1] as RequestInit).body)).get("data")!)
       .filter((q) => q.includes("rel(id:"))
-      .at(-1)!;
+      .pop()!;
     expect(geometryQuery).toContain("300");
     expect(geometryQuery).not.toMatch(/\b200\b/);
   });
