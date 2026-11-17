@@ -2,7 +2,7 @@
 // Anders als e2e/smoke.mjs kommen die Häuser echt von Overpass (über Convex in der Cloud);
 // nachgebildet wird nur, was der Browser selbst abruft (Ortssuche).
 // Schwerpunkt: Ansehen-Link und Ansehen-Modus (#3), Notizen beim Ansehen (#1).
-// Aufruf: node e2e/preview.mjs <preview-url> [ordner-für-screenshots]
+// Aufruf: [VERCEL_AUTOMATION_BYPASS_SECRET=…] node e2e/preview.mjs <preview-url> [ordner-für-screenshots]
 import { chromium } from "playwright";
 import { ConvexHttpClient } from "convex/browser";
 import assert from "node:assert/strict";
@@ -14,7 +14,17 @@ if (!BASE) throw new Error("Aufruf: node e2e/preview.mjs <preview-url> [screensh
 // Ein kleiner, dicht bebauter Ausschnitt in Bornheim (Rheinland).
 const PLACE = { lat: 50.7606, lng: 6.9924 };
 
+// Preview hinter Vercel Deployment Protection: Secret aus „Protection Bypass for Automation“.
+const BYPASS = process.env.VERCEL_AUTOMATION_BYPASS_SECRET;
+
 async function mockNominatim(ctx) {
+  if (BYPASS) {
+    // Nur an den Preview-Host, nicht an Convex oder andere Dienste.
+    const host = new URL(BASE).host;
+    await ctx.route((url) => url.host === host, (r) =>
+      r.continue({ headers: { ...r.request().headers(), "x-vercel-protection-bypass": BYPASS } }),
+    );
+  }
   await ctx.route("https://nominatim.openstreetmap.org/**", (r) =>
     r.fulfill({
       json: [
