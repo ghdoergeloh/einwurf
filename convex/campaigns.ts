@@ -1,23 +1,26 @@
 import { mutation, query } from "./_generated/server";
 import { startPrefetch } from "./buildings";
+import { startAreas } from "./areas";
+import { campaignForRead, keyTaken } from "./access";
 import { ConvexError, v } from "convex/values";
 import {
   MAX_CAMPAIGNS_PER_MINUTE,
   MAX_NAME_LENGTH,
   MAX_PLACE_LENGTH,
-  SLUG_PATTERN,
   assertLatLng,
   assertSlug,
   cleanText,
 } from "./validation";
 
 /**
- * Legt eine Verteilaktion an. Den geheimen Schlüssel erzeugt der Browser mit
+ * Legt eine Verteilaktion an. Die geheimen Schlüssel erzeugt der Browser mit
  * crypto.getRandomValues (Zufall in Convex-Mutationen ist deterministisch).
+ * `adminKey` fehlt nur bei noch geöffneten alten Seiten.
  */
 export const create = mutation({
   args: {
     slug: v.string(),
+    adminKey: v.optional(v.string()),
     name: v.string(),
     placeLabel: v.string(),
     center: v.object({ lat: v.number(), lng: v.number() }),
@@ -33,11 +36,11 @@ export const create = mutation({
       assertLatLng(n, e);
       if (!(w < e && s < n)) throw new ConvexError("Ungültiger Ausschnitt");
     }
-    const existing = await ctx.db
-      .query("campaigns")
-      .withIndex("by_slug", (q) => q.eq("slug", args.slug))
-      .unique();
-    if (existing) throw new ConvexError("Link existiert bereits");
+    if (await keyTaken(ctx, args.slug)) throw new ConvexError("Link existiert bereits");
+    if (args.adminKey !== undefined) {
+      assertSlug(args.adminKey);
+      if (args.adminKey === args.slug || (await keyTaken(ctx, args.adminKey))) throw new ConvexError("Link existiert bereits");
+    }
 
     // Einfache Bremse gegen Skripte, die massenhaft Aktionen anlegen.
     const recent = await ctx.db.query("campaigns").order("desc").take(MAX_CAMPAIGNS_PER_MINUTE);
@@ -46,8 +49,9 @@ export const create = mutation({
       throw new ConvexError("Gerade werden sehr viele Aktionen angelegt. Bitte in einer Minute noch einmal versuchen.");
     }
 
-    await ctx.db.insert("campaigns", {
+    const campaignId = await ctx.db.insert("campaigns", {
       slug: args.slug,
+      adminKey: args.adminKey,
       name: cleanText(args.name, MAX_NAME_LENGTH, "Name"),
       placeLabel: cleanText(args.placeLabel, MAX_PLACE_LENGTH, "Ort"),
       center: args.center,
@@ -58,21 +62,25 @@ export const create = mutation({
     // Häuser des Ortes im Hintergrund vorladen, damit die Helfer nicht warten.
     // (In Unit-Tests aus, siehe vite.config.ts; dort wird es gezielt geprüft.)
     if (process.env.PREFETCH_ON_CREATE !== "off") await startPrefetch(ctx, args.slug);
+    // Ortsteile im Hintergrund laden, damit der Anleger sie gleich auswählen kann.
+    if (process.env.AREAS_ON_CREATE !== "off") await startAreas(ctx, campaignId);
     return args.slug;
   },
 });
 
-/** Liefert die Aktion zum Schlüssel oder null. Es gibt bewusst keine Liste aller Aktionen. */
+/**
+ * Liefert die Aktion zum Bearbeiten- oder Admin-Schlüssel, oder null. `slug` ist der
+ * Bearbeiten-Schlüssel (für die Admin-Seite: zum Markieren und Weitergeben). Den
+ * Admin-Schlüssel gibt diese Query nie heraus. Es gibt bewusst keine Liste aller Aktionen.
+ */
 export const get = query({
   args: { slug: v.string() },
   handler: async (ctx, { slug }) => {
-    if (!SLUG_PATTERN.test(slug)) return null;
-    const campaign = await ctx.db
-      .query("campaigns")
-      .withIndex("by_slug", (q) => q.eq("slug", slug))
-      .unique();
-    if (!campaign) return null;
+    const found = await campaignForRead(ctx, slug);
+    if (!found) return null;
+    const { campaign, access } = found;
     return {
+      access,
       slug: campaign.slug,
       name: campaign.name,
       placeLabel: campaign.placeLabel,

@@ -277,7 +277,13 @@ const BLOCK_H = 4;
  * Plant das Vorladen eines Gebiets: Blöcke von Kacheln, vom Startpunkt nach außen sortiert.
  * Ist das Gebiet zu groß, fallen die vom Startpunkt am weitesten entfernten Blöcke weg.
  */
-export function planPrefetch(bbox: BBox, start: [number, number], maxCells = MAX_PREFETCH_CELLS): string[][] {
+export function planPrefetch(
+  bbox: BBox,
+  start: [number, number],
+  maxCells = MAX_PREFETCH_CELLS,
+  /** Nur Blöcke, deren Ausschnitt das liefert (z. B. die gewählten Gebiete berührt). */
+  wanted?: (block: BBox) => boolean,
+): string[][] {
   const [w, s, e, n] = bbox;
   if (!(w < e && s < n)) return [];
   // Nur ein Fenster um den Startpunkt betrachten: Mehr als maxCells Kacheln werden ohnehin
@@ -304,7 +310,13 @@ export function planPrefetch(bbox: BBox, start: [number, number], maxCells = MAX
       const ya = Math.max(by, y0);
       const yb = Math.min(by + BLOCK_H, y1 + 1);
       if (xa >= xb || ya >= yb) continue;
-      for (let x = xa; x < xb; x++) for (let y = ya; y < yb; y++) cells.push(cellKey(x, y));
+      for (let x = xa; x < xb; x++)
+        for (let y = ya; y < yb; y++) {
+          // Mit Filter: jede Kachel einzeln prüfen, damit keine Kachel ganz außerhalb geladen wird.
+          if (wanted && !wanted([x * CELL_SIZE, y * CELL_SIZE, (x + 1) * CELL_SIZE, (y + 1) * CELL_SIZE])) continue;
+          cells.push(cellKey(x, y));
+        }
+      if (cells.length === 0) continue;
       const cx = ((xa + xb) / 2) * CELL_SIZE;
       const cy = ((ya + yb) / 2) * CELL_SIZE;
       // Abstand in etwa gleichen Metern (Länge schrumpft mit dem Breitengrad).

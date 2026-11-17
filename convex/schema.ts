@@ -5,6 +5,11 @@ export default defineSchema({
   campaigns: defineTable({
     /** Geheimer, zufälliger Schlüssel im Link. Wer ihn kennt, darf alles. */
     slug: v.string(),
+    /**
+     * Geheimer Schlüssel des Admin-Links (/admin/…): nur er ändert die Gebietsauswahl.
+     * Keine Query gibt ihn heraus. Fehlt bei älteren Aktionen bis zur Migration (convex/migrations.ts).
+     */
+    adminKey: v.optional(v.string()),
     name: v.string(),
     placeLabel: v.string(),
     center: v.object({ lat: v.number(), lng: v.number() }),
@@ -15,7 +20,8 @@ export default defineSchema({
     /** Anzahl Häuser, bei denen Einwerfen nicht möglich war („blocked“). */
     blockedCount: v.optional(v.number()),
   })
-    .index("by_slug", ["slug"]),
+    .index("by_slug", ["slug"])
+    .index("by_adminKey", ["adminKey"]),
 
   marks: defineTable({
     campaignId: v.id("campaigns"),
@@ -30,6 +36,37 @@ export default defineSchema({
   })
     .index("by_campaign_osm", ["campaignId", "osmId"])
     .index("by_campaign_cell", ["campaignId", "cell"]),
+
+  /**
+   * Gebiete (Ortsteile) einer Aktion aus OSM, mit vereinfachter Grenze (convex/areas.ts).
+   * Ändern sich nach dem Laden nicht; die Auswahl steht in areaSets.
+   */
+  areas: defineTable({
+    campaignId: v.id("campaigns"),
+    /** „relation/123“ oder „ort“ (ganzer Ort, wenn OSM ihn nicht unterteilt). */
+    areaId: v.string(),
+    name: v.string(),
+    /** MultiPolygon-Koordinaten [lng, lat] als JSON (siehe areaGeo.ts). */
+    geometry: v.string(),
+    /** [west, süd, ost, nord] */
+    bbox: v.array(v.number()),
+    /** Punkt im Gebiet für die Beschriftung [lng, lat]. */
+    labelAt: v.array(v.number()),
+  }).index("by_campaign", ["campaignId"]),
+
+  /** Ladezustand und Auswahl der Gebiete je Aktion. */
+  areaSets: defineTable({
+    campaignId: v.id("campaigns"),
+    status: v.union(v.literal("loading"), v.literal("done"), v.literal("failed")),
+    /** OSM unterteilt den Ort nicht: Er ist ein einziges Gebiet. */
+    whole: v.optional(v.boolean()),
+    /** Nicht ausgewählte Gebiete (areaId). Neue Aktionen: alle ausgewählt. */
+    unselected: v.array(v.string()),
+    failures: v.number(),
+    updatedAt: v.number(),
+    /** Laufnummer; ein älterer Ladevorgang speichert nichts mehr. */
+    run: v.number(),
+  }).index("by_campaign", ["campaignId"]),
 
   /** Gemeinsamer Cache der OSM-Gebäude je Kachel (convex/osm.ts), für alle Aktionen. */
   buildingCells: defineTable({
