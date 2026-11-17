@@ -14,6 +14,8 @@ export default defineSchema({
     markCount: v.optional(v.number()),
     /** Anzahl Häuser, bei denen Einwerfen nicht möglich war („blocked“). */
     blockedCount: v.optional(v.number()),
+    /** Anzahl Notizen an Häusern, für die Obergrenze MAX_NOTES_PER_CAMPAIGN. */
+    noteCount: v.optional(v.number()),
   })
     .index("by_slug", ["slug"]),
 
@@ -27,6 +29,21 @@ export default defineSchema({
     cell: v.string(),
     /** Zustand, siehe status.ts. Fehlt bei älteren Markierungen und heißt dann „done“. */
     status: v.optional(v.union(v.literal("done"), v.literal("blocked"))),
+  })
+    .index("by_campaign_osm", ["campaignId", "osmId"])
+    .index("by_campaign_cell", ["campaignId", "cell"]),
+
+  /** Notiz eines Helfers an einem Haus (convex/notes.ts); das Haus erscheint dann blau. */
+  notes: defineTable({
+    campaignId: v.id("campaigns"),
+    /** OSM-Objekt wie bei marks. */
+    osmId: v.string(),
+    /** Mittelpunkt des Hauses [lng, lat]. */
+    center: v.array(v.number()),
+    /** Rasterzelle des Mittelpunkts, siehe cells.ts; abonniert wird je Zelle wie bei marks. */
+    cell: v.string(),
+    text: v.string(),
+    updatedAt: v.number(),
   })
     .index("by_campaign_osm", ["campaignId", "osmId"])
     .index("by_campaign_cell", ["campaignId", "cell"]),
