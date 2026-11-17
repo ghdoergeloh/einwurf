@@ -5,18 +5,46 @@ import { api } from "../../convex/_generated/api";
 import { markCellOf } from "../../convex/cells";
 import { countDelta, statusOf, type HouseStatus } from "../../convex/status";
 import { decodeBuildings } from "../../convex/osm";
-import { BuildingMap, type LoadState, type MapControls, type Mark } from "./BuildingMap";
+import { toAreas } from "../../convex/areaGeo";
+import { BuildingMap, type LoadState, type MapArea, type MapControls, type Mark } from "./BuildingMap";
 import { ShareSheet } from "./ShareSheet";
+import { AreaSheet } from "./AreaSheet";
 import { LogoMark } from "./Logo";
-import { campaignPath, navigate } from "../lib/router";
+import { adminPath, campaignPath, navigate } from "../lib/router";
 
 interface Props {
+  /** Bearbeiten-Schlüssel: für Markierungen und Häuser. */
   slug: string;
   isNew: boolean;
+  /** Nur im Admin-Link: Schlüssel für die Gebietsauswahl. */
+  adminKey?: string;
 }
 
-export function CampaignPage({ slug, isNew }: Props) {
+/**
+ * Admin-Link (/admin/…): erfährt den Bearbeiten-Schlüssel und zeigt dieselbe Karte, dazu die
+ * Gebietsauswahl. Der Admin-Schlüssel selbst steht nur in der Adresse.
+ */
+export function AdminPage({ adminKey, isNew }: { adminKey: string; isNew: boolean }) {
+  const campaign = useQuery(api.campaigns.get, { slug: adminKey });
+  if (campaign === null || (campaign && campaign.access !== "admin")) return <NotFound />;
+  if (!campaign) return <div className="fixed inset-0 bg-[#e9e7e1]" />;
+  return <CampaignPage slug={campaign.slug} isNew={isNew} adminKey={adminKey} />;
+}
+
+export function CampaignPage({ slug, isNew, adminKey }: Props) {
   const campaign = useQuery(api.campaigns.get, { slug });
+  const areaList = useQuery(api.areas.list, { slug });
+  const areaStatus = useQuery(api.areas.status, { slug });
+  const areas = useMemo<MapArea[]>(() => {
+    if (!areaList || !areaStatus) return [];
+    const merged = toAreas(areaList, areaStatus.unselected);
+    return merged.map((a, i) => ({ ...a, labelAt: areaList[i].labelAt }));
+  }, [areaList, areaStatus]);
+  const loadAreas = useMutation(api.areas.load);
+  // Ältere Aktion (nach der Migration) im Admin-Link: Gebiete jetzt laden.
+  useEffect(() => {
+    if (adminKey && areaStatus?.status === "none") loadAreas({ adminKey }).catch(() => {});
+  }, [adminKey, areaStatus?.status, loadAreas]);
   // Nur die sichtbaren Zellen abonnieren: Ein Tipp schickt allen nur seine Zelle neu.
   const [cells, setCells] = useState<string[] | null>([]);
   const cellResults = useQueries(
@@ -40,6 +68,7 @@ export function CampaignPage({ slug, isNew }: Props) {
   // Beim Wechsel auf die saubere Adresse ändert sich isNew; die Begrüßung soll bleiben.
   const [welcome] = useState(isNew);
   const [shareOpen, setShareOpen] = useState(isNew);
+  const [areasOpen, setAreasOpen] = useState(false);
   const [loadState, setLoadState] = useState<LoadState>("idle");
   const [toast, setToast] = useState<string | null>(null);
   const toastTimer = useRef<ReturnType<typeof setTimeout> | null>(null);
@@ -70,8 +99,8 @@ export function CampaignPage({ slug, isNew }: Props) {
   useEffect(() => {
     if (!isNew) return;
     // „?neu“ aus der Adresse entfernen, damit der geteilte Link sauber ist.
-    navigate(campaignPath(slug), true);
-  }, [isNew, slug]);
+    navigate(adminKey ? adminPath(adminKey) : campaignPath(slug), true);
+  }, [isNew, slug, adminKey]);
 
   useEffect(() => {
     const root = document.documentElement;
@@ -141,6 +170,8 @@ export function CampaignPage({ slug, isNew }: Props) {
           loadBuildings={loadBuildings}
           loadedMarkCells={loadedMarkCells}
           controlsRef={controls}
+          areas={areas}
+          showAllAreas={!!adminKey}
         />
       )}
 
@@ -183,6 +214,20 @@ export function CampaignPage({ slug, isNew }: Props) {
               <span className="sr-only">Häuser, bei denen Einwerfen nicht möglich war</span>
             </div>
           )}
+          {adminKey && (
+            <button
+              type="button"
+              onClick={() => setAreasOpen(true)}
+              className="grid size-10 shrink-0 place-items-center rounded-xl bg-white/10 transition hover:bg-white/20"
+              aria-label="Gebiete"
+              title="Gebiete"
+            >
+              <svg viewBox="0 0 24 24" className="size-5" fill="none" stroke="currentColor" strokeWidth="2" aria-hidden="true">
+                <path d="M9 4 3 6.5v13L9 17l6 2.5 6-2.5v-13L15 6.5 9 4Z" strokeLinejoin="round" />
+                <path d="M9 4v13M15 6.5v13" />
+              </svg>
+            </button>
+          )}
           <button
             type="button"
             onClick={() => setShareOpen(true)}
@@ -206,7 +251,34 @@ export function CampaignPage({ slug, isNew }: Props) {
       </div>
 
       {shareOpen && campaign && (
-        <ShareSheet slug={slug} url={url} title={campaign.name} isNew={welcome} onClose={() => setShareOpen(false)} />
+        <ShareSheet
+          slug={slug}
+          url={url}
+          title={campaign.name}
+          isNew={welcome}
+          adminUrl={adminKey ? `${location.origin}${adminPath(adminKey)}` : undefined}
+          onClose={() => setShareOpen(false)}
+          onChooseAreas={
+            adminKey
+              ? () => {
+                  setShareOpen(false);
+                  setAreasOpen(true);
+                }
+              : undefined
+          }
+        />
+      )}
+      {areasOpen && adminKey && areaStatus && (
+        <AreaSheet
+          adminKey={adminKey}
+          status={areaStatus}
+          areas={areas}
+          onShow={(bbox) => {
+            setAreasOpen(false);
+            controls.current?.showBBox(bbox);
+          }}
+          onClose={() => setAreasOpen(false)}
+        />
       )}
     </div>
   );
@@ -304,7 +376,7 @@ function StatusPill({
   );
 }
 
-function NotFound() {
+export function NotFound() {
   return (
     <div className="grid min-h-full place-items-center bg-paper p-6 text-center">
       <div className="max-w-sm">

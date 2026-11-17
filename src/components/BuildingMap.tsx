@@ -21,6 +21,7 @@ import { nextStatus, statusOf, type HouseStatus, type MarkStatus } from "../../c
 import { addTap, cellsToWatch, settleTaps, type PendingTap } from "../lib/pendingTaps";
 import { cyclePlaceholder, resolvePlaceholderTaps, type PlaceholderTap } from "../lib/placeholderTaps";
 import { BURST_SECONDS, createBurst, drawBurst, type Burst } from "../lib/sparks";
+import { selectionOf, type Area, type Selection } from "../../convex/areaGeo";
 
 // Ab MapLibre 6 braucht jeder Bundler den Pfad zum Worker.
 maplibregl.setWorkerUrl(workerUrl);
@@ -66,7 +67,12 @@ export interface Mark {
 
 export interface MapControls {
   retry: () => void;
+  /** Ausschnitt zeigen, z. B. ein Gebiet aus der Liste. */
+  showBBox: (bbox: number[]) => void;
 }
+
+/** Gebiet für die Karte: Grenze, Name, Auswahl und Punkt für die Beschriftung. */
+export type MapArea = Area & { labelAt: number[] };
 
 export type LoadState = "idle" | "zoom" | "loading" | "error" | "mapError";
 
@@ -89,9 +95,20 @@ interface Props {
   /** Lädt die Häuser der Kacheln ("x:y"), über Convex mit gemeinsamem Cache. */
   loadBuildings: (cells: string[]) => Promise<BuildingFeature[]>;
   controlsRef?: React.MutableRefObject<MapControls | null>;
+  /**
+   * Gebiete der Aktion. Sind welche gewählt, zeigt und lädt die Karte nur deren Häuser und
+   * dunkelt den Rest ab; sonst gilt der ganze Ort.
+   */
+  areas?: MapArea[];
+  /** Admin-Link: auch nicht gewählte Gebiete mit Grenze und Namen zeigen (zum Auswählen). */
+  showAllAreas?: boolean;
 }
 
 const EMPTY: FeatureCollection = { type: "FeatureCollection", features: [] };
+const NO_AREAS: MapArea[] = [];
+/** Außerhalb der gewählten Gebiete: Grundkarte dezent abgedunkelt. */
+const COLOR_AREA_MASK = "#15171c";
+const COLOR_AREA_LINE = "#3a3e47";
 
 export function BuildingMap({
   center,
@@ -105,6 +122,8 @@ export function BuildingMap({
   loadBuildings,
   loadedMarkCells,
   controlsRef,
+  areas = NO_AREAS,
+  showAllAreas = false,
 }: Props) {
   const container = useRef<HTMLDivElement>(null);
   const mapRef = useRef<maplibregl.Map | null>(null);
@@ -128,6 +147,13 @@ export function BuildingMap({
   onNoticeRef.current = onNotice;
   onLoadStateRef.current = onLoadState;
   onCellsChangeRef.current = onCellsChange;
+  const areasRef = useRef<{ areas: MapArea[]; showAll: boolean; selection: Selection | null; selectionKey: string }>({
+    areas,
+    showAll: showAllAreas,
+    selection: null,
+    selectionKey: "",
+  });
+  const syncAreasRef = useRef<(() => void) | null>(null);
 
   useEffect(() => {
     if (!container.current) return;
@@ -195,6 +221,9 @@ export function BuildingMap({
     function syncMarks() {
       if (!loaded) return;
       const current = new Map(marksRef.current);
+      // Markierungen außerhalb der gewählten Gebiete bleiben gespeichert, werden aber nicht gezeigt.
+      const sel = areasRef.current.selection;
+      if (sel) for (const [id, m] of current) if (!sel.contains(m.center)) current.delete(id);
       for (const [id, p] of pendingTaps) {
         if (p.to === "none") current.delete(id);
         else current.set(id, { osmId: id, center: p.center, status: p.to });
@@ -319,7 +348,14 @@ export function BuildingMap({
       if (!force && Date.now() < blockedUntil) return updateLoadState();
       // Etwas über den Rand hinaus laden, damit beim Schieben keine leeren Flächen auftauchen.
       const view = paddedView();
-      const missing = cellsFor(view).filter((c) => !loadedCells.has(cellKey(c.x, c.y)) && !fetching.has(cellKey(c.x, c.y)));
+      const sel = areasRef.current.selection;
+      const missing = cellsFor(view).filter(
+        (c) =>
+          !loadedCells.has(cellKey(c.x, c.y)) &&
+          !fetching.has(cellKey(c.x, c.y)) &&
+          // Außerhalb der gewählten Gebiete wird nichts geladen.
+          (!sel || sel.touches([c.x * CELL_SIZE, c.y * CELL_SIZE, (c.x + 1) * CELL_SIZE, (c.y + 1) * CELL_SIZE])),
+      );
       if (missing.length === 0) return updateLoadState();
       // Mitte zuerst, falls der Ausschnitt größer ist als ein Abruf.
       const cx = (view[0] + view[2]) / 2;
@@ -341,7 +377,9 @@ export function BuildingMap({
       try {
         const features = await loadBuildingsRef.current(keys);
         if (disposed) return;
-        for (const f of features) buildings.set(f.properties.osmId, f);
+        // Auswahl kann sich während des Ladens geändert haben: nur Häuser der gewählten Gebiete.
+        const now = areasRef.current.selection;
+        for (const f of features) if (!now || now.contains(centerOf(f))) buildings.set(f.properties.osmId, f);
         for (const c of batch) loadedCells.add(cellKey(c.x, c.y));
         (map.getSource("buildings") as GeoJSONSource).setData(toCollection(buildings.values()));
         syncMarks();
@@ -367,7 +405,65 @@ export function BuildingMap({
       }
     }
 
-    if (controlsRef) controlsRef.current = { retry: () => void loadVisible(true) };
+    if (controlsRef)
+      controlsRef.current = {
+        retry: () => void loadVisible(true),
+        showBBox: ([w, s, e, n]) => map.fitBounds([w, s, e, n], { padding: 40, maxZoom: 16, duration: 600 }),
+      };
+
+    // ---------- Gebiete ----------
+
+    /** Grenzen, Namen und Abdunkeln nach den aktuellen Gebieten; bei geänderter Auswahl Häuser neu filtern. */
+    function syncAreas() {
+      if (!loaded) return;
+      const { areas: list, showAll } = areasRef.current;
+      const before = areasRef.current.selectionKey;
+      const selection = selectionOf(list);
+      const selectionKey = selection ? list.filter((a) => a.selected).map((a) => a.id).join(",") : "";
+      areasRef.current.selection = selection;
+      areasRef.current.selectionKey = selectionKey;
+      const shown = list.filter((a) => a.selected || showAll || !selection);
+      (map.getSource("areas") as GeoJSONSource).setData({
+        type: "FeatureCollection",
+        features: shown.map((a) => ({
+          type: "Feature",
+          properties: { id: a.id, selected: a.selected && !!selection },
+          geometry: { type: "MultiPolygon", coordinates: a.geometry },
+        })),
+      });
+      (map.getSource("area-labels") as GeoJSONSource).setData({
+        type: "FeatureCollection",
+        features: shown.map((a) => ({
+          type: "Feature",
+          properties: { name: a.name, selected: a.selected && !!selection },
+          geometry: { type: "Point", coordinates: a.labelAt },
+        })),
+      });
+      // Abdunkeln: die ganze Welt mit Löchern für die gewählten Gebiete.
+      (map.getSource("area-mask") as GeoJSONSource).setData(
+        selection
+          ? {
+              type: "Feature",
+              properties: {},
+              geometry: {
+                type: "Polygon",
+                coordinates: [
+                  [[-180, -85], [180, -85], [180, 85], [-180, 85], [-180, -85]],
+                  ...list.filter((a) => a.selected).flatMap((a) => a.geometry.map((poly) => poly[0])),
+                ],
+              },
+            }
+          : EMPTY,
+      );
+      if (before === selectionKey) return;
+      // Auswahl geändert: Häuser außerhalb weg, Kacheln neu laden (meist aus dem Cache).
+      if (selection) for (const [id, f] of buildings) if (!selection.contains(centerOf(f))) buildings.delete(id);
+      loadedCells.clear();
+      (map.getSource("buildings") as GeoJSONSource).setData(toCollection(buildings.values()));
+      syncMarks();
+      void loadVisible(true);
+    }
+    syncAreasRef.current = syncAreas;
 
     map.on("error", () => {
       // Ohne Grundkarte (Stil) kommt nie ein „load“; das soll man sehen.
@@ -390,6 +486,22 @@ export function BuildingMap({
         // Autobahnschilder brauchen wir nicht; sie erzeugen zudem Warnungen in der Konsole.
         if (layer.id.includes("shield")) map.removeLayer(layer.id);
       }
+      map.addSource("area-mask", { type: "geojson", data: EMPTY });
+      map.addSource("areas", { type: "geojson", data: EMPTY });
+      map.addSource("area-labels", { type: "geojson", data: EMPTY });
+      // Über der Grundkarte (auch ihren hellgrauen Häusern), unter unseren Häusern.
+      map.addLayer({ id: "area-mask", type: "fill", source: "area-mask", paint: { "fill-color": COLOR_AREA_MASK, "fill-opacity": 0.22 } });
+      map.addLayer({
+        id: "area-lines",
+        type: "line",
+        source: "areas",
+        paint: {
+          "line-color": COLOR_AREA_LINE,
+          "line-width": ["interpolate", ["linear"], ["zoom"], 11, 1.2, 16, 2.5],
+          "line-opacity": ["case", ["get", "selected"], 0.9, 0.45],
+          "line-dasharray": [3, 2],
+        },
+      });
       map.addSource("buildings", { type: "geojson", data: EMPTY, promoteId: "osmId" });
       map.addSource("mark-points", { type: "geojson", data: EMPTY });
 
@@ -462,6 +574,26 @@ export function BuildingMap({
         filter: ["==", ["get", "shape"], false],
         paint: pointPaint,
       });
+      // Namen der Gebiete, gewählte kräftig, andere (nur im Admin-Link) blass.
+      if (map.getStyle().glyphs && font) {
+        map.addLayer({
+          id: "area-labels",
+          type: "symbol",
+          source: "area-labels",
+          layout: {
+            "text-field": ["get", "name"],
+            "text-font": font.some((f) => f.includes("Bold")) ? font : [font[0].replace(/Regular|Italic/, "Bold")],
+            "text-size": ["interpolate", ["linear"], ["zoom"], 11, 12, 16, 16],
+            "text-padding": 4,
+          },
+          paint: {
+            "text-color": ["case", ["get", "selected"], "#15171c", "#5b5f69"],
+            "text-halo-color": "rgba(255,255,255,0.9)",
+            "text-halo-width": 1.6,
+            "text-opacity": ["case", ["get", "selected"], 1, 0.75],
+          },
+        });
+      }
       // Tipps auf Platzhalter: das Haus der Grundkarte vorläufig einfärben, bis das eigene geladen ist.
       map.addSource("tap-shapes", { type: "geojson", data: EMPTY });
       const tapColor = (done: string, blocked: string): ExpressionSpecification => ["match", ["get", "to"], "blocked", blocked, done];
@@ -478,6 +610,7 @@ export function BuildingMap({
         paint: { "line-color": tapColor(COLOR_MARKED_LINE, COLOR_BLOCKED_LINE), "line-width": 2, "line-dasharray": [2, 1] },
       });
       setReady(true);
+      syncAreas();
       syncMarks();
       reportCells();
       void loadVisible();
@@ -550,6 +683,12 @@ export function BuildingMap({
     function placeholderAt(point: maplibregl.Point): { id: string; shape: Position[][][] } | null {
       // Erst ab der Zoomstufe, ab der Häuser geladen werden; sonst würde der Tipp nie aufgelöst.
       if (map.getZoom() < BUILDING_MIN_ZOOM || baseBuildingLayers.length === 0) return null;
+      // Außerhalb der gewählten Gebiete gibt es nichts zu markieren.
+      const sel = areasRef.current.selection;
+      if (sel) {
+        const at = map.unproject(point);
+        if (!sel.contains([at.lng, at.lat])) return null;
+      }
       const tapped = map.queryRenderedFeatures(point, { layers: ["tap-shapes"] })[0];
       if (tapped) return { id: tapped.properties.id as string, shape: [] };
       const f = map.queryRenderedFeatures(point, { layers: baseBuildingLayers })[0];
@@ -707,6 +846,7 @@ export function BuildingMap({
       window.removeEventListener("pointercancel", endDragZoom);
       if (controlsRef) controlsRef.current = null;
       syncMarksRef.current = null;
+      syncAreasRef.current = null;
       map.remove();
       mapRef.current = null;
       setReady(false);
@@ -722,6 +862,11 @@ export function BuildingMap({
       settleRef.current?.();
     }
   }, [marks, loadedMarkCells, ready]);
+
+  useEffect(() => {
+    areasRef.current = { ...areasRef.current, areas, showAll: showAllAreas };
+    if (ready) syncAreasRef.current?.();
+  }, [areas, showAllAreas, ready]);
 
   // MapLibre setzt am Container position: relative; deshalb ein eigener Rahmen außen.
   return (

@@ -3,7 +3,7 @@ import { useMutation } from "convex/react";
 import { api } from "../../convex/_generated/api";
 import { searchPlaces, type Place } from "../lib/geocode";
 import { generateSlug } from "../lib/slug";
-import { campaignPath, navigate } from "../lib/router";
+import { adminPath, navigate } from "../lib/router";
 import { Logo } from "./Logo";
 
 type SearchState =
@@ -41,14 +41,17 @@ export function HomePage() {
     setCreating(true);
     setError(null);
     try {
-      const slug = await create({
+      const adminKey = generateSlug();
+      await create({
         slug: generateSlug(),
+        adminKey,
         name: name.trim() || `Verteilaktion ${place.short}`,
         placeLabel: place.label,
         center: { lat: place.lat, lng: place.lng },
         bbox: place.bbox ?? undefined,
       });
-      navigate(`${campaignPath(slug)}?neu`);
+      // Der Anleger landet auf dem Admin-Link, um gleich die Ortsteile festzulegen.
+      navigate(`${adminPath(adminKey)}?neu`);
     } catch {
       setError("Die Aktion konnte nicht angelegt werden. Bitte versuch es noch einmal.");
       setCreating(false);

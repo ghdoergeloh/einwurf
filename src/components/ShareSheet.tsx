@@ -9,9 +9,13 @@ interface Props {
   title: string;
   isNew: boolean;
   onClose: () => void;
+  /** Nur im Admin-Link: der eigene Link, zum Behalten (nicht zum Weitergeben). */
+  adminUrl?: string;
+  /** Nur im Admin-Link: Gebiete festlegen (nach dem Anlegen). */
+  onChooseAreas?: () => void;
 }
 
-export function ShareSheet({ slug, url, title, isNew, onClose }: Props) {
+export function ShareSheet({ slug, url, title, isNew, onClose, adminUrl, onChooseAreas }: Props) {
   const [qr, setQr] = useState<string | null>(null);
   const [copied, setCopied] = useState(false);
   const dialogRef = useRef<HTMLDivElement>(null);
@@ -136,7 +140,17 @@ export function ShareSheet({ slug, url, title, isNew, onClose }: Props) {
           )}
         </div>
         <PrefetchPanel slug={slug} />
-        {isNew && (
+        {adminUrl && <AdminLinkBox url={adminUrl} />}
+        {isNew && onChooseAreas && (
+          <button
+            type="button"
+            onClick={onChooseAreas}
+            className="mt-4 w-full rounded-2xl bg-sun px-4 py-3 text-sm font-semibold text-ink transition hover:bg-sun-deep"
+          >
+            Ortsteile festlegen →
+          </button>
+        )}
+        {isNew && !onChooseAreas && (
           <button
             type="button"
             onClick={onClose}
@@ -217,6 +231,40 @@ function PrefetchPanel({ slug }: { slug: string }) {
           </button>
         </div>
       )}
+    </div>
+  );
+}
+
+/** Admin-Link: nur für den Organisator, mit Hinweis, ihn zu behalten. */
+function AdminLinkBox({ url }: { url: string }) {
+  const [copied, setCopied] = useState(false);
+  async function copy() {
+    try {
+      await navigator.clipboard.writeText(url);
+      setCopied(true);
+      setTimeout(() => setCopied(false), 2000);
+    } catch {
+      /* Zwischenablage gesperrt: Link bleibt markierbar sichtbar. */
+    }
+  }
+  return (
+    <div className="mt-4 rounded-2xl border border-dashed border-ink/25 p-4 text-sm" data-testid="admin-link">
+      <p className="font-semibold">Diesen Link für dich behalten</p>
+      <p className="mt-1 text-xs text-muted">
+        Dein Admin-Link: Nur mit ihm legst du fest, in welchen Ortsteilen verteilt wird. Nicht weitergeben – Helfer bekommen den Link oben.
+      </p>
+      <div className="mt-2 flex items-center gap-2 rounded-xl bg-paper p-1.5 pl-3">
+        <input
+          readOnly
+          value={url}
+          onFocus={(e) => e.currentTarget.select()}
+          aria-label="Admin-Link"
+          className="min-w-0 flex-1 bg-transparent font-mono text-xs text-ink-3 outline-none"
+        />
+        <button type="button" onClick={copy} className="shrink-0 rounded-lg bg-white px-3 py-1.5 text-xs font-medium ring-1 ring-black/10 hover:bg-black/5">
+          {copied ? "Kopiert ✓" : "Kopieren"}
+        </button>
+      </div>
     </div>
   );
 }

@@ -51,6 +51,29 @@ function fakeBuildings(body) {
   return { elements };
 }
 
+// Grenzen: Stadt (Stufe 8) mit zwei Ortsteilen (Stufe 10). Das zweite Gebiet (FAR) liegt außerhalb.
+const AREA_SPLIT = CENTER.lng + 0.0025;
+const relBox = (id, name, level, [w, s, e, n]) => ({
+  type: "relation",
+  id,
+  tags: { boundary: "administrative", admin_level: String(level), name },
+  members: [{ type: "way", role: "outer", geometry: [[w, s], [e, s], [e, n], [w, n], [w, s]].map(([lon, lat]) => ({ lat, lon })) }],
+});
+const TOWN = [CENTER.lng - 0.01, CENTER.lat - 0.01, CENTER.lng + 0.01, CENTER.lat + 0.01];
+function fakeAreas(query) {
+  if (query.includes("is_in")) {
+    const [w, s, e, n] = TOWN;
+    return { elements: [{ type: "relation", id: 900, tags: { boundary: "administrative", admin_level: "8", name: "Bornheim" }, bounds: { minlon: w, minlat: s, maxlon: e, maxlat: n } }] };
+  }
+  return {
+    elements: [
+      relBox(900, "Bornheim", 8, TOWN),
+      relBox(901, "Roisdorf", 10, [TOWN[0], TOWN[1], AREA_SPLIT, TOWN[3]]),
+      relBox(902, "Hersel", 10, [AREA_SPLIT, TOWN[1], TOWN[2], TOWN[3]]),
+    ],
+  };
+}
+
 let overpassCalls = 0;
 /** Verzögerung des nachgebildeten Overpass (langsamer Server). */
 let overpassDelayMs = 0;
@@ -58,11 +81,11 @@ const overpass = http.createServer((req, res) => {
   let body = "";
   req.on("data", (c) => (body += c));
   req.on("end", () => {
+    const q = new URLSearchParams(body).get("data") ?? "";
+    res.setHeader("Content-Type", "application/json");
+    if (q.includes("is_in") || q.includes("map_to_area")) return res.end(JSON.stringify(fakeAreas(q)));
     overpassCalls++;
-    setTimeout(() => {
-      res.setHeader("Content-Type", "application/json");
-      res.end(JSON.stringify(fakeBuildings(body)));
-    }, overpassDelayMs);
+    setTimeout(() => res.end(JSON.stringify(fakeBuildings(body))), overpassDelayMs);
   });
 });
 await new Promise((r) => overpass.listen(8787, "127.0.0.1", r));
@@ -148,9 +171,22 @@ try {
   const callsAfterPrefetch = overpassCalls;
   assert.ok(callsAfterPrefetch > 0, "Vorladen hat Overpass gefragt");
   await shot(p, "2-share");
-  const url = p.url();
-  assert.match(url, /\/v\/[A-Za-z0-9]{22}$/, "geheimer Link ohne ?neu");
-  await p.getByRole("button", { name: "Zur Karte" }).click();
+  // Der Anleger landet auf dem Admin-Link; weitergegeben wird der Bearbeiten-Link.
+  const adminUrl = p.url();
+  assert.match(adminUrl, /\/admin\/[A-Za-z0-9]{22}$/, "Admin-Link ohne ?neu");
+  const url = await p.getByLabel("Link zur Verteilaktion").inputValue();
+  assert.match(url, /\/v\/[A-Za-z0-9]{22}$/, "Bearbeiten-Link zum Weitergeben");
+  assert.equal(await p.getByLabel("Admin-Link").inputValue(), adminUrl);
+  await p.getByText("Diesen Link für dich behalten").waitFor();
+  assert.ok(!adminUrl.includes(url.split("/v/")[1]), "Admin- und Bearbeiten-Schlüssel verschieden");
+
+  // Ortsteile festlegen
+  await p.getByRole("button", { name: /Ortsteile festlegen/ }).click();
+  const sheet = p.getByTestId("areas-sheet");
+  await sheet.getByLabel("Hersel").waitFor({ timeout: 30_000 });
+  assert.deepEqual(await sheet.getByRole("checkbox").evaluateAll((els) => els.map((e) => e.checked)), [true, true], "neue Aktion: alle gewählt");
+  await shot(p, "2a-gebiete");
+  await sheet.getByRole("button", { name: "Fertig" }).click();
   await p.waitForTimeout(2500);
 
   // Kartenseite scrollt nicht
@@ -164,6 +200,8 @@ try {
   track(p2);
   await p2.goto(url);
   await p2.waitForTimeout(2500);
+  // Bearbeiten-Link: keine Gebietsauswahl
+  assert.equal(await p2.getByRole("button", { name: "Gebiete" }).count(), 0, "Gebiete nur im Admin-Link");
 
   const box = await p.getByTestId("map").boundingBox();
   const cx = box.x + box.width / 2;
@@ -199,6 +237,40 @@ try {
   assert.equal(await count(p2), "2", "live beim zweiten Helfer");
   assert.equal(await statusAt(p2, cx, cy), "done", "beim zweiten Helfer gelb");
   await shot(p2, "3-live");
+
+  // Gebiete: Grenzen und Namen sichtbar; Hersel abwählen → beim Helfer live nur noch Roisdorf
+  // Ein Haus in Hersel, gleich östlich der Grenze (Raster siehe fakeBuildings)
+  const herselAt = (page) =>
+    page.evaluate(([lng, lat]) => {
+      const m = window.__einwurfMap;
+      const r = m.getCanvasContainer().getBoundingClientRect();
+      const q = m.project([lng, lat]);
+      return [q.x + r.left, q.y + r.top];
+    }, [CENTER.lng + 8 * GX, CENTER.lat]);
+  const labels = (page) => page.evaluate(() => window.__einwurfMap.queryRenderedFeatures({ layers: ["area-labels"] }).map((f) => f.properties.name).sort());
+  const [hx, hy] = await herselAt(p2);
+  await expectStatus(p2, hx, hy, "none", "Haus in Hersel geladen");
+  await p.getByRole("button", { name: "Gebiete" }).click();
+  await sheet.getByLabel("Hersel").uncheck();
+  await p2.waitForTimeout(1500);
+  assert.equal(await statusAt(p2, hx, hy), null, "Haus in abgewähltem Gebiet nicht mehr da");
+  assert.equal(await statusAt(p2, cx, cy), "done", "Haus in gewähltem Gebiet bleibt");
+  assert.equal(await p2.evaluate(() => window.__einwurfMap.querySourceFeatures("area-mask").length > 0), true, "Rest abgedunkelt");
+  await p2.evaluate(() => window.__einwurfMap.jumpTo({ zoom: 14 }));
+  await p2.waitForTimeout(800);
+  assert.deepEqual(await labels(p2), ["Roisdorf"], "Helfer sieht nur gewählte Gebiete");
+  await p.evaluate(() => window.__einwurfMap.jumpTo({ zoom: 14 }));
+  await p.waitForTimeout(800);
+  assert.deepEqual(await labels(p), ["Hersel", "Roisdorf"], "Admin sieht alle Gebiete");
+  await shot(p2, "3-gebiete-helfer");
+  await sheet.getByRole("button", { name: "Keine" }).click();
+  await sheet.getByRole("button", { name: "Fertig" }).click();
+  await p.evaluate(() => window.__einwurfMap.jumpTo({ zoom: 16 }));
+  await p2.evaluate(() => window.__einwurfMap.jumpTo({ zoom: 16 }));
+  await p2.waitForTimeout(1500);
+  // Nichts gewählt: wieder der ganze Ort
+  await expectStatus(p2, hx, hy, "none", "Haus in Hersel wieder da");
+  assert.equal(await p2.evaluate(() => window.__einwurfMap.querySourceFeatures("area-mask").length), 0);
 
   // Häuser der Grundkarte bleiben als hellgraue Platzhalter sichtbar
   assert.deepEqual(

@@ -2,13 +2,28 @@
 
 Eine Karte für Verteilaktionen: Alle Häuser sind dunkelgrau. Wer einen Flyer eingeworfen hat, tippt das Haus an, und es wird gelb. Ein zweiter Tipp macht es dunkelgelb: Einwerfen nicht möglich, etwa wegen eines Aufklebers „Keine Werbung“ oder weil der Briefkasten nicht erreichbar ist. Ein dritter Tipp macht es wieder grau. Alle mit dem Link sehen die Änderungen sofort.
 
-- **Ohne Anmeldung.** Jede Aktion hat einen geheimen Link (`/v/<22 Zeichen>`, etwa 131 Bit Zufall). Aktionen werden nirgends aufgelistet.
+- **Ohne Anmeldung.** Jede Aktion hat einen geheimen Link zum Mitmachen (`/v/<22 Zeichen>`, etwa 131 Bit Zufall) und einen eigenen geheimen **Admin-Link** (`/admin/<22 Zeichen>`) für den Organisator. Aktionen werden nirgends aufgelistet.
 - **Frontend:** React, Tailwind v4, MapLibre, Vite.
 - **Backend:** [Convex](https://convex.dev), live per Subscription.
 - **Kartendaten:** © OpenStreetMap-Mitwirkende. Grundkarte von [OpenFreeMap](https://openfreemap.org), Gebäude über die [Overpass API](https://overpass-api.de), Ortssuche über [Nominatim](https://nominatim.org). Alle ohne API-Schlüssel.
 - **Gebäude über Convex:** Der Browser fragt Overpass nicht selbst. Die Convex-Action `buildings.load` holt die Häuser je Kachel (etwa 550 × 350 m), speichert sie 30 Tage für alle Helfer und fragt bei Überlastung zusätzlich andere öffentliche Overpass-Server (versetzt: antwortet einer nach 35 s nicht, kommt der nächste dazu, die erste Antwort gewinnt; jeder darf bis zu 60 s brauchen; Nachbarkacheln kommen nur mit, wenn ohnehin geladen wird). Die öffentlichen Server stecken oft voll und brauchen dann 20–40 s, egal wie klein die Abfrage ist. Deshalb lädt Convex bei so einem Abruf gleich die Nachbarschaft mit (bis zu 30 Kacheln, etwa 2 km²), beim Weiterschieben ist dann alles sofort da. Nur der erste Helfer in einem Gebiet wartet auf Overpass; dauert es länger, sagt die Karte das.
 - **Vorladen:** Beim Anlegen einer Aktion lädt Convex im Hintergrund alle Häuser des gesuchten Ortes in den Cache, vom Ortsmittelpunkt nach außen, höchstens 600 Kacheln (etwa 100–120 km², ungefähr ganz Bornheim) und gebremst (höchstens etwa 8 Overpass-Abrufe pro Minute je Aktion, alle Vorladungen zusammen höchstens 15 pro Minute; die Karte hat getrennt davon 30 pro Minute, Vorladen bremst sie also nie aus). Im Teilen-Dialog stehen Fortschritt und der Knopf „Gebiet vorladen“ (für ältere Aktionen oder nach einem Fehler). Gespeichert wird je Kachel ein Eintrag mit allen Häusern als Text, nicht ein Eintrag pro Haus.
 - **Hausnummern:** ab Zoomstufe 17 auf den Häusern, hell auf grauen, dunkel auf gelben Häusern. Sie kommen mit den Häusern von Overpass, entweder vom Gebäude selbst oder von einem Adresspunkt darin. Ältere Cache-Einträge ohne Nummern liefert Convex sofort aus und lädt sie im Hintergrund neu (im Kontingent des Vorladen), die Nummern erscheinen dann beim nächsten Öffnen. „Aktualisieren“ im Teilen-Dialog holt sie für das ganze Gebiet.
+
+## Gebiete und Admin-Link
+
+Der Ort einer Aktion ist in Gebiete geteilt, meist die Ortsteile (in Bornheim etwa Brenig, Hersel, Roisdorf, Sechtem, Walberberg). Der Organisator legt fest, in welchen verteilt wird. Die Helfer sehen und laden dann nur die Häuser dieser Gebiete.
+
+- **Woher:** Convex lädt die Grenzen einmal je Aktion von Overpass (wie die Häuser, mit Ersatz-Servern und bis zu drei Versuchen) und speichert sie vereinfacht (etwa 2 m genau). Zuerst sucht es die Verwaltungsgrenze des gesuchten Ortes: die Grenze am Mittelpunkt, deren Ausdehnung zum Ergebnis der Ortssuche passt, sonst die Gemeinde (`admin_level` 8). Darin nimmt es die **feinste Stufe, die den Ort zu mindestens 90 % abdeckt** (`boundary=administrative` mit höherem `admin_level`, ersatzweise `boundary=place`). In Bornheim sind das die Ortsteile, in Großstädten oft die Stadtbezirke oder Stadtteile. Gebiete der Nachbarorte, die nur die Grenze berühren, fallen weg. Findet OSM keine Unterteilung, ist der ganze Ort ein Gebiet, mit Hinweis. Die Regel steht in `convex/areaGeo.ts`, ohne Sonderfälle für einzelne Orte.
+- **Auswahl:** nur über den Admin-Link, im Panel „Gebiete“ (Kartensymbol oben). Neue Aktionen starten mit allen Gebieten. Die Auswahl gilt sofort für alle. Mit dem Admin-Link kann man außerdem alles, was der Link zum Mitmachen kann.
+- **Auf der Karte:** Grenzen und Namen der gewählten Gebiete, alles außerhalb dezent abgedunkelt. Dort lädt die Karte keine Häuser (Convex fragt Overpass für solche Kacheln gar nicht und liefert Häuser mit Mittelpunkt außerhalb nicht aus). Markierungen dort bleiben gespeichert, werden aber nicht gezeigt. Im Admin-Link sind auch die nicht gewählten Gebiete blass beschriftet.
+- **Vorladen** umfasst nur Kacheln, die gewählte Gebiete berühren. Ändert sich die Auswahl, plant Convex das Vorladen neu und lädt neue Gebiete nach.
+- Ist nichts gewählt oder gibt es (noch) keine Gebiete, gilt wie bisher der ganze Ort.
+- **Für die Statistik je Gebiet:** `campaignAreas(ctx, campaignId)` (`convex/areaStore.ts`) liefert `{ id, name, geometry, selected }`, `areaAt(punkt, gebiete)` (`convex/areaGeo.ts`) ordnet ein Haus oder eine Markierung einem Gebiet zu.
+
+**Admin-Link wiederfinden:** Nach dem Anlegen landet der Organisator auf dem Admin-Link; der Teilen-Dialog zeigt ihn mit dem Hinweis „Diesen Link für dich behalten“. Weitergegeben wird nur der Link zum Mitmachen. Ist der Admin-Link verloren: im [Convex-Dashboard](https://dashboard.convex.dev) unter *Data → campaigns* die Aktion suchen (Feld `slug` = Schlüssel aus dem Link zum Mitmachen), dort steht er im Feld `adminKey`. Der Link ist dann `https://<eure-seite>/admin/<adminKey>`. Über den Link zum Mitmachen ist er nicht zu erfahren.
+
+**Ältere Aktionen** (vor dem Admin-Link angelegt) bekommen ihren Admin-Schlüssel durch eine einmalige Migration: im Convex-Dashboard unter *Functions* `migrations:addAdminKeys` ohne Argumente ausführen (mehrfaches Ausführen schadet nicht). Bis dahin gilt für sie der ganze Ort. Beim ersten Öffnen des Admin-Links lädt Convex ihre Gebiete.
 
 ## Bedienung der Karte
 
@@ -45,7 +60,7 @@ pnpm typecheck
 pnpm test               # Convex-Funktionen (convex-test) und Bibliotheken
 pnpm build
 pnpm e2e                # Browser-Test; braucht laufendes `pnpm dev` + `npx convex dev`
-                        # OSM-Dienste werden darin nachgebildet, Convex ist echt.
+                        # OSM-Dienste (auch die Grenzen der Gebiete) werden darin nachgebildet, Convex ist echt.
                         # Einmalig für den Test: npx convex env set OVERPASS_URLS http://127.0.0.1:8787/api/interpreter
                         # (danach wieder entfernen: npx convex env remove OVERPASS_URLS)
 ```
@@ -103,4 +118,4 @@ Auch Convex lässt sich selbst betreiben (Docker-Image `ghcr.io/get-convex/conve
 - Overpass, Nominatim und OpenFreeMap sind kostenlose öffentliche Dienste mit fairen Nutzungsregeln. Dank Cache fragt die App Overpass je Gebiet nur einmal. Sind alle Overpass-Server überlastet, zeigt die Karte „Erneut“.
 - Optional: Convex-Umgebungsvariable `OVERPASS_URLS` (kommagetrennt) legt eigene Overpass-Server fest.
 - Overpass-Abrufe über Convex sind begrenzt: 12 pro Minute je Aktion, 30 pro Minute insgesamt für die Karte (Vorladen getrennt, 15 pro Minute). Cache-Treffer zählen nicht. Ohne Anmeldung kann jemand mit mehreren Aktionen das gemeinsame Limit kurzzeitig ausschöpfen; neue Gebiete laden dann erst nach einer Minute. Der Cache wird täglich von Kacheln älter als 30 Tage befreit.
-- Wer einen Link kennt, kann alles in dieser Aktion ändern (so gewollt). Neue Aktionen kann jeder anlegen. Eine Aktion hat höchstens 20.000 Markierungen. Neue Aktionen sind auf 20 pro Minute begrenzt, über alle Nutzer.
+- Wer den Link zum Mitmachen kennt, kann alle Häuser dieser Aktion markieren (so gewollt); die Gebiete legt nur der Admin-Link fest. Neue Aktionen kann jeder anlegen. Eine Aktion hat höchstens 20.000 Markierungen. Neue Aktionen sind auf 20 pro Minute begrenzt, über alle Nutzer.
