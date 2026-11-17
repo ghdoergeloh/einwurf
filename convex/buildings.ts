@@ -56,6 +56,15 @@ const DEFAULT_ENDPOINTS = [
   "https://overpass.private.coffee/api/interpreter",
   "https://maps.mail.ru/osm/tools/overpass/api/interpreter",
 ];
+/** Größere Antworten verwirft der Abruf, statt sie zu parsen (Arbeitsspeicher der Action). */
+const MAX_RESPONSE_CHARS = 40_000_000;
+const hostOf = (url: string) => {
+  try {
+    return new URL(url).host;
+  } catch {
+    return "Overpass";
+  }
+};
 const USER_AGENT = "Einwurf/1.0 (gemeinsame Flyer-Verteilkarte)";
 /** Höchstens so viele Overpass-Abrufe pro Minute: je Aktion und insgesamt. */
 export const MAX_FETCHES_PER_MINUTE_PER_CAMPAIGN = 12;
@@ -239,7 +248,10 @@ async function askOverpass<T>(url: string, query: string, parse: (json: never) =
     await res.text().catch(() => "");
     throw new Error(`HTTP ${res.status}`);
   }
-  const json = (await res.json()) as { elements?: unknown[]; remark?: string };
+  // Größenbremse vor dem Parsen (Grenzen großer Städte samt Nachbarn können sehr groß werden).
+  const text = await res.text();
+  if (text.length > MAX_RESPONSE_CHARS) throw new Error(`Antwort zu groß (${Math.round(text.length / 1e6)} MB)`);
+  const json = JSON.parse(text) as { elements?: unknown[]; remark?: string };
   // Bei Zeitüberschreitung antwortet Overpass mit 200 und einem „remark“.
   if (json.remark && /error|timed out/i.test(json.remark)) throw new Error(json.remark);
   return parse(json as never);
@@ -269,9 +281,6 @@ export function overpassDetails(e: unknown): string {
   if (typeof details === "string" && details) return details;
   return e instanceof Error ? e.message : String(e);
 }
-
-/** Frist für einen Abruf ohne Sperre (z. B. Gebiete): so lange, wie alle Server zusammen höchstens brauchen. */
-export const overpassDeadline = () => Date.now() + lockMs();
 
 /**
  * Eine beliebige Overpass-Abfrage mit Ersatz-Servern wie bei den Gebäuden (siehe fetchOverpass).
@@ -328,7 +337,9 @@ export function askServers<T>(
         (e: unknown) => {
           settle();
           if (done) return;
-          problems.push(`${url}: ${e instanceof Error ? e.message : String(e)}`);
+          // Nur der Host: Eine URL aus OVERPASS_URLS könnte einen Zugangsschlüssel enthalten,
+          // und die Meldung sieht jeder mit einem Link (Gebiete-Panel).
+          problems.push(`${hostOf(url)}: ${(e instanceof Error ? e.message : String(e)).replaceAll(url, hostOf(url))}`);
           if (hedgeTimer) clearTimeout(hedgeTimer);
           if (!launch() && running.size === 0) {
             finish();

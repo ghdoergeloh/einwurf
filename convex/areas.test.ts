@@ -136,7 +136,7 @@ describe("Gebiete ermitteln", () => {
   });
 
   test("Overpass überlastet: Ersatz-Server, dann mehrere Versuche, dann „failed“ und erneut versuchen", async () => {
-    vi.stubEnv("OVERPASS_URLS", "https://eins.example/api,https://zwei.example/api");
+    vi.stubEnv("OVERPASS_URLS", "https://eins.example/api?key=GEHEIM,https://zwei.example/api");
     const good = overpassFor(A);
     const busy = vi.fn(async (url: string, init?: RequestInit) =>
       url.startsWith("https://eins") ? new Response("busy", { status: 429 }) : good(url, init),
@@ -153,14 +153,29 @@ describe("Gebiete ermitteln", () => {
     expect(failed).toMatchObject({ status: "failed" });
     // Die Antwort der Server steht für die Diagnose im Panel.
     expect(failed.lastError).toMatch(/^Grenzen am Mittelpunkt: /);
-    expect(failed.lastError).toContain("https://eins.example/api: HTTP 504");
-    expect(failed.lastError).toContain("https://zwei.example/api: HTTP 504");
+    expect(failed.lastError).toContain("eins.example: HTTP 504");
+    expect(failed.lastError).toContain("zwei.example: HTTP 504");
+    // Nur Hosts, keine vollständigen URLs (könnten Zugangsschlüssel enthalten)
+    expect(failed.lastError).not.toContain("https://");
+    expect(failed.lastError).not.toContain("GEHEIM");
     expect(await t2.query(api.areas.list, { slug: SLUG })).toEqual([]);
     vi.stubGlobal("fetch", overpassFor(A));
     await t2.mutation(api.areas.load, { adminKey: ADMIN });
     await t2.finishAllScheduledFunctions(vi.runAllTimers);
     expect(await names(t2)).toHaveLength(4);
     expect((await t2.query(api.areas.status, { slug: SLUG }))!.lastError).toBeNull();
+  });
+});
+
+describe("zu große Antwort", () => {
+  test("wird vor dem Parsen verworfen und im Panel genannt", async () => {
+    vi.stubEnv("OVERPASS_URLS", "https://gross.example/api");
+    const huge = "x".repeat(40_000_001);
+    vi.stubGlobal("fetch", vi.fn(async () => new Response(huge)));
+    const t = await create(A);
+    const s = (await t.query(api.areas.status, { slug: SLUG }))!;
+    expect(s.status).toBe("failed");
+    expect(s.lastError).toContain("gross.example: Antwort zu groß (40 MB)");
   });
 });
 

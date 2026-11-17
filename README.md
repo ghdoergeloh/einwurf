@@ -2,7 +2,7 @@
 
 Eine Karte für Verteilaktionen: Alle Häuser sind dunkelgrau. Wer einen Flyer eingeworfen hat, tippt das Haus an, und es wird gelb. Ein zweiter Tipp macht es dunkelgelb: Einwerfen nicht möglich, etwa wegen eines Aufklebers „Keine Werbung“ oder weil der Briefkasten nicht erreichbar ist. Ein dritter Tipp macht es wieder grau. Alle mit dem Link sehen die Änderungen sofort.
 
-- **Ohne Anmeldung.** Jede Aktion hat einen geheimen Link zum Mitmachen (`/v/<22 Zeichen>`, etwa 131 Bit Zufall) einen eigenen geheimen Link zum Ansehen (`/a/<22 Zeichen>`, siehe unten) und einen geheimen **Admin-Link** (`/admin/<22 Zeichen>`) für den Organisator, der die Gebiete festlegt. Aktionen werden nirgends aufgelistet.
+- **Ohne Anmeldung.** Jede Aktion hat einen geheimen Link zum Mitmachen (`/v/<22 Zeichen>`, etwa 131 Bit Zufall), einen eigenen geheimen Link zum Ansehen (`/a/<22 Zeichen>`, siehe unten) und einen geheimen **Admin-Link** (`/admin/<22 Zeichen>`) für den Organisator, der die Gebiete festlegt. Aktionen werden nirgends aufgelistet.
 - **Frontend:** React, Tailwind v4, MapLibre, Vite.
 - **Backend:** [Convex](https://convex.dev), live per Subscription.
 - **Kartendaten:** © OpenStreetMap-Mitwirkende. Grundkarte von [OpenFreeMap](https://openfreemap.org), Gebäude über die [Overpass API](https://overpass-api.de), Ortssuche über [Nominatim](https://nominatim.org). Alle ohne API-Schlüssel.
@@ -52,10 +52,11 @@ Convex speichert je markiertem Haus nur die OSM-ID und den Mittelpunkt, einsorti
 | --- | --- | --- |
 | `/v/…` zum Mitmachen | edit | Häuser markieren, teilen, Gebiet vorladen |
 | `/a/…` nur ansehen | view | Karte, Markierungen und Notizen live sehen (Tipp auf ein blaues Haus zeigt die Notiz), sonst nichts |
+| `/admin/…` Admin-Link | admin | Gebiete festlegen und alles, was edit kann; wird über die anderen Links nie herausgegeben |
 
 Der Teilen-Dialog zeigt beide Links getrennt („Zum Mitmachen“ und „Nur ansehen“). Ältere Aktionen bekommen ihren Ansehen-Link, sobald jemand mit dem Link zum Mitmachen den Teilen-Dialog öffnet. Die beiden Schlüssel sind unabhängig voneinander zufällig, der eine lässt sich aus dem anderen nicht ableiten.
 
-Durchgesetzt wird das im Backend (`convex/access.ts`): Jede Mutation an einer bestehenden Aktion verlangt mindestens die Rolle edit, mit dem Ansehen-Schlüssel gehen nur lesende Queries und das Laden der Häuser (im selben Kontingent wie die Aktion). Keine Query, die mit dem Ansehen-Schlüssel aufrufbar ist, liefert den Schlüssel zum Mitmachen. Ein Test (`convex/access.test.ts`) prüft jede öffentliche Mutation, Action und Query; kommt eine neue dazu, schlägt er fehl, bis ihre Rechte dort geprüft sind. Für eine dritte Rolle admin (Admin-Link, Gebietsauswahl) ist die Prüfung schon vorbereitet.
+Durchgesetzt wird das im Backend (`convex/access.ts`): Jede Mutation an einer bestehenden Aktion verlangt mindestens die Rolle edit, mit dem Ansehen-Schlüssel gehen nur lesende Queries und das Laden der Häuser (im selben Kontingent wie die Aktion). Keine Query, die mit dem Ansehen-Schlüssel aufrufbar ist, liefert den Schlüssel zum Mitmachen. Die Gebietsauswahl (`areas.select`, `areas.load`) verlangt die Rolle admin, also den Admin-Schlüssel; keine Query gibt ihn heraus. Ein Test (`convex/access.test.ts`) prüft jede öffentliche Mutation, Action und Query; kommt eine neue dazu, schlägt er fehl, bis ihre Rechte dort geprüft sind.
 
 Mit dem Link zum Mitmachen gibt es oben rechts den Umschalter **Bearbeiten / Ansehen**. Im Modus „Ansehen“ verhält sich die Karte wie beim Ansehen-Link, etwa damit beim Schieben in der Tasche oder beim Zeigen nichts markiert wird. Ein Tipp auf ein Haus zeigt dann nur einen Hinweis; ein Tipp oder langes Drücken auf ein blaues Haus zeigt seine Notiz zum Lesen (wie beim Ansehen-Link), ohne Bearbeiten. Das Handy merkt sich den Modus je Aktion; Standard ist „Bearbeiten“. Schieben, Zoomen, Doppeltipp und Standort funktionieren in beiden Ansichten.
 
