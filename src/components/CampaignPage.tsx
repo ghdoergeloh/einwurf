@@ -5,24 +5,43 @@ import { api } from "../../convex/_generated/api";
 import { markCellOf } from "../../convex/cells";
 import { countDelta, statusOf, type HouseStatus } from "../../convex/status";
 import { decodeBuildings } from "../../convex/osm";
-import { BuildingMap, type LoadState, type MapControls, type Mark, type Note, type NoteTarget } from "./BuildingMap";
+import { toAreas } from "../../convex/areaGeo";
+import { BuildingMap, type LoadState, type MapArea, type MapControls, type Mark, type Note, type NoteTarget } from "./BuildingMap";
 import { NoteSheet } from "./NoteSheet";
 import { ShareSheet } from "./ShareSheet";
+import { AreaEditBar, PlaceDialog, useAreaEditor } from "./AreaEditor";
+import type { BBox } from "../../convex/osm";
 import { LogoMark } from "./Logo";
-import { campaignPath, navigate, viewPath } from "../lib/router";
+import { adminPath, campaignPath, navigate, viewPath } from "../lib/router";
 import { loadViewMode, saveViewMode, type ViewMode } from "../lib/viewMode";
 
 interface Props {
-  /** Schlüssel aus dem Link: Bearbeiten-Schlüssel (`/v/…`) oder Ansehen-Schlüssel (`/a/…`). */
+  /**
+   * Schlüssel aus dem Link: Bearbeiten-Schlüssel (`/v/…`) oder Ansehen-Schlüssel (`/a/…`).
+   * Im Admin-Link der Bearbeiten-Schlüssel, den die Admin-Seite über campaigns.get erfährt.
+   */
   slug: string;
   isNew: boolean;
   /** Geöffnet über den Ansehen-Link `/a/…`. */
   viewLink: boolean;
+  /** Nur im Admin-Link: Schlüssel für die Gebietsauswahl. */
+  adminKey?: string;
 }
 
 type Toast = { text: string; tone: "error" | "info" };
 
-export function CampaignPage({ slug, isNew, viewLink }: Props) {
+/**
+ * Admin-Link (/admin/…): erfährt den Bearbeiten-Schlüssel und zeigt dieselbe Karte, dazu die
+ * Gebietsauswahl. Der Admin-Schlüssel selbst steht nur in der Adresse.
+ */
+export function AdminPage({ adminKey, isNew }: { adminKey: string; isNew: boolean }) {
+  const campaign = useQuery(api.campaigns.get, { slug: adminKey });
+  if (campaign === null || (campaign && campaign.role !== "admin")) return <NotFound />;
+  if (!campaign || !("slug" in campaign)) return <div className="fixed inset-0 bg-[#e9e7e1]" />;
+  return <CampaignPage slug={campaign.slug} isNew={isNew} viewLink={false} adminKey={adminKey} />;
+}
+
+export function CampaignPage({ slug, isNew, viewLink, adminKey }: Props) {
   const campaign = useQuery(api.campaigns.get, { slug });
   // Nur ansehen: Ansehen-Link, oder ein Ansehen-Schlüssel in einem /v/-Link (das Backend
   // entscheidet über die Rechte, die Oberfläche folgt ihm nur).
@@ -37,6 +56,18 @@ export function CampaignPage({ slug, isNew, viewLink }: Props) {
     [slug],
   );
   const readOnly = viewOnly || mode === "view";
+  // Gebiete: in jeder Rolle sichtbar (auch beim Ansehen); ändern nur im Admin-Link.
+  const areaList = useQuery(api.areas.list, { slug });
+  const areas = useMemo<MapArea[]>(
+    () => (areaList ? toAreas(areaList).map((a, i) => ({ ...a, labelAt: areaList[i].labelAt })) : []),
+    [areaList],
+  );
+  // Admin-Link: Modus „Gebiete bearbeiten“ (nach dem Anlegen gleich an).
+  const [editAreas, setEditAreas] = useState(isNew && !!adminKey);
+  const [mapView, setMapView] = useState<{ bbox: BBox; zoom: number } | null>(null);
+  const onViewChange = useCallback((bbox: BBox, zoom: number) => setMapView({ bbox, zoom }), []);
+  const editor = useAreaEditor({ adminKey, slug, active: editAreas, view: mapView, campaignAreas: areaList });
+  const [placeOpen, setPlaceOpen] = useState(false);
   // Nur die sichtbaren Zellen abonnieren: Ein Tipp schickt allen nur seine Zelle neu.
   const [cells, setCells] = useState<string[] | null>([]);
   const cellResults = useQueries(
@@ -76,6 +107,18 @@ export function CampaignPage({ slug, isNew, viewLink }: Props) {
   const [toast, setToast] = useState<Toast | null>(null);
   const toastTimer = useRef<ReturnType<typeof setTimeout> | null>(null);
   const controls = useRef<MapControls | null>(null);
+  const startEditAreas = useCallback(() => {
+    setShareOpen(false);
+    setEditAreas(true);
+    controls.current?.overview();
+  }, []);
+  // Neue Aktion: Karte gleich herauszoomen, damit die Ortsteile ringsum zu sehen sind.
+  useEffect(() => {
+    if (!editAreas) return;
+    const t = setTimeout(() => controls.current?.overview(), 300);
+    return () => clearTimeout(t);
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, []);
   const [noteTarget, setNoteTarget] = useState<NoteTarget | null>(null);
 
   const setMark = useMutation(api.marks.set).withOptimisticUpdate((store, args) => {
@@ -117,8 +160,8 @@ export function CampaignPage({ slug, isNew, viewLink }: Props) {
   useEffect(() => {
     if (!isNew) return;
     // „?neu“ aus der Adresse entfernen, damit der geteilte Link sauber ist.
-    navigate(campaignPath(slug), true);
-  }, [isNew, slug]);
+    navigate(adminKey ? adminPath(adminKey) : campaignPath(slug), true);
+  }, [isNew, slug, adminKey]);
 
   useEffect(() => {
     const root = document.documentElement;
@@ -192,7 +235,13 @@ export function CampaignPage({ slug, isNew, viewLink }: Props) {
     [showToast],
   );
 
+  // Admin-Schlüssel unter /v/…: auf den Admin-Link umleiten, damit nie der Admin-Schlüssel
+  // als Link zum Mitmachen im Teilen-Dialog landet.
+  useEffect(() => {
+    if (!adminKey && campaign?.role === "admin") navigate(adminPath(slug), true);
+  }, [adminKey, campaign?.role, slug]);
   if (campaign === null) return <NotFound />;
+  if (!adminKey && campaign?.role === "admin") return null;
 
   // Weitergegeben wird immer der Bearbeiten-Link, auch mit dem Admin-Link (#2). Mit dem
   // Ansehen-Schlüssel kennt die Seite den Bearbeiten-Schlüssel gar nicht; der eigene
@@ -222,6 +271,10 @@ export function CampaignPage({ slug, isNew, viewLink }: Props) {
           loadBuildings={loadBuildings}
           loadedMarkCells={loadedMarkCells}
           controlsRef={controls}
+          areas={editAreas ? editor.areas : areas}
+          editAreas={editAreas}
+          onAreaTap={editor.toggle}
+          onViewChange={onViewChange}
         />
       )}
 
@@ -267,6 +320,21 @@ export function CampaignPage({ slug, isNew, viewLink }: Props) {
               <span className="sr-only">Häuser, bei denen Einwerfen nicht möglich war</span>
             </div>
           )}
+          {adminKey && (
+            <button
+              type="button"
+              onClick={() => (editAreas ? setEditAreas(false) : startEditAreas())}
+              aria-pressed={editAreas}
+              className="grid size-10 shrink-0 place-items-center rounded-xl bg-white/10 transition hover:bg-white/20"
+              aria-label="Gebiete bearbeiten"
+              title="Gebiete bearbeiten"
+            >
+              <svg viewBox="0 0 24 24" className="size-5" fill="none" stroke="currentColor" strokeWidth="2" aria-hidden="true">
+                <path d="M9 4 3 6.5v13L9 17l6 2.5 6-2.5v-13L15 6.5 9 4Z" strokeLinejoin="round" />
+                <path d="M9 4v13M15 6.5v13" />
+              </svg>
+            </button>
+          )}
           <button
             type="button"
             onClick={() => setShareOpen(true)}
@@ -282,7 +350,20 @@ export function CampaignPage({ slug, isNew, viewLink }: Props) {
             </svg>
           </button>
         </div>
-        {campaign && !viewOnly && (
+        {campaign && editAreas && adminKey && (
+          <AreaEditBar
+            selectedCount={editor.selectedCount}
+            placeLabel={campaign.placeLabel}
+            loading={editor.loading}
+            tooFar={editor.tooFar}
+            empty={editor.empty}
+            error={editor.error}
+            onRetry={editor.retry}
+            onChangePlace={() => setPlaceOpen(true)}
+            onDone={() => setEditAreas(false)}
+          />
+        )}
+        {campaign && !viewOnly && !editAreas && (
           <div className="mx-auto mt-2 flex max-w-3xl justify-end">
             <ModeSwitch mode={mode} onChange={setMode} />
           </div>
@@ -331,6 +412,18 @@ export function CampaignPage({ slug, isNew, viewLink }: Props) {
           isNew={welcome}
           showPrefetch={!readOnly}
           onClose={() => setShareOpen(false)}
+          adminUrl={adminKey ? `${location.origin}${adminPath(adminKey)}` : undefined}
+          onChooseAreas={adminKey ? startEditAreas : undefined}
+        />
+      )}
+      {placeOpen && adminKey && (
+        <PlaceDialog
+          adminKey={adminKey}
+          onClose={() => setPlaceOpen(false)}
+          onDone={(p) => {
+            setPlaceOpen(false);
+            controls.current?.flyTo({ lat: p.lat, lng: p.lng });
+          }}
         />
       )}
     </div>
@@ -513,7 +606,7 @@ function StatusPill({
   );
 }
 
-function NotFound() {
+export function NotFound() {
   return (
     <div className="grid min-h-full place-items-center bg-paper p-6 text-center">
       <div className="max-w-sm">

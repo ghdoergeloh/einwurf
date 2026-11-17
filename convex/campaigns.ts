@@ -1,5 +1,6 @@
 import { mutation, query } from "./_generated/server";
 import { startPrefetch } from "./buildings";
+import { startInitialAreas } from "./areas";
 import { campaignByKey, requireRole, keyTaken } from "./access";
 import { ConvexError, v } from "convex/values";
 import {
@@ -11,15 +12,24 @@ import {
   cleanText,
 } from "./validation";
 
+function assertBBox(bbox: number[]) {
+  if (bbox.length !== 4) throw new ConvexError("Ungültiger Ausschnitt");
+  const [w, s, e, n] = bbox;
+  assertLatLng(s, w);
+  assertLatLng(n, e);
+  if (!(w < e && s < n)) throw new ConvexError("Ungültiger Ausschnitt");
+}
+
 /**
  * Legt eine Verteilaktion an. Die geheimen Schlüssel erzeugt der Browser mit
  * crypto.getRandomValues (Zufall in Convex-Mutationen ist deterministisch).
- * `viewKey` fehlt nur bei noch geöffneten alten Seiten.
+ * `viewKey` und `adminKey` fehlen nur bei noch geöffneten alten Seiten.
  */
 export const create = mutation({
   args: {
     slug: v.string(),
     viewKey: v.optional(v.string()),
+    adminKey: v.optional(v.string()),
     name: v.string(),
     placeLabel: v.string(),
     center: v.object({ lat: v.number(), lng: v.number() }),
@@ -28,17 +38,17 @@ export const create = mutation({
   handler: async (ctx, args) => {
     assertSlug(args.slug);
     assertLatLng(args.center.lat, args.center.lng);
-    if (args.bbox) {
-      const [w, s, e, n] = args.bbox;
-      if (args.bbox.length !== 4) throw new ConvexError("Ungültiger Ausschnitt");
-      assertLatLng(s, w);
-      assertLatLng(n, e);
-      if (!(w < e && s < n)) throw new ConvexError("Ungültiger Ausschnitt");
-    }
+    if (args.bbox) assertBBox(args.bbox);
     if (await keyTaken(ctx, args.slug)) throw new ConvexError("Link existiert bereits");
     if (args.viewKey !== undefined) {
       assertSlug(args.viewKey);
       if (args.viewKey === args.slug || (await keyTaken(ctx, args.viewKey))) {
+        throw new ConvexError("Link existiert bereits");
+      }
+    }
+    if (args.adminKey !== undefined) {
+      assertSlug(args.adminKey);
+      if (args.adminKey === args.slug || args.adminKey === args.viewKey || (await keyTaken(ctx, args.adminKey))) {
         throw new ConvexError("Link existiert bereits");
       }
     }
@@ -50,9 +60,10 @@ export const create = mutation({
       throw new ConvexError("Gerade werden sehr viele Aktionen angelegt. Bitte in einer Minute noch einmal versuchen.");
     }
 
-    await ctx.db.insert("campaigns", {
+    const campaignId = await ctx.db.insert("campaigns", {
       slug: args.slug,
       viewKey: args.viewKey,
+      adminKey: args.adminKey,
       name: cleanText(args.name, MAX_NAME_LENGTH, "Name"),
       placeLabel: cleanText(args.placeLabel, MAX_PLACE_LENGTH, "Ort"),
       center: args.center,
@@ -63,6 +74,8 @@ export const create = mutation({
     // Häuser des Ortes im Hintergrund vorladen, damit die Helfer nicht warten.
     // (In Unit-Tests aus, siehe vite.config.ts; dort wird es gezielt geprüft.)
     if (process.env.PREFETCH_ON_CREATE !== "off") await startPrefetch(ctx, args.slug);
+    // Ortsteile rund um die Adresse laden und den an der Adresse wählen (Admin wählt weitere dazu).
+    if (process.env.AREAS_ON_CREATE !== "off") await startInitialAreas(ctx, campaignId);
     return args.slug;
   },
 });
@@ -106,5 +119,27 @@ export const ensureViewKey = mutation({
     if (await keyTaken(ctx, viewKey)) throw new ConvexError("Link existiert bereits");
     await ctx.db.patch(campaign._id, { viewKey });
     return viewKey;
+  },
+});
+
+/**
+ * Mittelpunkt der Aktion (Adresse) ändern, z. B. nach einem Umzug des Treffpunkts. Nur mit dem
+ * Admin-Schlüssel. Ändert Startausschnitt und Vorladen ohne gewählte Gebiete, nicht die Gebiete.
+ */
+export const setPlace = mutation({
+  args: {
+    adminKey: v.string(),
+    placeLabel: v.string(),
+    center: v.object({ lat: v.number(), lng: v.number() }),
+    bbox: v.optional(v.array(v.number())),
+  },
+  handler: async (ctx, { adminKey, placeLabel, center, bbox }) => {
+    const { campaign } = await requireRole(ctx, adminKey, "admin");
+    assertLatLng(center.lat, center.lng);
+    if (bbox) assertBBox(bbox);
+    await ctx.db.patch(campaign._id, { placeLabel: cleanText(placeLabel, MAX_PLACE_LENGTH, "Ort"), center, bbox });
+    // Ohne gewählte Gebiete richtet sich das Vorladen nach dem Mittelpunkt: neu planen.
+    const job = await ctx.db.query("prefetchJobs").withIndex("by_slug", (q) => q.eq("slug", campaign.slug)).unique();
+    if (job) await startPrefetch(ctx, campaign.slug, { replan: true });
   },
 });

@@ -1,0 +1,368 @@
+import { describe, expect, test } from "vitest";
+import { readFileSync } from "node:fs";
+import type { Position } from "geojson";
+import {
+  areaAt,
+  chooseUnits,
+  boundaryTileOf,
+  boundaryTilesIn,
+  boundaryTileBBox,
+  unitQuery,
+  overviewZoom,
+  areasOfUnit,
+  chooseSubdivision,
+  compactGeometry,
+  decodeGeometry,
+  geometryArea,
+  interiorPoint,
+  parseBoundaries,
+  pointInGeometry,
+  relationGeometry,
+  simplifyRing,
+  candidateQuery,
+  geometryQuery,
+  parseCandidates,
+  preselect,
+  bboxOf,
+  toAreas,
+  selectionOf,
+  touchedCells,
+  visibleIn,
+  type Boundary,
+} from "./areaGeo";
+
+const box = (w: number, s: number, e: number, n: number): Position[] => [[w, s], [e, s], [e, n], [w, n], [w, s]];
+const way = (pts: Position[], role = "outer") => ({ type: "way", role, geometry: pts.map(([lon, lat]) => ({ lat, lon })) });
+const boundary = (id: number, name: string, level: number, ring: Position[]): Boundary => ({ id, name, level, geometry: [[ring]] });
+
+describe("relationGeometry", () => {
+  test("setzt offene Teilstücke zu einem Ring zusammen und hängt Löcher an", () => {
+    const g = relationGeometry({
+      type: "relation",
+      id: 1,
+      members: [
+        way([[0, 0], [2, 0], [2, 2]]),
+        way([[2, 2], [0, 2], [0, 0]]),
+        way(box(0.5, 0.5, 1, 1), "inner"),
+      ],
+    });
+    expect(g).toHaveLength(1);
+    expect(g[0]).toHaveLength(2);
+    expect(pointInGeometry([0.2, 0.2], g)).toBe(true);
+    expect(pointInGeometry([0.7, 0.7], g)).toBe(false); // im Loch
+    expect(pointInGeometry([3, 3], g)).toBe(false);
+  });
+});
+
+describe("parse", () => {
+  test("Liste ohne Geometrie: auch boundary=place, ohne Ausdehnung fällt weg", () => {
+    const bounds = { minlat: 0, minlon: 0, maxlat: 1, maxlon: 1 };
+    const list = parseCandidates({
+      elements: [
+        { type: "relation", id: 1, tags: { boundary: "administrative", admin_level: "10", name: "A" }, bounds },
+        { type: "relation", id: 2, tags: { boundary: "place", name: "B" }, bounds },
+        { type: "relation", id: 3, tags: { boundary: "administrative", admin_level: "10", name: "C" } },
+      ],
+    });
+    expect(list.map((c) => [c.id, c.level])).toEqual([[1, 10], [2, 99]]);
+  });
+
+  test("Vorauswahl: nur feinere Grenzen, deren Ausdehnung im Ort liegt", () => {
+    const ort = { id: 1, name: "Ort", level: 8, bbox: [0, 0, 4, 2] as [number, number, number, number] };
+    const c = (id: number, level: number, bbox: [number, number, number, number]) => ({ id, name: String(id), level, bbox });
+    const picked = preselect(ort, [c(1, 8, [0, 0, 4, 2]), c(2, 10, [0, 0, 2, 2]), c(3, 10, [3, 0, 5, 2]), c(4, 7, [0, 0, 1, 1]), c(5, 9, [2, 0, 4.0001, 2])]);
+    expect(picked.map((p) => p.id)).toEqual([2, 5]);
+  });
+
+  test("Grenzen ohne Namen oder Stufe fallen weg; boundary=place zählt als feinste Stufe", () => {
+    const rel = (id: number, tags: Record<string, string>) => ({ type: "relation", id, tags, members: [way(box(0, 0, 1, 1))] });
+    const list = parseBoundaries({
+      elements: [
+        rel(1, { boundary: "administrative", admin_level: "10", name: "Roisdorf" }),
+        rel(2, { boundary: "administrative", admin_level: "10" }),
+        rel(3, { boundary: "place", name: "Siedlung" }),
+        rel(4, { boundary: "postal_code", name: "53332" }),
+      ],
+    });
+    expect(list.map((b) => [b.id, b.level])).toEqual([[1, 10], [3, 99]]);
+  });
+
+  test("Gemeinden mit Ausdehnung", () => {
+    const list = parseCandidates({
+      elements: [{ type: "relation", id: 7, tags: { boundary: "administrative", admin_level: "8", name: "Bornheim" }, bounds: { minlat: 50.7, minlon: 6.9, maxlat: 50.8, maxlon: 7.0 } }],
+    });
+    expect(list).toEqual([{ id: 7, name: "Bornheim", level: 8, bbox: [6.9, 50.7, 7.0, 50.8] }]);
+    expect(unitQuery([6.9, 50.7, 7.0, 50.8])).toContain('admin_level~"^(6|7|8)$"](50.7,6.9,50.8,7);out tags bb;');
+  });
+
+  test("Abfrage der Teilgebiete nur feiner als der Ort", () => {
+    const q = candidateQuery(8, [6.9, 50.7, 7.0, 50.8]);
+    expect(q).toContain('admin_level~"^(9|10|11|12)$"](50.7,6.9,50.8,7)');
+    expect(q).toContain("out tags bb");
+    expect(q).not.toContain("geom");
+    expect(geometryQuery([42, 7])).toContain("rel(id:42,7);out geom;");
+  });
+});
+
+describe("chooseSubdivision", () => {
+  const ort = boundary(100, "Ort", 8, box(0, 0, 4, 2));
+  const teile = [
+    boundary(1, "West", 10, box(0, 0, 2, 2)),
+    boundary(2, "Ost", 10, box(2, 0, 4, 2)),
+  ];
+  // Nachbar, der nur die Grenze berührt
+  const nachbar = boundary(3, "Nachbarort", 10, box(4, 0, 6, 2));
+  const bezirk = [boundary(5, "Bezirk Süd", 9, box(0, 0, 4, 1)), boundary(6, "Bezirk Nord", 9, box(0, 1, 4, 2))];
+
+  test("feinste lückenlose Stufe, ohne Nachbarn", () => {
+    expect(chooseSubdivision(ort, [...teile, nachbar, ...bezirk])?.map((b) => b.name)).toEqual(["West", "Ost"]);
+  });
+  test("deckt die feinste Stufe nicht alles ab, gilt die nächstgröbere", () => {
+    expect(chooseSubdivision(ort, [teile[0], ...bezirk])?.map((b) => b.name)).toEqual(["Bezirk Süd", "Bezirk Nord"]);
+  });
+  test("nur ein Teilgebiet oder keins: keine Unterteilung", () => {
+    expect(chooseSubdivision(ort, [boundary(7, "Alles", 10, box(0, 0, 4, 2))])).toBeNull();
+    expect(chooseSubdivision(ort, [nachbar])).toBeNull();
+  });
+});
+
+describe("Geometrie", () => {
+  test("Fläche mit Loch", () => {
+    const k = Math.cos(0);
+    expect(geometryArea([[box(0, 0, 2, 2), box(0.5, 0.5, 1.5, 1.5)]])).toBeCloseTo(4 * k - 1 * k);
+  });
+
+  test("Beschriftungspunkt liegt auch bei einem „C“ im Gebiet", () => {
+    const c: Position[] = [[0, 0], [3, 0], [3, 1], [1, 1], [1, 2], [3, 2], [3, 3], [0, 3], [0, 0]];
+    const p = interiorPoint([[c]]);
+    expect(pointInGeometry(p, [[c]])).toBe(true);
+  });
+
+  test("Vereinfachen entfernt Punkte auf einer Geraden und behält Ecken", () => {
+    const ring: Position[] = [[0, 0], [0.5, 0.000001], [1, 0], [1, 1], [0.5, 1], [0, 1], [0, 0]];
+    const s = simplifyRing(ring, 0.00002);
+    expect(s).toEqual([[0, 0], [1, 0], [1, 1], [0, 1], [0, 0]]);
+  });
+
+  test("compactGeometry wird gröber, bis es passt", () => {
+    const ring: Position[] = [];
+    for (let i = 0; i < 2000; i++) {
+      const a = (i / 2000) * 2 * Math.PI;
+      ring.push([7 + 0.05 * Math.cos(a) + 0.0003 * Math.sin(a * 97), 50.7 + 0.03 * Math.sin(a)]);
+    }
+    ring.push(ring[0]);
+    const text = compactGeometry([[ring]], 4_000);
+    expect(text.length).toBeLessThanOrEqual(4_000);
+    const g = decodeGeometry(text);
+    expect(g[0][0].length).toBeGreaterThanOrEqual(4);
+    expect(pointInGeometry([7, 50.7], g)).toBe(true);
+  });
+
+});
+
+describe("Zuordnung", () => {
+  test("areaAt und toAreas", () => {
+    const list = [
+      { id: "relation/1", name: "West", geometry: JSON.stringify([[box(0, 0, 2, 2)]]), cells: "0:0 1:0", selected: true },
+      { id: "relation/2", name: "Ost", geometry: JSON.stringify([[box(2, 0, 4, 2)]]), cells: "", selected: false },
+    ];
+    const areas = toAreas(list);
+    expect(areas.map((a) => [a.id, a.selected])).toEqual([["relation/1", true], ["relation/2", false]]);
+    expect(areaAt([3, 1], areas)?.name).toBe("Ost");
+    expect(areaAt([5, 1], areas)).toBeNull();
+    expect(areas[0].cells).toEqual(["0:0", "1:0"]);
+    expect(areas[1].cells).toEqual([]);
+  });
+});
+
+describe("Review-Befunde", () => {
+  test("C1: boundary=place nur als Ersatz, überlappende Stufen gelten nicht als lückenlos", () => {
+    const ort = boundary(100, "Ort", 8, box(0, 0, 4, 2));
+    const teile = [boundary(1, "West", 10, box(0, 0, 2, 2)), boundary(2, "Ost", 10, box(2, 0, 4, 2))];
+    const places = [
+      boundary(3, "Suburb West", 99, box(0, 0, 2, 2)),
+      boundary(4, "Quarter A", 99, box(0, 0, 1, 2)),
+      boundary(5, "Quarter B", 99, box(1, 0, 2, 2)),
+    ];
+    expect(chooseSubdivision(ort, [...teile, ...places])?.map((b) => b.name)).toEqual(["West", "Ost"]);
+    // Ohne Verwaltungsgrenzen: überlappende place-Grenzen (200 % der Westhälfte) sind keine Teilung
+    expect(chooseSubdivision(ort, places)).toBeNull();
+    // Überlappung allein: Nord, Süd und eine Mitte über beiden decken 100 % ab, sind aber keine Teilung
+    const ueberlappend = [
+      boundary(8, "Nord", 10, box(0, 1, 4, 2)),
+      boundary(9, "Süd", 10, box(0, 0, 4, 1)),
+      boundary(10, "Mitte", 10, box(0, 0.5, 4, 1.5)),
+    ];
+    expect(chooseSubdivision(ort, ueberlappend)).toBeNull();
+    // Reihenfolge: lückenlose Verwaltungsgrenzen gehen lückenlosen place-Grenzen vor
+    const placeGanz = [boundary(11, "P-Nord", 99, box(0, 1, 4, 2)), boundary(12, "P-Süd", 99, box(0, 0, 4, 1))];
+    expect(chooseSubdivision(ort, [...placeGanz, ...teile])?.map((b) => b.name)).toEqual(["West", "Ost"]);
+    // Lückenlose place-Grenzen als Ersatz
+    const ganz = [boundary(6, "Nord", 99, box(0, 1, 4, 2)), boundary(7, "Süd", 99, box(0, 0, 4, 1))];
+    expect(chooseSubdivision(ort, ganz)?.map((b) => b.name)).toEqual(["Nord", "Süd"]);
+  });
+
+  test("C4: Kacheln eines schmalen Streifens werden erkannt", () => {
+    const streifen = [[box(-0.02, 0.001, 0.02, 0.002)]];
+    const cells = touchedCells(streifen);
+    expect(cells).toContain("0:0");
+    expect(cells).toContain("-4:0");
+    expect(cells).not.toContain("0:1");
+  });
+
+  test("C2: Kacheln einer großen Fläche schnell", () => {
+    const ring: Position[] = [];
+    for (let i = 0; i < 4000; i++) {
+      const a = (i / 4000) * 2 * Math.PI;
+      ring.push([7 + 0.2 * Math.cos(a) + 0.002 * Math.sin(a * 131), 50.9 + 0.15 * Math.sin(a)]);
+    }
+    ring.push(ring[0]);
+    const t0 = performance.now();
+    const cells = touchedCells([[ring]]);
+    expect(performance.now() - t0).toBeLessThan(200);
+    expect(cells.length).toBeGreaterThan(3000);
+    expect(cells).toContain(`${Math.floor(7 / 0.005)}:${Math.floor(50.9 / 0.005)}`);
+  });
+});
+
+describe("nur Einträge in gewählten Gebieten (S8)", () => {
+  const west = { geometry: [[box(0, 0, 2, 2)]], cells: ["0:0"] };
+  const ost = { geometry: [[box(2, 0, 4, 2)]], cells: ["400:0"] };
+  const marks = new Map([
+    ["way/1", { osmId: "way/1", center: [1, 1], status: "done" }],
+    ["way/2", { osmId: "way/2", center: [3, 1], status: "blocked" }],
+  ]);
+  const notes = new Map([
+    ["way/2", { osmId: "way/2", center: [3, 1], text: "Hund" }],
+    ["way/3", { osmId: "way/3", center: [9, 9], text: "außerhalb des Ortes" }],
+  ]);
+
+  test("Markierung und Notiz außerhalb der Auswahl werden ausgeblendet", () => {
+    const sel = selectionOf([{ ...west, selected: true }, { ...ost, selected: false }]);
+    expect([...visibleIn(marks, sel).keys()]).toEqual(["way/1"]);
+    expect([...visibleIn(notes, sel).keys()]).toEqual([]);
+  });
+
+  test("ohne Auswahl (nichts gewählt oder keine Gebiete) bleibt alles sichtbar", () => {
+    expect(visibleIn(marks, selectionOf([{ ...west, selected: false }, { ...ost, selected: false }]))).toBe(marks);
+    expect(visibleIn(notes, selectionOf(null))).toBe(notes);
+  });
+
+  test("Auswahl erweitert: wieder sichtbar", () => {
+    const beide = selectionOf([{ ...west, selected: true }, { ...ost, selected: true }]);
+    expect([...visibleIn(marks, beide).keys()]).toEqual(["way/1", "way/2"]);
+    expect([...visibleIn(notes, beide).keys()]).toEqual(["way/2"]);
+  });
+});
+
+describe("gemischte Stufen (wie Bornheim: Ortschaften teils auf Stufe 9, teils auf 10)", () => {
+  const ort = boundary(100, "Ort", 8, box(0, 0, 4, 2));
+  // Stufe 9 deckt drei Viertel ab, Stufe 10 den Rest und zusätzlich einen Teil eines Stufe-9-Gebiets.
+  const stufe9 = [
+    boundary(1, "Hersel", 9, box(0, 0, 1, 2)),
+    boundary(2, "Roisdorf", 9, box(1, 0, 2, 2)),
+    boundary(3, "Hemmerich/Kardorf", 9, box(2, 0, 3, 2)),
+  ];
+  const stufe10 = [
+    boundary(4, "Bornheim", 10, box(3, 0, 4, 1)),
+    boundary(5, "Brenig", 10, box(3, 1, 4, 2)),
+    boundary(6, "Kardorf", 10, box(2, 0, 3, 1)), // liegt in Hemmerich/Kardorf
+  ];
+  // Nachbarort mit eigenem Ortsteil, der nur die Grenze berührt
+  const nachbar = boundary(7, "Nachbar", 9, box(4, 0, 5, 2));
+
+  test("füllt die Lücken der gröberen Stufe mit der feineren, ohne Doppelte", () => {
+    expect(chooseSubdivision(ort, [...stufe10, nachbar, ...stufe9])?.map((b) => b.name).sort()).toEqual(
+      ["Bornheim", "Brenig", "Hemmerich/Kardorf", "Hersel", "Roisdorf"],
+    );
+  });
+
+  test("eine lückenlose einzelne Stufe geht weiter vor", () => {
+    const ganz10 = [...stufe10.slice(0, 2), boundary(8, "West", 10, box(0, 0, 3, 2))];
+    expect(chooseSubdivision(ort, [...stufe9, ...ganz10])?.map((b) => b.name).sort()).toEqual(["Bornheim", "Brenig", "West"]);
+  });
+
+  test("bleibt auch gemischt eine Lücke, gilt der ganze Ort", () => {
+    expect(chooseSubdivision(ort, [stufe9[0], stufe10[0]])).toBeNull();
+  });
+});
+
+describe("echte OSM-Daten (vereinfacht, fixtures/osm)", () => {
+  const load = (name: string) =>
+    parseBoundaries(JSON.parse(readFileSync(new URL(`../fixtures/osm/${name}`, import.meta.url), "utf8")));
+
+  /** Wie der Code: Liste mit Ausdehnung, Vorauswahl, dann Grenzen nur für den Ort und die Kandidaten. */
+  const pipeline = (all: ReturnType<typeof load>, parentId: number) => {
+    const asCandidate = (b: (typeof all)[number]) => ({ id: b.id, name: b.name, level: b.level, bbox: bboxOf(b.geometry) });
+    const parentBoundary = all.find((b) => b.id === parentId)!;
+    const picked = preselect(asCandidate(parentBoundary), all.map(asCandidate));
+    const ids = new Set(picked.map((c) => c.id));
+    return { parts: chooseSubdivision(parentBoundary, all.filter((b) => ids.has(b.id))), picked: picked.length, total: all.length };
+  };
+
+  test("Vorauswahl ohne Geometrie lässt Nachbarorte weg und ändert das Ergebnis nicht", () => {
+    for (const [file, id] of [["overpass-bornheim.json", 168426], ["overpass-bonn.json", 62508]] as const) {
+      const all = load(file);
+      const { parts, picked, total } = pipeline(all, id);
+      expect(picked).toBeLessThan(total - 5);
+      expect(parts!.map((p) => p.id).sort()).toEqual(chooseSubdivision(all.find((b) => b.id === id)!, all)!.map((p) => p.id).sort());
+    }
+  });
+
+  test("Bornheim: Ortschaften teils auf Stufe 9, teils auf 10, ohne Nachbarorte", () => {
+    const all = load("overpass-bornheim.json");
+    const parts = chooseSubdivision(all.find((b) => b.id === 168426)!, all)!;
+    expect(parts.map((p) => p.name).sort((a, b) => a.localeCompare(b, "de"))).toEqual([
+      "Bornheim", "Brenig", "Dersdorf", "Hemmerich/Kardorf", "Hersel", "Merten", "Roisdorf",
+      "Rösberg", "Sechtem", "Uedorf", "Walberberg", "Waldorf", "Widdig",
+    ]);
+  });
+
+  test("Bonn (Großstadt): die 51 Ortsteile auf Stufe 10, nicht die 4 Stadtbezirke", () => {
+    const all = load("overpass-bonn.json");
+    const parts = chooseSubdivision(all.find((b) => b.id === 62508)!, all)!;
+    expect(parts).toHaveLength(51);
+    expect(new Set(parts.map((p) => p.level))).toEqual(new Set([10]));
+    expect(parts.map((p) => p.name)).toEqual(expect.arrayContaining(["Bonn-Zentrum", "Alt-Godesberg", "Beuel-Mitte", "Duisdorf"]));
+  });
+});
+
+describe("Gemeinden und Grenz-Kacheln", () => {
+  const c = (id: number, level: number, bbox: [number, number, number, number]) => ({ id, name: String(id), level, bbox });
+
+  test("Gemeinden auf Stufe 8; Kreis nur, wenn keine Gemeinde in ihm liegt (kreisfreie Stadt)", () => {
+    const kreis = c(1, 6, [0, 0, 10, 10]);
+    const gemeinde = c(2, 8, [1, 1, 3, 3]);
+    const kreisfreieStadt = c(3, 6, [11, 0, 14, 4]);
+    const regierungsbezirk = c(4, 5, [0, 0, 20, 20]);
+    expect(chooseUnits([kreis, gemeinde, kreisfreieStadt, regierungsbezirk]).map((u) => u.id)).toEqual([2, 3]);
+    // Stadt auf Stufe 7 innerhalb eines Kreises ohne Gemeinden darin: nur die feinere
+    expect(chooseUnits([c(5, 6, [0, 0, 10, 10]), c(6, 7, [1, 1, 4, 4])]).map((u) => u.id)).toEqual([6]);
+  });
+
+  test("Gemeinde ohne Unterteilung ist selbst ein Gebiet", () => {
+    const dorf = boundary(9, "Kleindorf", 8, box(0, 0, 1, 1));
+    expect(areasOfUnit(dorf, []).map((a) => a.name)).toEqual(["Kleindorf"]);
+  });
+
+  test("Kacheln", () => {
+    expect(boundaryTileOf(7.01, 50.71)).toBe("140:1014");
+    expect(boundaryTileBBox("140:1014").map((x) => Math.round(x * 100) / 100)).toEqual([7, 50.7, 7.05, 50.75]);
+    expect(boundaryTilesIn([7.01, 50.71, 7.06, 50.72]).sort()).toEqual(["140:1014", "141:1014"]);
+  });
+});
+
+describe("Übersicht im Bearbeiten-Modus (S1)", () => {
+  const tiles = (w: number, h: number, z: number, lat: number) => {
+    const d = 360 / (512 * 2 ** z);
+    return (Math.ceil((w * d) / 0.05) + 1) * (Math.ceil((h * d * Math.cos((lat * Math.PI) / 180)) / 0.05) + 1);
+  };
+  test("Handy: Zoomstufe 12; Desktop: so nah, dass höchstens 12 Grenz-Kacheln im Bild sind", () => {
+    expect(overviewZoom(390, 844, 50.76)).toBe(12);
+    for (const [w, h] of [[1280, 800], [1440, 900], [1920, 1080]]) {
+      const z = overviewZoom(w, h, 50.76);
+      expect(z).toBeGreaterThan(12);
+      expect(tiles(w, h, z, 50.76)).toBeLessThanOrEqual(12);
+    }
+  });
+});

@@ -4,11 +4,13 @@ import { internal } from "./_generated/api";
 import { ConvexError, v } from "convex/values";
 import {
   BUILDINGS_FORMAT,
+  CELL_SIZE,
   MAX_CELL_SPAN,
   buildQuery,
   cellKeyOf,
   cellsBBox,
   centerOf,
+  decodeBuildings,
   encodeBuildings,
   parseCellKey,
   parseOverpass,
@@ -17,6 +19,9 @@ import {
   type BuildingFeature,
 } from "./osm";
 import { SLUG_PATTERN } from "./validation";
+import { areaRows } from "./areaStore";
+import { DEFAULT_OVERPASS_ENDPOINTS } from "./areaLoad";
+import { decodeCells, decodeGeometry, selectionOf, type Selection } from "./areaGeo";
 import { campaignByKey, hasRole, requireRole } from "./access";
 
 /**
@@ -43,12 +48,15 @@ const OVERPASS_TIMEOUT_MS = 60_000;
 const OVERPASS_HEDGE_MS = 35_000;
 /** Ein weiterer Server lohnt nur, wenn bis zur Gesamtfrist noch so viel Zeit bleibt. */
 const MIN_ATTEMPT_MS = 15_000;
-/** Öffentliche Overpass-Server, der Reihe nach. Überschreibbar mit der Convex-Umgebungsvariable OVERPASS_URLS. */
-const DEFAULT_ENDPOINTS = [
-  "https://overpass-api.de/api/interpreter",
-  "https://overpass.private.coffee/api/interpreter",
-  "https://maps.mail.ru/osm/tools/overpass/api/interpreter",
-];
+/** Größere Antworten verwirft der Abruf, statt sie zu parsen (Arbeitsspeicher der Action). */
+const MAX_RESPONSE_CHARS = 40_000_000;
+const hostOf = (url: string) => {
+  try {
+    return new URL(url).host;
+  } catch {
+    return "Overpass";
+  }
+};
 const USER_AGENT = "Einwurf/1.0 (gemeinsame Flyer-Verteilkarte)";
 /** Höchstens so viele Overpass-Abrufe pro Minute: je Aktion und insgesamt. */
 export const MAX_FETCHES_PER_MINUTE_PER_CAMPAIGN = 12;
@@ -78,6 +86,27 @@ export const rateKeyOf = internalQuery({
   handler: async (ctx, { slug }) => (await campaignByKey(ctx, slug))?.campaign.slug ?? null,
 });
 
+/**
+ * Gewählte Gebiete einer Aktion (Grenze als JSON, berührte Kacheln); [] = keine Einschränkung
+ * (nichts gewählt oder noch keine Gebiete), null = keine Aktion. Erwartet den Bearbeiten-Schlüssel (rateKeyOf).
+ */
+export const selectedAreas = internalQuery({
+  args: { slug: v.string() },
+  handler: async (ctx, { slug }): Promise<{ geometry: string; cells: string }[] | null> => {
+    const campaign = await ctx.db.query("campaigns").withIndex("by_slug", (q) => q.eq("slug", slug)).unique();
+    if (!campaign) return null;
+    const rows = await areaRows(ctx, campaign._id);
+    return (rows ?? []).filter((r) => r.selected).map(({ row }) => ({ geometry: row.geometry, cells: row.cells }));
+  },
+});
+
+/** Nur Häuser, deren Mittelpunkt in einem gewählten Gebiet liegt. */
+function filterBuildings(data: string, selection: Selection): string {
+  const all = decodeBuildings(data);
+  const kept = all.filter((f) => selection.contains(centerOf(f)));
+  return kept.length === all.length ? data : encodeBuildings(kept);
+}
+
 export const cached = internalQuery({
   args: { cells: v.array(v.string()) },
   handler: async (ctx, { cells }) => {
@@ -101,6 +130,31 @@ export const store = internalMutation({
     }
   },
 });
+
+/**
+ * Zählt einen Overpass-Abruf gegen die Begrenzung pro Minute (je Schlüssel und insgesamt je Art)
+ * oder wirft, wenn sie erschöpft ist. Auch für die Gebiete (convex/areas.ts).
+ */
+export async function takeOverpassQuota(ctx: MutationCtx, slug: string, kind: "map" | "prefetch") {
+  const now = Date.now();
+  const minuteAgo = now - 60_000;
+  const totalLimit = kind === "prefetch" ? MAX_PREFETCH_FETCHES_PER_MINUTE : MAX_FETCHES_PER_MINUTE_TOTAL;
+  const total = (
+    await ctx.db.query("overpassFetches").withIndex("by_at", (q) => q.gt("at", minuteAgo)).take(MAX_FETCHES_PER_MINUTE_TOTAL + MAX_PREFETCH_FETCHES_PER_MINUTE + 10)
+  ).filter((f) => (f.kind ?? "map") === kind);
+  const mine = await ctx.db
+    .query("overpassFetches")
+    .withIndex("by_slug_at", (q) => q.eq("slug", slug).gt("at", minuteAgo))
+    .take(MAX_FETCHES_PER_MINUTE_PER_CAMPAIGN);
+  if (total.length >= totalLimit || mine.length >= MAX_FETCHES_PER_MINUTE_PER_CAMPAIGN) {
+    throw new ConvexError("Gerade werden sehr viele Häuser geladen. Bitte gleich noch einmal versuchen.");
+  }
+  await ctx.db.insert("overpassFetches", { slug, kind, at: now });
+  // Altes Protokoll nebenbei aufräumen.
+  for (const old of await ctx.db.query("overpassFetches").withIndex("by_at", (q) => q.lt("at", now - 3_600_000)).take(50)) {
+    await ctx.db.delete(old._id);
+  }
+}
 
 /**
  * Teilt die fehlenden Kacheln auf: Die noch nicht gesperrten lädt dieser Aufruf selbst
@@ -131,23 +185,7 @@ export const reserve = internalMutation({
     if (toFetch.length === 0) return { toFetch, waitFor, lockIds: [], until };
     for (const cell of extra) if (!cells.includes(cell) && !(await locked(cell))) toFetch.push(cell);
 
-    const minuteAgo = now - 60_000;
-    const totalLimit = kind === "prefetch" ? MAX_PREFETCH_FETCHES_PER_MINUTE : MAX_FETCHES_PER_MINUTE_TOTAL;
-    const total = (
-      await ctx.db.query("overpassFetches").withIndex("by_at", (q) => q.gt("at", minuteAgo)).take(MAX_FETCHES_PER_MINUTE_TOTAL + MAX_PREFETCH_FETCHES_PER_MINUTE + 10)
-    ).filter((f) => (f.kind ?? "map") === kind);
-    const mine = await ctx.db
-      .query("overpassFetches")
-      .withIndex("by_slug_at", (q) => q.eq("slug", slug).gt("at", minuteAgo))
-      .take(MAX_FETCHES_PER_MINUTE_PER_CAMPAIGN);
-    if (total.length >= totalLimit || mine.length >= MAX_FETCHES_PER_MINUTE_PER_CAMPAIGN) {
-      throw new ConvexError("Gerade werden sehr viele Häuser geladen. Bitte gleich noch einmal versuchen.");
-    }
-    await ctx.db.insert("overpassFetches", { slug, kind, at: now });
-    // Altes Protokoll nebenbei aufräumen.
-    for (const old of await ctx.db.query("overpassFetches").withIndex("by_at", (q) => q.lt("at", now - 3_600_000)).take(50)) {
-      await ctx.db.delete(old._id);
-    }
+    await takeOverpassQuota(ctx, slug, kind);
 
     // Jede Sperre ist ein neues Dokument; seine ID ist das Kennzeichen für `release`.
     const lockIds = [];
@@ -184,13 +222,14 @@ export const cleanup = internalMutation({
   },
 });
 
+/** Overpass-Server der Reihe nach: DEFAULT_OVERPASS_ENDPOINTS (areaLoad.ts), überschreibbar mit der Convex-Umgebungsvariable OVERPASS_URLS. */
 function endpoints(): string[] {
   const fromEnv = process.env.OVERPASS_URLS?.split(",").map((s) => s.trim()).filter(Boolean);
-  return fromEnv?.length ? fromEnv : DEFAULT_ENDPOINTS;
+  return fromEnv?.length ? fromEnv : DEFAULT_OVERPASS_ENDPOINTS;
 }
 
 /** Ein Server, eine Abfrage. Wirft bei Fehler, Überlastung oder Laufzeitfehler von Overpass. */
-async function askOverpass(url: string, query: string, signal: AbortSignal): Promise<BuildingFeature[]> {
+async function askOverpass<T>(url: string, query: string, parse: (json: never) => T, signal: AbortSignal): Promise<T> {
   const res = await fetch(url, {
     method: "POST",
     headers: { "User-Agent": USER_AGENT, "Content-Type": "application/x-www-form-urlencoded" },
@@ -202,10 +241,13 @@ async function askOverpass(url: string, query: string, signal: AbortSignal): Pro
     await res.text().catch(() => "");
     throw new Error(`HTTP ${res.status}`);
   }
-  const json = (await res.json()) as { elements?: unknown[]; remark?: string };
+  // Größenbremse vor dem Parsen (Grenzen großer Städte samt Nachbarn können sehr groß werden).
+  const text = await res.text();
+  if (text.length > MAX_RESPONSE_CHARS) throw new Error(`Antwort zu groß (${Math.round(text.length / 1e6)} MB)`);
+  const json = JSON.parse(text) as { elements?: unknown[]; remark?: string };
   // Bei Zeitüberschreitung antwortet Overpass mit 200 und einem „remark“.
   if (json.remark && /error|timed out/i.test(json.remark)) throw new Error(json.remark);
-  return parseOverpass(json as Parameters<typeof parseOverpass>[0]);
+  return parse(json as never);
 }
 
 /**
@@ -216,15 +258,43 @@ async function askOverpass(url: string, query: string, signal: AbortSignal): Pro
  */
 function fetchOverpass(
   bbox: [number, number, number, number],
-  { hedge = true, lockedUntil }: { hedge?: boolean; lockedUntil: number },
+  opts: { hedge?: boolean; lockedUntil: number },
 ): Promise<BuildingFeature[]> {
+  return askServers(buildQuery(bbox), parseOverpass, { ...opts, failure: "Die Gebäudedaten (OpenStreetMap) sind gerade nicht erreichbar. Bitte gleich noch einmal versuchen." });
+}
+
+/** Fehler „kein Server hat geantwortet“, mit den Antworten der einzelnen Server für die Diagnose. */
+function overpassFailure(message: string, problems: string[]) {
+  return Object.assign(new ConvexError(message), { details: problems.join(" · ") });
+}
+
+/** Antworten der Overpass-Server zu einem Fehler aus askServers (für Diagnose und Hinweise), sonst die Meldung. */
+export function overpassDetails(e: unknown): string {
+  const details = (e as { details?: unknown })?.details;
+  if (typeof details === "string" && details) return details;
+  return e instanceof Error ? e.message : String(e);
+}
+
+/**
+ * Eine beliebige Overpass-Abfrage mit Ersatz-Servern wie bei den Gebäuden (siehe fetchOverpass).
+ * `failure` ist die Meldung, wenn kein Server eine gültige Antwort liefert.
+ */
+export function askServers<T>(
+  query: string,
+  parse: (json: never) => T,
+  {
+    hedge = true,
+    lockedUntil,
+    failure,
+    timeoutMs = OVERPASS_TIMEOUT_MS,
+  }: { hedge?: boolean; lockedUntil: number; failure: string; /** je Server */ timeoutMs?: number },
+): Promise<T> {
   const urls = endpoints();
-  const query = buildQuery(bbox);
   const problems: string[] = [];
   /** Noch laufende Anfragen. Beendete nie abbrechen: Das bringt die Convex-Laufzeit zum Absturz. */
   const running = new Set<AbortController>();
   const timers: ReturnType<typeof setTimeout>[] = [];
-  return new Promise((resolve, reject) => {
+  return new Promise<T>((resolve, reject) => {
     let next = 0;
     let done = false;
     // Gesamtfrist innerhalb der Sperre, auch wenn die Server nacheinander gefragt werden;
@@ -242,7 +312,7 @@ function fetchOverpass(
       const url = urls[next++];
       const ctrl = new AbortController();
       running.add(ctrl);
-      const timeout = setTimeout(() => running.has(ctrl) && ctrl.abort(), Math.min(OVERPASS_TIMEOUT_MS, left));
+      const timeout = setTimeout(() => running.has(ctrl) && ctrl.abort(), Math.min(timeoutMs, left));
       timers.push(timeout);
       const settle = () => {
         running.delete(ctrl);
@@ -250,22 +320,24 @@ function fetchOverpass(
       };
       const hedgeTimer = hedge ? setTimeout(launch, OVERPASS_HEDGE_MS) : undefined;
       if (hedgeTimer) timers.push(hedgeTimer);
-      askOverpass(url, query, ctrl.signal).then(
-        (features) => {
+      askOverpass(url, query, parse, ctrl.signal).then(
+        (result) => {
           settle();
           if (done) return;
           finish();
-          resolve(features);
+          resolve(result);
         },
         (e: unknown) => {
           settle();
           if (done) return;
-          problems.push(`${url}: ${e instanceof Error ? e.message : String(e)}`);
+          // Nur der Host: Eine URL aus OVERPASS_URLS könnte einen Zugangsschlüssel enthalten,
+          // und die Meldung sieht jeder mit einem Link (Gebiete-Panel).
+          problems.push(`${hostOf(url)}: ${(e instanceof Error ? e.message : String(e)).replaceAll(url, hostOf(url))}`);
           if (hedgeTimer) clearTimeout(hedgeTimer);
           if (!launch() && running.size === 0) {
             finish();
             console.warn("Overpass nicht erreichbar", problems);
-            reject(new ConvexError("Die Gebäudedaten (OpenStreetMap) sind gerade nicht erreichbar. Bitte gleich noch einmal versuchen."));
+            reject(overpassFailure(failure, problems));
           }
         },
       );
@@ -274,7 +346,7 @@ function fetchOverpass(
     if (!launch()) {
       // Frist schon vorbei (z. B. Auffrischen kam spät dran): gar nicht erst fragen.
       finish();
-      reject(new ConvexError("Die Gebäudedaten (OpenStreetMap) sind gerade nicht erreichbar. Bitte gleich noch einmal versuchen."));
+      reject(overpassFailure(failure, ["keine Zeit mehr für einen Abruf"]));
     }
   });
 }
@@ -342,7 +414,7 @@ async function loadCells(
   rateKey: string,
   cells: string[],
   kind: "map" | "prefetch" = "map",
-  { wait = true }: { wait?: boolean } = {},
+  { wait = true, within }: { wait?: boolean; within?: Selection } = {},
 ): Promise<{ data: string[]; fetched: boolean }> {
   const have = new Map<string, string>();
   /** Veraltete Einträge (älter als 30 Tage oder altes Format). */
@@ -388,7 +460,9 @@ async function loadCells(
         .filter((h) => Date.now() - h.fetchedAt < CACHE_TTL_MS && h.format === BUILDINGS_FORMAT)
         .map((h) => h.cell),
     );
-    extra = candidates.filter((c) => !fresh.has(c)).slice(0, MAX_FETCH_CELLS - missing.length);
+    extra = candidates
+      .filter((c) => !fresh.has(c) && (!within || within.touches(c)))
+      .slice(0, MAX_FETCH_CELLS - missing.length);
   }
   const { toFetch, waitFor, lockIds, until } = await ctx.runMutation(internal.buildings.reserve, { slug: rateKey, cells: missing, kind, extra });
 
@@ -432,8 +506,15 @@ export const load = action({
     // Kein offener Proxy für Overpass: nur für bestehende Aktionen.
     const rateKey = SLUG_PATTERN.test(slug) ? await ctx.runQuery(internal.buildings.rateKeyOf, { slug }) : null;
     if (!rateKey) throw new ConvexError("Verteilaktion nicht gefunden");
-
-    return (await loadCells(ctx, rateKey, cells)).data;
+    // Gewählte Gebiete: Kacheln außerhalb gar nicht laden, Häuser außerhalb nicht ausliefern
+    // (für alle Rollen gleich, auch im Ansehen-Link).
+    const areas = (await ctx.runQuery(internal.buildings.selectedAreas, { slug: rateKey })) ?? [];
+    const selection = selectionOf(areas.map((a) => ({ geometry: decodeGeometry(a.geometry), selected: true, cells: decodeCells(a.cells) })));
+    if (!selection) return (await loadCells(ctx, rateKey, cells)).data;
+    const inside = cells.filter((c) => selection.touches(c));
+    const loaded = inside.length ? (await loadCells(ctx, rateKey, inside, "map", { within: selection })).data : [];
+    const byCell = new Map(inside.map((c, i) => [c, loaded[i]]));
+    return cells.map((c) => (byCell.has(c) ? filterBuildings(byCell.get(c)!, selection) : "[]"));
   },
 });
 
@@ -478,14 +559,26 @@ const prefetchRateKey = (slug: string) => `${slug}:vorladen`;
  * Startet das Vorladen für eine Aktion, falls nicht schon eines läuft.
  * Wird von campaigns.create und vom Knopf im Teilen-Dialog aufgerufen.
  */
-export async function startPrefetch(ctx: MutationCtx, slug: string) {
+export async function startPrefetch(ctx: MutationCtx, slug: string, { replan = false }: { replan?: boolean } = {}) {
+  // Intern, mit dem Bearbeiten-Schlüssel (Aufrufer prüfen die Rolle).
   const campaign = await ctx.db.query("campaigns").withIndex("by_slug", (q) => q.eq("slug", slug)).unique();
   if (!campaign) throw new ConvexError("Verteilaktion nicht gefunden");
   const now = Date.now();
   const existing = await ctx.db.query("prefetchJobs").withIndex("by_slug", (q) => q.eq("slug", slug)).unique();
-  if (existing && existing.status === "running" && now - existing.updatedAt < PREFETCH_STALE_MS) return existing._id;
+  // Neu planen (Auswahl der Gebiete geändert) ersetzt auch einen laufenden Auftrag.
+  if (!replan && existing && existing.status === "running" && now - existing.updatedAt < PREFETCH_STALE_MS) return existing._id;
 
-  const batches = planPrefetch(prefetchArea(campaign), [campaign.center.lng, campaign.center.lat]);
+  // Gibt es gewählte Gebiete, nur Kacheln, die sie berühren; sonst der ganze Ort.
+  // Nur die gespeicherten Kachel-Listen, keine Geometrie: Das hält die Mutation schnell.
+  const chosen = (await areaRows(ctx, campaign._id))?.filter((r) => r.selected) ?? [];
+  const wanted = new Set(chosen.flatMap(({ row }) => decodeCells(row.cells)));
+  const center: [number, number] = [campaign.center.lng, campaign.center.lat];
+  const batches =
+    wanted.size > 0
+      ? planPrefetch(unionBBox(chosen.map(({ row }) => row.bbox)), startIn(wanted, center), undefined, (b) =>
+          wanted.has(cellKeyOf([b[0] + CELL_SIZE / 2, b[1] + CELL_SIZE / 2])),
+        )
+      : planPrefetch(prefetchArea(campaign), center);
   const job = {
     slug,
     // Nichts zu laden (z. B. alter, verdrehter Ausschnitt): gleich fertig statt ewig „läuft“.
@@ -507,6 +600,30 @@ export async function startPrefetch(ctx: MutationCtx, slug: string) {
   }
   if (job.status === "running") await ctx.scheduler.runAfter(0, internal.buildings.prefetchStep, { jobId, run: job.run });
   return jobId;
+}
+
+function unionBBox(boxes: number[][]): [number, number, number, number] {
+  return [
+    Math.min(...boxes.map((b) => b[0])),
+    Math.min(...boxes.map((b) => b[1])),
+    Math.max(...boxes.map((b) => b[2])),
+    Math.max(...boxes.map((b) => b[3])),
+  ];
+}
+
+/** Startpunkt des Vorladens: die Mitte der Aktion, liegt sie in keiner gewählten Kachel, die nächste solche. */
+function startIn(cells: Set<string>, center: [number, number]): [number, number] {
+  if (cells.has(cellKeyOf(center))) return center;
+  let best: [number, number] = center;
+  let dist = Infinity;
+  for (const key of cells) {
+    const { x, y } = parseCellKey(key)!;
+    const p: [number, number] = [(x + 0.5) * CELL_SIZE, (y + 0.5) * CELL_SIZE];
+    // Abstand in etwa gleichen Metern (Länge schrumpft mit dem Breitengrad), wie in planPrefetch.
+    const d = Math.hypot((p[0] - center[0]) * Math.cos((center[1] * Math.PI) / 180), p[1] - center[1]);
+    if (d < dist) [best, dist] = [p, d];
+  }
+  return best;
 }
 
 /** Knopf „Gebiet vorladen“ im Teilen-Dialog, ab Rolle edit. */

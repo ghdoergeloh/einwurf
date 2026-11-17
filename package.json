@@ -7,7 +7,7 @@
     "dev": "vite",
     "build": "tsc -b && vite build",
     "preview": "vite preview",
-    "typecheck": "tsc -b",
+    "typecheck": "tsc -b && tsc -p convex/tsconfig.json --noEmit",
     "test": "vitest run",
     "e2e": "node e2e/smoke.mjs",
     "e2e:preview": "node e2e/preview.mjs"

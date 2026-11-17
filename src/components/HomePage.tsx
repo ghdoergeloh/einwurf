@@ -3,7 +3,7 @@ import { useMutation } from "convex/react";
 import { api } from "../../convex/_generated/api";
 import { searchPlaces, type Place } from "../lib/geocode";
 import { generateSlug } from "../lib/slug";
-import { campaignPath, navigate } from "../lib/router";
+import { adminPath, navigate } from "../lib/router";
 import { Logo } from "./Logo";
 
 type SearchState =
@@ -41,15 +41,18 @@ export function HomePage() {
     setCreating(true);
     setError(null);
     try {
-      const slug = await create({
+      const adminKey = generateSlug();
+      await create({
         slug: generateSlug(),
         viewKey: generateSlug(),
+        adminKey,
         name: name.trim() || `Verteilaktion ${place.short}`,
         placeLabel: place.label,
         center: { lat: place.lat, lng: place.lng },
         bbox: place.bbox ?? undefined,
       });
-      navigate(`${campaignPath(slug)}?neu`);
+      // Der Anleger landet auf dem Admin-Link, um gleich die Ortsteile festzulegen.
+      navigate(`${adminPath(adminKey)}?neu`);
     } catch {
       setError("Die Aktion konnte nicht angelegt werden. Bitte versuch es noch einmal.");
       setCreating(false);
@@ -84,17 +87,17 @@ export function HomePage() {
 
           <section className="rounded-3xl bg-white lg:col-start-2 lg:row-span-2 lg:row-start-1 p-5 shadow-[0_1px_0_rgba(0,0,0,0.04),0_20px_50px_-20px_rgba(21,23,28,0.25)] ring-1 ring-black/5 sm:p-7">
             <h2 className="text-xl font-semibold tracking-tight">Neue Verteilaktion</h2>
-            <p className="mt-1 text-sm text-muted">Wo wollt ihr verteilen?</p>
+            <p className="mt-1 text-sm text-muted">Wo startet ihr? Eine Adresse, z. B. euer Treffpunkt. Die Ortsteile ringsum wählt ihr danach auf der Karte.</p>
 
             <form onSubmit={onSearch} className="mt-5 flex gap-2">
               <label className="sr-only" htmlFor="place">
-                Ort
+                Adresse oder Ort
               </label>
               <input
                 id="place"
                 value={query}
                 onChange={(e) => setQuery(e.target.value)}
-                placeholder="z. B. Bornheim Roisdorf"
+                placeholder="z. B. Königstraße 25, Bornheim"
                 autoComplete="off"
                 enterKeyHint="search"
                 className="min-w-0 flex-1 rounded-2xl border border-black/10 bg-paper px-4 py-3 text-base outline-none transition focus:border-ink focus:bg-white focus:ring-4 focus:ring-sun/40"
@@ -181,7 +184,7 @@ export function HomePage() {
           </section>
           <ol className="grid max-w-md gap-3 text-sm lg:col-start-1 lg:row-start-2">
             {[
-              ["Ort wählen", "Stadt, Ortsteil oder Straße suchen."],
+              ["Mittelpunkt und Gebiete", "Adresse suchen, dann auf der Karte die Ortsteile antippen, in denen verteilt wird."],
               ["Link teilen", "Per WhatsApp, Signal oder QR-Code. Nur wer ihn hat, sieht die Aktion."],
               ["Häuser antippen", "Gelb heißt: Flyer ist drin. Kurz danach nochmal tippen: dunkelgelb, Einwerfen nicht möglich (z. B. „Keine Werbung“). Nochmal: wieder offen."],
             ].map(([t, d], i) => (

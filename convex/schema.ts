@@ -45,6 +45,75 @@ export default defineSchema({
     .index("by_campaign_osm", ["campaignId", "osmId"])
     .index("by_campaign_cell", ["campaignId", "cell"]),
 
+  /**
+   * Gebiete (Ortsteile) einer Aktion: Kopie aus dem Cache (osmAreas), sobald der Admin sie wählt.
+   * Abgewählte bleiben mit selected = false stehen; Markierungen dort bleiben ohnehin erhalten.
+   */
+  areas: defineTable({
+    campaignId: v.id("campaigns"),
+    /** OSM-Relation, z. B. „relation/2804866“. */
+    areaId: v.string(),
+    name: v.string(),
+    /** MultiPolygon-Koordinaten [lng, lat] als JSON (siehe areaGeo.ts). */
+    geometry: v.string(),
+    /** [west, süd, ost, nord] */
+    bbox: v.array(v.number()),
+    /** Punkt im Gebiet für die Beschriftung [lng, lat]. */
+    labelAt: v.array(v.number()),
+    /** Gebäude-Kacheln, die das Gebiet berühren, durch Leerzeichen getrennt (areaGeo.touchedCells). */
+    cells: v.string(),
+    /** Fehlt nur bei Vorabständen aus PR #7 und heißt dann „gewählt“ (siehe areaStore.isSelected). */
+    selected: v.optional(v.boolean()),
+  })
+    .index("by_campaign", ["campaignId"])
+    .index("by_campaign_area", ["campaignId", "areaId"]),
+
+  /**
+   * Veraltet: Ladezustand aus einem Vorabstand von PR #7, nur noch in Preview-Datenbanken.
+   * Wird nicht mehr benutzt; nach dem Merge entfernen (Produktion hatte die Tabelle nie).
+   */
+  areaSets: defineTable({
+    campaignId: v.id("campaigns"),
+    status: v.union(v.literal("loading"), v.literal("done"), v.literal("failed")),
+    whole: v.optional(v.boolean()),
+    unselected: v.array(v.string()),
+    failures: v.number(),
+    lastError: v.optional(v.string()),
+    updatedAt: v.number(),
+    run: v.number(),
+  }),
+
+  /**
+   * Cache der Ortsteile aus OSM (convex/areas.ts). Ohne campaignId gemeinsam für alle Aktionen
+   * (von Convex selbst bei Overpass geladen); mit campaignId nur für diese Aktion (vom Browser
+   * ihres Admins geladen und geschickt, deshalb nicht für andere vertrauenswürdig).
+   */
+  osmAreas: defineTable({
+    campaignId: v.optional(v.id("campaigns")),
+    areaId: v.string(),
+    /** OSM-Relation der Gemeinde, zu der der Ortsteil gehört. */
+    unitId: v.number(),
+    name: v.string(),
+    geometry: v.string(),
+    bbox: v.array(v.number()),
+    labelAt: v.array(v.number()),
+    cells: v.string(),
+    fetchedAt: v.number(),
+  })
+    .index("by_scope_area", ["campaignId", "areaId"])
+    .index("by_scope_unit", ["campaignId", "unitId"])
+    .index("by_fetchedAt", ["fetchedAt"]),
+
+  /** Cache: welche Gemeinden eine Grenz-Kachel (areaGeo.BOUNDARY_TILE) schneiden; campaignId wie bei osmAreas. */
+  boundaryTiles: defineTable({
+    campaignId: v.optional(v.id("campaigns")),
+    tile: v.string(),
+    unitIds: v.array(v.number()),
+    fetchedAt: v.number(),
+  })
+    .index("by_scope_tile", ["campaignId", "tile"])
+    .index("by_fetchedAt", ["fetchedAt"]),
+
   /** Notiz eines Helfers an einem Haus (convex/notes.ts); das Haus erscheint dann blau. */
   notes: defineTable({
     campaignId: v.id("campaigns"),
