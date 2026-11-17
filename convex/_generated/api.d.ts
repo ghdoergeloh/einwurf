@@ -13,6 +13,7 @@ import type * as campaigns from "../campaigns.js";
 import type * as cells from "../cells.js";
 import type * as crons from "../crons.js";
 import type * as marks from "../marks.js";
+import type * as notes from "../notes.js";
 import type * as osm from "../osm.js";
 import type * as status from "../status.js";
 import type * as validation from "../validation.js";
@@ -29,6 +30,7 @@ declare const fullApi: ApiFromModules<{
   cells: typeof cells;
   crons: typeof crons;
   marks: typeof marks;
+  notes: typeof notes;
   osm: typeof osm;
   status: typeof status;
   validation: typeof validation;
