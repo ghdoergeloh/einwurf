@@ -3,7 +3,7 @@ import { v } from "convex/values";
 
 export default defineSchema({
   campaigns: defineTable({
-    /** Geheimer, zufälliger Bearbeiten-Schlüssel im Link `/v/…`. Wer ihn kennt, darf alles. */
+    /** Geheimer, zufälliger Bearbeiten-Schlüssel im Link `/v/…`. Erlaubt alles außer der Gebietsauswahl (admin). */
     slug: v.string(),
     /**
      * Geheimer, zufälliger Ansehen-Schlüssel im Link `/a/…`, unabhängig vom slug (siehe access.ts).

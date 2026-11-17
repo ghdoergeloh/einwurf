@@ -83,15 +83,15 @@ describe("Ansehen-Schlüssel", () => {
     const t = await setup();
     const other = "ZyXwVuTsRqPoNmLkJiHgFe";
     // Ansehen-Schlüssel gleich dem eigenen oder einem fremden Schlüssel
-    await expect(t.mutation(api.campaigns.create, { ...base, slug: other, viewKey: other })).rejects.toThrow();
-    await expect(t.mutation(api.campaigns.create, { ...base, slug: other, viewKey: SLUG })).rejects.toThrow();
-    await expect(t.mutation(api.campaigns.create, { ...base, slug: other, viewKey: VIEW })).rejects.toThrow();
-    await expect(t.mutation(api.campaigns.create, { ...base, slug: VIEW })).rejects.toThrow();
-    await expect(t.mutation(api.campaigns.create, { ...base, slug: other, viewKey: "kurz" })).rejects.toThrow();
+    await expect(t.mutation(api.campaigns.create, { ...base, slug: other, viewKey: other })).rejects.toThrow(/existiert bereits/);
+    await expect(t.mutation(api.campaigns.create, { ...base, slug: other, viewKey: SLUG })).rejects.toThrow(/existiert bereits/);
+    await expect(t.mutation(api.campaigns.create, { ...base, slug: other, viewKey: VIEW })).rejects.toThrow(/existiert bereits/);
+    await expect(t.mutation(api.campaigns.create, { ...base, slug: VIEW })).rejects.toThrow(/existiert bereits/);
+    await expect(t.mutation(api.campaigns.create, { ...base, slug: other, viewKey: "kurz" })).rejects.toThrow(/Ungültiger Link/);
     await t.mutation(api.campaigns.create, { ...base, slug: other });
-    await expect(t.mutation(api.campaigns.ensureViewKey, { slug: other, viewKey: VIEW })).rejects.toThrow();
-    await expect(t.mutation(api.campaigns.ensureViewKey, { slug: other, viewKey: SLUG })).rejects.toThrow();
-    await expect(t.mutation(api.campaigns.ensureViewKey, { slug: other, viewKey: other })).rejects.toThrow();
+    await expect(t.mutation(api.campaigns.ensureViewKey, { slug: other, viewKey: VIEW })).rejects.toThrow(/existiert bereits/);
+    await expect(t.mutation(api.campaigns.ensureViewKey, { slug: other, viewKey: SLUG })).rejects.toThrow(/existiert bereits/);
+    await expect(t.mutation(api.campaigns.ensureViewKey, { slug: other, viewKey: other })).rejects.toThrow(/existiert bereits/);
   });
 
   test("Häuser laden geht mit dem Ansehen-Schlüssel, im Kontingent der Aktion", async () => {
@@ -148,34 +148,74 @@ describe("Admin-Schlüssel", () => {
   });
 });
 
+type T = Awaited<ReturnType<typeof setupWithAdmin>>;
+
 /**
- * Jede öffentliche Mutation muss hier stehen und den Ansehen-Schlüssel ablehnen.
- * Kommt eine neue dazu, schlägt der Test fehl, bis sie hier geprüft wird.
+ * Jede öffentliche Mutation und Action muss hier stehen. Kommt eine neue dazu, schlägt
+ * „die Liste ist vollständig“ fehl, bis ihre Rechte hier geprüft werden.
  */
-const MUTATIONS_REJECTING_VIEW_KEY: Record<string, (t: Awaited<ReturnType<typeof setup>>) => Promise<unknown>> = {
+const MUTATIONS_REJECTING_VIEW_KEY: Record<string, (t: T) => Promise<unknown>> = {
   "marks:set": (t) => t.mutation(api.marks.set, { slug: VIEW, osmId: "way/1", status: "none", center: HOUSE }),
   "buildings:prefetch": (t) => t.mutation(api.buildings.prefetch, { slug: VIEW }),
   "campaigns:ensureViewKey": (t) => t.mutation(api.campaigns.ensureViewKey, { slug: VIEW, viewKey: "ZweiterSchluesselXYZ12" }),
 };
 /** Öffentliche Mutationen, die keine bestehende Aktion ändern. */
 const MUTATIONS_WITHOUT_CAMPAIGN = ["campaigns:create"];
+/** Öffentliche Actions, die mit dem Ansehen-Schlüssel erlaubt sind (nur lesen, siehe Tests oben). */
+const ACTIONS_READ_ONLY = ["buildings:load"];
+/** Öffentliche Queries, je mit dem Ansehen-Schlüssel aufgerufen: Kein anderer Schlüssel darf herauskommen. */
+const QUERIES: Record<string, (t: T, key: string) => Promise<unknown>> = {
+  "campaigns:get": (t, key) => t.query(api.campaigns.get, { slug: key }),
+  "marks:inCell": (t, key) => t.query(api.marks.inCell, { slug: key, cell: CELL }),
+  "buildings:prefetchStatus": (t, key) => t.query(api.buildings.prefetchStatus, { slug: key }),
+};
 
-describe("Rechte aller öffentlichen Mutationen", () => {
+/** Alles, was ein Ansehen-Schlüssel ändern könnte, als Abzug der Datenbank. */
+const snapshot = (t: T) =>
+  t.run(async (ctx) =>
+    JSON.stringify([
+      await ctx.db.query("campaigns").collect(),
+      await ctx.db.query("marks").collect(),
+      await ctx.db.query("prefetchJobs").collect(),
+    ]),
+  );
+
+describe("Rechte aller öffentlichen Funktionen", () => {
   test("die Liste ist vollständig", async () => {
-    const found: string[] = [];
+    const found = { mutation: [] as string[], action: [] as string[], query: [] as string[] };
     for (const [path, load] of Object.entries(modules)) {
       if (path.includes("_generated") || path.endsWith(".test.ts")) continue;
-      const mod = (await load()) as Record<string, { isMutation?: boolean; isPublic?: boolean }>;
+      const mod = (await load()) as Record<string, { isMutation?: boolean; isAction?: boolean; isQuery?: boolean; isPublic?: boolean }>;
       const name = path.replace(/^\.\//, "").replace(/\.ts$/, "");
-      for (const [exp, fn] of Object.entries(mod)) if (fn?.isMutation && fn.isPublic) found.push(`${name}:${exp}`);
+      for (const [exp, fn] of Object.entries(mod)) {
+        if (!fn?.isPublic) continue;
+        if (fn.isMutation) found.mutation.push(`${name}:${exp}`);
+        if (fn.isAction) found.action.push(`${name}:${exp}`);
+        if (fn.isQuery) found.query.push(`${name}:${exp}`);
+      }
     }
-    expect(found.sort()).toEqual([...Object.keys(MUTATIONS_REJECTING_VIEW_KEY), ...MUTATIONS_WITHOUT_CAMPAIGN].sort());
+    expect(found.mutation.sort()).toEqual([...Object.keys(MUTATIONS_REJECTING_VIEW_KEY), ...MUTATIONS_WITHOUT_CAMPAIGN].sort());
+    expect(found.action.sort()).toEqual([...ACTIONS_READ_ONLY].sort());
+    expect(found.query.sort()).toEqual(Object.keys(QUERIES).sort());
   });
 
   for (const [name, call] of Object.entries(MUTATIONS_REJECTING_VIEW_KEY)) {
-    test(`${name} lehnt den Ansehen-Schlüssel ab`, async () => {
-      const t = await setup();
-      await expect(call(t)).rejects.toThrow();
+    test(`${name} lehnt den Ansehen-Schlüssel wegen der Rolle ab und ändert nichts`, async () => {
+      const t = await setupWithAdmin();
+      const before = await snapshot(t);
+      await expect(call(t)).rejects.toThrow(/nichts ändern/);
+      expect(await snapshot(t)).toBe(before);
+    });
+  }
+
+  for (const [name, call] of Object.entries(QUERIES)) {
+    test(`${name} verrät weder Bearbeiten- noch Admin-Schlüssel`, async () => {
+      const t = await setupWithAdmin();
+      await t.mutation(api.buildings.prefetch, { slug: SLUG });
+      const asView = JSON.stringify((await call(t, VIEW)) ?? null);
+      expect(asView).not.toContain(SLUG);
+      expect(asView).not.toContain(ADMIN);
+      expect(JSON.stringify((await call(t, SLUG)) ?? null)).not.toContain(ADMIN);
     });
   }
 });
