@@ -713,7 +713,7 @@ try {
     { lat: CENTER.lat + 0.001, lng: CENTER.lng + 0.001 },
     { timeout: 10_000 },
   );
-  // Statistik je Gebiet auch beim Ansehen-Link (#4): gleiche Zahlen wie beim Admin, nur lesend
+  // Statistik je Gebiet auch beim Ansehen-Link (#4): gleiche Zahlen wie beim Link zum Mitmachen, nur lesend
   {
     const housesOf = async (page) => {
       await page.getByTestId("open-stats").click();
@@ -721,14 +721,14 @@ try {
       const h = await sum.getByText(/^\d+ Häuser$/).textContent({ timeout: 30_000 });
       return { sheet: page.getByTestId("stats-sheet"), houses: h, text: await sum.textContent() };
     };
-    const admin = await housesOf(p);
+    const edit = await housesOf(p);
     const view = await housesOf(pv);
-    assert.equal(view.houses, admin.houses, "Ansehen-Link: gleiche Häuserzahl");
-    assert.equal(view.text, admin.text, "Ansehen-Link: gleiche Summe");
+    assert.equal(view.houses, edit.houses, "Ansehen-Link: gleiche Häuserzahl");
+    assert.equal(view.text, edit.text, "Ansehen-Link: gleiche Summe");
     assert.equal(await view.sheet.getByText("Statistik wird vorbereitet").count(), 0);
     await shot(pv, "9b-statistik-ansehen");
     await view.sheet.getByRole("button", { name: "Fertig" }).click();
-    await admin.sheet.getByRole("button", { name: "Fertig" }).click();
+    await edit.sheet.getByRole("button", { name: "Fertig" }).click();
   }
   assert.ok(received.length > 0, "Convex-Antworten mitgeschnitten");
   assert.ok(!received.some((f) => f.includes(editKey)), "Bearbeiten-Schlüssel kommt beim Ansehen-Link nie an");
