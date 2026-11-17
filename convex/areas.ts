@@ -27,6 +27,7 @@ import {
 import { askServers, overpassDetails, startPrefetch, takeOverpassQuota } from "./buildings";
 import type { BBox } from "./osm";
 import { campaignByKey, requireRole } from "./access";
+import { isSelected } from "./areaStore";
 
 /**
  * Gebiete (Ortsteile). Das Angebot kommt aus einem gemeinsamen Cache: je Grenz-Kachel (etwa
@@ -76,7 +77,7 @@ export const list = query({
     if (!campaign) return null;
     const rows = await ctx.db.query("areas").withIndex("by_campaign", (q) => q.eq("campaignId", campaign._id)).collect();
     return rows
-      .map((r) => ({ id: r.areaId, name: r.name, geometry: r.geometry, bbox: r.bbox, labelAt: r.labelAt, cells: r.cells, selected: r.selected }))
+      .map((r) => ({ id: r.areaId, name: r.name, geometry: r.geometry, bbox: r.bbox, labelAt: r.labelAt, cells: r.cells, selected: isSelected(r) }))
       .sort((a, b) => a.name.localeCompare(b.name, "de"));
   },
 });
@@ -118,7 +119,7 @@ async function selectArea(ctx: MutationCtx, campaignId: Id<"campaigns">, areaId:
     .withIndex("by_campaign_area", (q) => q.eq("campaignId", campaignId).eq("areaId", areaId))
     .unique();
   if (row) {
-    if (row.selected !== selected) await ctx.db.patch(row._id, { selected });
+    if (isSelected(row) !== selected || row.selected === undefined) await ctx.db.patch(row._id, { selected });
     return;
   }
   if (!selected) return;
