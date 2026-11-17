@@ -1,4 +1,5 @@
 import { describe, expect, test } from "vitest";
+import { readFileSync } from "node:fs";
 import type { Position } from "geojson";
 import {
   areaAt,
@@ -272,5 +273,27 @@ describe("gemischte Stufen (wie Bornheim: Ortschaften teils auf Stufe 9, teils a
 
   test("bleibt auch gemischt eine Lücke, gilt der ganze Ort", () => {
     expect(chooseSubdivision(ort, [stufe9[0], stufe10[0]])).toBeNull();
+  });
+});
+
+describe("echte OSM-Daten (vereinfacht, fixtures/osm)", () => {
+  const load = (name: string) =>
+    parseBoundaries(JSON.parse(readFileSync(new URL(`../fixtures/osm/${name}`, import.meta.url), "utf8")));
+
+  test("Bornheim: Ortschaften teils auf Stufe 9, teils auf 10, ohne Nachbarorte", () => {
+    const all = load("overpass-bornheim.json");
+    const parts = chooseSubdivision(all.find((b) => b.id === 168426)!, all)!;
+    expect(parts.map((p) => p.name).sort((a, b) => a.localeCompare(b, "de"))).toEqual([
+      "Bornheim", "Brenig", "Dersdorf", "Hemmerich/Kardorf", "Hersel", "Merten", "Roisdorf",
+      "Rösberg", "Sechtem", "Uedorf", "Walberberg", "Waldorf", "Widdig",
+    ]);
+  });
+
+  test("Bonn (Großstadt): die 51 Ortsteile auf Stufe 10, nicht die 4 Stadtbezirke", () => {
+    const all = load("overpass-bonn.json");
+    const parts = chooseSubdivision(all.find((b) => b.id === 62508)!, all)!;
+    expect(parts).toHaveLength(51);
+    expect(new Set(parts.map((p) => p.level))).toEqual(new Set([10]));
+    expect(parts.map((p) => p.name)).toEqual(expect.arrayContaining(["Bonn-Zentrum", "Alt-Godesberg", "Beuel-Mitte", "Duisdorf"]));
   });
 });
