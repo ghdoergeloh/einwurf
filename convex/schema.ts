@@ -43,19 +43,19 @@ export default defineSchema({
     status: v.optional(v.union(v.literal("done"), v.literal("blocked"))),
     /** Gebiet (areaId) für die Statistik, "" = in keinem Gebiet; gilt nur, wenn areaRun zum Laden der Gebiete passt. */
     area: v.optional(v.string()),
-    /** areaSets.run, zu dem `area` bestimmt und mitgezählt wurde (convex/stats.ts). */
+    /** statsJobs.run, zu dem `area` bestimmt und mitgezählt wurde (convex/stats.ts). */
     areaRun: v.optional(v.number()),
   })
     .index("by_campaign_osm", ["campaignId", "osmId"])
     .index("by_campaign_cell", ["campaignId", "cell"]),
 
   /**
-   * Gebiete (Ortsteile) einer Aktion aus OSM, mit vereinfachter Grenze (convex/areas.ts).
-   * Ändern sich nach dem Laden nicht; die Auswahl steht in areaSets.
+   * Gebiete (Ortsteile) einer Aktion: Kopie aus dem Cache (osmAreas), sobald der Admin sie wählt.
+   * Abgewählte bleiben mit selected = false stehen; Markierungen dort bleiben ohnehin erhalten.
    */
   areas: defineTable({
     campaignId: v.id("campaigns"),
-    /** „relation/123“ oder „ort“ (ganzer Ort, wenn OSM ihn nicht unterteilt). */
+    /** OSM-Relation, z. B. „relation/2804866“. */
     areaId: v.string(),
     name: v.string(),
     /** MultiPolygon-Koordinaten [lng, lat] als JSON (siehe areaGeo.ts). */
@@ -66,23 +66,57 @@ export default defineSchema({
     labelAt: v.array(v.number()),
     /** Gebäude-Kacheln, die das Gebiet berühren, durch Leerzeichen getrennt (areaGeo.touchedCells). */
     cells: v.string(),
-  }).index("by_campaign", ["campaignId"]),
+    /** Fehlt nur bei Vorabständen aus PR #7 und heißt dann „gewählt“ (siehe areaStore.isSelected). */
+    selected: v.optional(v.boolean()),
+  })
+    .index("by_campaign", ["campaignId"])
+    .index("by_campaign_area", ["campaignId", "areaId"]),
 
-  /** Ladezustand und Auswahl der Gebiete je Aktion. */
+  /**
+   * Veraltet: Ladezustand aus einem Vorabstand von PR #7, nur noch in Preview-Datenbanken.
+   * Wird nicht mehr benutzt; nach dem Merge entfernen (Produktion hatte die Tabelle nie).
+   */
   areaSets: defineTable({
     campaignId: v.id("campaigns"),
     status: v.union(v.literal("loading"), v.literal("done"), v.literal("failed")),
-    /** OSM unterteilt den Ort nicht: Er ist ein einziges Gebiet. */
     whole: v.optional(v.boolean()),
-    /** Nicht ausgewählte Gebiete (areaId). Neue Aktionen: alle ausgewählt. */
     unselected: v.array(v.string()),
     failures: v.number(),
-    /** Antwort der Overpass-Server beim letzten Fehlschlag (gekürzt), für den Hinweis im Panel. */
     lastError: v.optional(v.string()),
     updatedAt: v.number(),
-    /** Laufnummer; ein älterer Ladevorgang speichert nichts mehr. */
     run: v.number(),
-  }).index("by_campaign", ["campaignId"]),
+  }),
+
+  /**
+   * Cache der Ortsteile aus OSM (convex/areas.ts). Ohne campaignId gemeinsam für alle Aktionen
+   * (von Convex selbst bei Overpass geladen); mit campaignId nur für diese Aktion (vom Browser
+   * ihres Admins geladen und geschickt, deshalb nicht für andere vertrauenswürdig).
+   */
+  osmAreas: defineTable({
+    campaignId: v.optional(v.id("campaigns")),
+    areaId: v.string(),
+    /** OSM-Relation der Gemeinde, zu der der Ortsteil gehört. */
+    unitId: v.number(),
+    name: v.string(),
+    geometry: v.string(),
+    bbox: v.array(v.number()),
+    labelAt: v.array(v.number()),
+    cells: v.string(),
+    fetchedAt: v.number(),
+  })
+    .index("by_scope_area", ["campaignId", "areaId"])
+    .index("by_scope_unit", ["campaignId", "unitId"])
+    .index("by_fetchedAt", ["fetchedAt"]),
+
+  /** Cache: welche Gemeinden eine Grenz-Kachel (areaGeo.BOUNDARY_TILE) schneiden; campaignId wie bei osmAreas. */
+  boundaryTiles: defineTable({
+    campaignId: v.optional(v.id("campaigns")),
+    tile: v.string(),
+    unitIds: v.array(v.number()),
+    fetchedAt: v.number(),
+  })
+    .index("by_scope_tile", ["campaignId", "tile"])
+    .index("by_fetchedAt", ["fetchedAt"]),
 
   /**
    * Statistik je Gebiet (convex/stats.ts): eine Zeile je Gebiet, beim Laden der Gebiete neu angelegt.
@@ -95,7 +129,7 @@ export default defineSchema({
     /** Das Gebiet in `areas` (Grenze für die Zuordnung). */
     areaDoc: v.id("areas"),
     bbox: v.array(v.number()),
-    /** areaSets.run, zu dem diese Zeile gehört. */
+    /** statsJobs.run, zu dem diese Zeile gehört. */
     run: v.number(),
     done: v.number(),
     blocked: v.number(),
@@ -115,8 +149,10 @@ export default defineSchema({
   /** Hintergrund-Zählungen der Statistik je Aktion: Markierungen zuordnen, Häuser zählen. */
   statsJobs: defineTable({
     campaignId: v.id("campaigns"),
-    /** areaSets.run, für den gezählt wird. */
+    /** Laufnummer: steigt, wenn Gebiete dazukommen oder wegfallen (dann wird neu zugeordnet). */
     run: v.number(),
+    /** Gebiete, für die die Zeilen angelegt sind (ids in `areas`, sortiert); fehlt bei älteren Ständen. */
+    areaKey: v.optional(v.string()),
     /** Zuordnen älterer Markierungen: Cursor der Seite, null = fertig. */
     marksCursor: v.union(v.string(), v.null()),
     marksDone: v.boolean(),

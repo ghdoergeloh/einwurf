@@ -111,7 +111,7 @@ export function StatsSheet({ slug, canRefresh, areas, onShow, onClose }: Props) 
             <>
               <Totals done={stats.total.done} blocked={stats.total.blocked} />
               <p className="mt-3 text-sm text-muted">
-                Für diese Aktion gibt es noch keine Gebiete. Sobald die Ortsteile geladen sind, steht hier der Fortschritt je Gebiet.
+                Für diese Aktion sind noch keine Ortsteile festgelegt. Sobald der Organisator welche wählt, steht hier der Fortschritt je Gebiet.
               </p>
             </>
           )}

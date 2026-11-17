@@ -1,12 +1,13 @@
 /**
- * Gebiete (Ortsteile) einer Aktion: Overpass-Abfragen, Zusammensetzen der Grenzen,
- * Vereinfachen, Punkt-in-Polygon. Rein und ohne Netz – genutzt von convex/areas.ts und vom Browser.
+ * Gebiete (Ortsteile): Overpass-Abfragen, Wahl der Gemeinden und ihrer Ortsteile, Zusammensetzen
+ * der Grenzen, Vereinfachen, Punkt-in-Polygon. Rein und ohne Netz – genutzt von convex/areas.ts
+ * und vom Browser.
  *
  * Schnittstelle für andere Teile (z. B. Statistik je Gebiet):
  *   - `Area` = { id, name, geometry, selected }
  *   - `areaAt(punkt, gebiete)` ordnet einen Punkt [lng, lat] (Haus, Markierung) einem Gebiet zu.
  *   - Serverseitig liefert `campaignAreas(ctx, campaignId)` aus convex/areaStore.ts die Gebiete,
- *     im Browser `toAreas(api.areas.list, api.areas.status)`.
+ *     im Browser `toAreas(api.areas.list)`.
  */
 import type { Position } from "geojson";
 import { CELL_SIZE, cellKey, joinRings, type BBox } from "./osm";
@@ -15,7 +16,7 @@ import { CELL_SIZE, cellKey, joinRings, type BBox } from "./osm";
 export type AreaGeometry = Position[][][];
 
 export interface Area {
-  /** Stabil je Aktion: OSM-Relation („relation/123“) oder „ort“ für den ganzen Ort. */
+  /** OSM-Relation des Ortsteils, z. B. „relation/2804866“ (stabil, für alle Aktionen gleich). */
   id: string;
   name: string;
   geometry: AreaGeometry;
@@ -23,33 +24,129 @@ export interface Area {
   selected: boolean;
 }
 
-/** ID des einzigen Gebiets, wenn OSM den Ort nicht unterteilt. */
-export const WHOLE_PLACE_ID = "ort";
-
 // ---------------------------------------------------------------------------
 // Overpass
 // ---------------------------------------------------------------------------
-
-/** Schritt 1: Verwaltungsgrenzen, in denen der Mittelpunkt der Aktion liegt (nur Tags und Ausdehnung). */
-export function parentQuery(lat: number, lng: number): string {
-  return `[out:json][timeout:60];is_in(${lat},${lng})->.a;rel(pivot.a)[boundary=administrative];out tags bb;`;
-}
 
 /** Feinste Verwaltungsstufe, die wir als Gebiet betrachten. */
 const MAX_LEVEL = 12;
 
 /**
- * Schritt 2: Grenze des Ortes und alle feineren Grenzen in seiner Ausdehnung (Verwaltung,
- * ersatzweise boundary=place), mit Geometrie. Bewusst über die Ausdehnung statt über eine
- * Fläche (map_to_area): Das ist für ausgelastete Server deutlich leichter. Nachbarn, die in die
- * Ausdehnung ragen, kommen mit und werden später aussortiert (chooseSubdivision).
+ * Grenz-Kacheln: Das Angebot an Ortsteilen wird je Kachel von 0,05° (in Bornheim etwa
+ * 5,5 × 3,5 km) geladen und für alle Aktionen gespeichert.
  */
-export function subareaQuery(relationId: number, level: number, [w, s, e, n]: BBox): string {
+export const BOUNDARY_TILE = 0.05;
+export const BOUNDARY_TILE_PATTERN = /^-?\d{1,4}:-?\d{1,4}$/;
+
+export function boundaryTileOf(lng: number, lat: number): string {
+  return `${Math.floor(lng / BOUNDARY_TILE)}:${Math.floor(lat / BOUNDARY_TILE)}`;
+}
+
+export function boundaryTilesIn([w, s, e, n]: BBox): string[] {
+  const out: string[] = [];
+  for (let x = Math.floor(w / BOUNDARY_TILE); x <= Math.floor(e / BOUNDARY_TILE); x++)
+    for (let y = Math.floor(s / BOUNDARY_TILE); y <= Math.floor(n / BOUNDARY_TILE); y++) out.push(`${x}:${y}`);
+  return out;
+}
+
+export function boundaryTileBBox(tile: string): BBox {
+  const [x, y] = tile.split(":").map(Number);
+  return [x * BOUNDARY_TILE, y * BOUNDARY_TILE, (x + 1) * BOUNDARY_TILE, (y + 1) * BOUNDARY_TILE];
+}
+
+/** So viele Grenz-Kacheln lädt ein Aufruf höchstens (Größe der Antwort, Zeit). */
+export const MAX_TILES_PER_LOAD = 4;
+/** So viele Grenz-Kacheln zeigt die Karte im Bearbeiten-Modus höchstens auf einmal an. */
+export const MAX_TILES_PER_VIEW = 12;
+
+/** Zoomstufe zum Bearbeiten der Gebiete: so weit heraus wie möglich, höchstens Zoomstufe 12. */
+const OVERVIEW_ZOOM = 12;
+/** Höchstens so viele Grenz-Kacheln soll die Übersicht zeigen (= MAX_TILES_PER_VIEW in convex/areas.ts und src/components/AreaEditor.tsx). */
+const OVERVIEW_MAX_TILES = MAX_TILES_PER_VIEW;
+
+/**
+ * Zoomstufe der Übersicht für dieses Fenster: höchstens 12, aber so nah, dass der Ausschnitt
+ * auch ungünstig liegend nicht mehr Grenz-Kacheln schneidet, als die Karte auf einmal zeigt
+ * (sonst sähe man am Desktop nur „Heranzoomen“).
+ */
+export function overviewZoom(widthPx: number, heightPx: number, lat: number): number {
+  for (let z = OVERVIEW_ZOOM; z < 16; z += 0.25) {
+    const degPerPx = 360 / (512 * 2 ** z);
+    const w = widthPx * degPerPx;
+    const h = heightPx * degPerPx * Math.cos((lat * Math.PI) / 180);
+    if ((Math.ceil(w / BOUNDARY_TILE) + 1) * (Math.ceil(h / BOUNDARY_TILE) + 1) <= OVERVIEW_MAX_TILES) return z;
+  }
+  return 16;
+}
+
+/** Gemeinden: Stufe 8; kreisfreie Städte und Kreise (6, 7) nur, wenn keine Gemeinde in ihnen liegt. */
+const UNIT_LEVELS = [6, 7, 8];
+
+/** Schritt 1: Gemeinden (und gröbere Kandidaten), die den Ausschnitt schneiden, ohne Geometrie. */
+export function unitQuery([w, s, e, n]: BBox): string {
+  return `[out:json][timeout:60];rel[boundary=administrative][admin_level~"^(${UNIT_LEVELS.join("|")})$"](${s},${w},${n},${e});out tags bb;`;
+}
+
+/**
+ * Welche Grenzen sind Gemeinden, deren Ortsteile angeboten werden? Alle auf Stufe 8; eine
+ * gröbere (z. B. die kreisfreie Stadt Bonn auf Stufe 6) nur, wenn keine Gemeinde der Liste ganz
+ * in ihrer Ausdehnung liegt (ein Kreis enthält seine Gemeinden, eine kreisfreie Stadt keine).
+ */
+export function chooseUnits(list: ParentCandidate[]): ParentCandidate[] {
+  const municipalities = list.filter((c) => c.level === 8);
+  const inside = (a: BBox, b: BBox) => a[0] >= b[0] && a[2] <= b[2] && a[1] >= b[1] && a[3] <= b[3];
+  const coarse = list.filter((c) => c.level < 8 && UNIT_LEVELS.includes(c.level) && !municipalities.some((m) => inside(m.bbox, c.bbox)));
+  // Von mehreren gröberen, ineinander liegenden (Stufe 6 und 7) nur die feinste.
+  const finest = coarse.filter((c) => !coarse.some((o) => o.id !== c.id && o.level > c.level && inside(o.bbox, c.bbox)));
+  return [...municipalities, ...finest];
+}
+
+/**
+ * Ortsteile einer Gemeinde: die Unterteilung nach chooseSubdivision, sonst die Gemeinde selbst
+ * als ein Gebiet.
+ */
+export function areasOfUnit(unit: Boundary, boundaries: Boundary[]): Boundary[] {
+  return chooseSubdivision(unit, boundaries) ?? [unit];
+}
+
+/**
+ * Schritt 2: alle feineren Grenzen in der Ausdehnung des Ortes (Verwaltung, ersatzweise
+ * boundary=place), nur mit Namen, Stufe und Ausdehnung. Das ist auch für ausgelastete Server
+ * leicht; die Geometrie holt Schritt 3 nur für die Kandidaten (siehe preselect).
+ */
+export function candidateQuery(level: number, [w, s, e, n]: BBox): string {
   const levels = [];
   for (let l = level + 1; l <= MAX_LEVEL; l++) levels.push(l);
   const box = `${s},${w},${n},${e}`;
   const admin = levels.length ? `rel[boundary=administrative][admin_level~"^(${levels.join("|")})$"](${box});` : "";
-  return `[out:json][timeout:120];rel(${relationId});out geom;(${admin}rel[boundary=place](${box}););out geom;`;
+  return `[out:json][timeout:60];(${admin}rel[boundary=place](${box}););out tags bb;`;
+}
+
+/** Schritt 3: Grenzen (Geometrie) genau dieser Relationen. */
+export function geometryQuery(ids: number[]): string {
+  return `[out:json][timeout:120];rel(id:${ids.join(",")});out geom;`;
+}
+
+/** Mehr Kandidaten holt Schritt 3 nicht (Größe der Antwort). */
+export const MAX_CANDIDATES = 400;
+
+/**
+ * Vorauswahl ohne Geometrie: nur feinere Grenzen, deren Ausdehnung im Ort liegt. Gebiete der
+ * Nachbarorte und -kreise ragen über seine Ausdehnung hinaus und fallen so schon vor dem
+ * Laden der Geometrie weg; den Rest prüft chooseSubdivision genau.
+ */
+export function preselect(parent: ParentCandidate, candidates: ParentCandidate[]): ParentCandidate[] {
+  const [w, s, e, n] = parent.bbox;
+  const tx = (e - w) * 0.01 + 1e-4;
+  const ty = (n - s) * 0.01 + 1e-4;
+  return candidates
+    .filter(
+      (c) =>
+        c.id !== parent.id &&
+        c.level > parent.level &&
+        c.bbox[0] >= w - tx && c.bbox[2] <= e + tx && c.bbox[1] >= s - ty && c.bbox[3] <= n + ty,
+    )
+    .slice(0, MAX_CANDIDATES);
 }
 
 interface OverpassPoint {
@@ -119,45 +216,16 @@ export interface ParentCandidate {
   bbox: BBox;
 }
 
-export function parseParents(json: { elements?: OverpassRelation[] }): ParentCandidate[] {
+/** Grenzen mit Stufe und Ausdehnung (Overpass „out tags bb“), auch boundary=place. */
+export function parseCandidates(json: { elements?: OverpassRelation[] }): ParentCandidate[] {
   const out: ParentCandidate[] = [];
   for (const el of json.elements ?? []) {
     const level = levelOf(el.tags);
-    if (el.type !== "relation" || level === null || level === PLACE_LEVEL || !el.bounds) continue;
+    if (el.type !== "relation" || level === null || !el.bounds) continue;
     const b = el.bounds;
     out.push({ id: el.id, name: el.tags?.name ?? "", level, bbox: [b.minlon, b.minlat, b.maxlon, b.maxlat] });
   }
   return out;
-}
-
-/** Überlappung zweier Ausschnitte (Schnitt durch Vereinigung, 0…1). */
-export function bboxOverlap(a: BBox, b: BBox): number {
-  const w = Math.max(0, Math.min(a[2], b[2]) - Math.max(a[0], b[0]));
-  const h = Math.max(0, Math.min(a[3], b[3]) - Math.max(a[1], b[1]));
-  const inter = w * h;
-  const area = (x: BBox) => (x[2] - x[0]) * (x[3] - x[1]);
-  const union = area(a) + area(b) - inter;
-  return union > 0 ? inter / union : 0;
-}
-
-/**
- * Welche Grenze ist „der gesuchte Ort“? Die, deren Ausdehnung am besten zum Ausschnitt der
- * Ortssuche passt (Nominatim liefert für Orte die Ausdehnung ihrer Grenze). Passt keine
- * (z. B. eine Straße gesucht), die Gemeinde (Stufe 8), sonst die feinste Gemeinde-ähnliche Stufe.
- * Länder und Bundesländer (Stufe < 6) kommen nicht in Frage: zu groß.
- */
-export function chooseParent(candidates: ParentCandidate[], bbox: BBox | null): ParentCandidate | null {
-  const usable = candidates.filter((c) => c.level >= 6);
-  if (usable.length === 0) return null;
-  if (bbox) {
-    const best = usable
-      .map((c) => ({ c, score: bboxOverlap(c.bbox, bbox) }))
-      .sort((a, b) => b.score - a.score)[0];
-    if (best.score >= 0.5) return best.c;
-  }
-  const municipality = usable.filter((c) => c.level === 8);
-  if (municipality.length) return municipality[0];
-  return usable.filter((c) => c.level < 8).sort((a, b) => b.level - a.level)[0] ?? null;
 }
 
 /** So viel des Ortes muss eine Stufe abdecken, damit sie als lückenlose Unterteilung gilt. */
@@ -371,11 +439,6 @@ export function decodeGeometry(text: string): AreaGeometry {
   return JSON.parse(text) as AreaGeometry;
 }
 
-/** Rechteck als Gebiet (Ersatz, wenn OSM für den Ort gar keine Grenze kennt). */
-export function bboxGeometry([w, s, e, n]: BBox): AreaGeometry {
-  return [[[[w, s], [e, s], [e, n], [w, n], [w, s]]]];
-}
-
 // ---------------------------------------------------------------------------
 // Zuordnung
 // ---------------------------------------------------------------------------
@@ -396,17 +459,15 @@ export type AreaWithCells = Area & { cells: string[] };
 export const encodeCells = (cells: string[]) => cells.join(" ");
 export const decodeCells = (text: string) => (text ? text.split(" ") : []);
 
-/** Fügt Gebietsliste und Auswahl (api.areas.list und api.areas.status) zu `Area` zusammen. */
+/** Entpackt die Gebiete einer Aktion (api.areas.list) zu `Area` samt Kacheln. */
 export function toAreas(
-  list: { id: string; name: string; geometry: string; cells: string }[],
-  unselected: string[],
+  list: { id: string; name: string; geometry: string; cells: string; selected: boolean }[],
 ): AreaWithCells[] {
-  const off = new Set(unselected);
   return list.map((a) => ({
     id: a.id,
     name: a.name,
     geometry: decodeGeometry(a.geometry),
-    selected: !off.has(a.id),
+    selected: a.selected,
     cells: decodeCells(a.cells),
   }));
 }

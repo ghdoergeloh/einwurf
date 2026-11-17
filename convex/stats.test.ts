@@ -1,7 +1,7 @@
 // @vitest-environment edge-runtime
 import { convexTest } from "convex-test";
 import { afterEach, beforeEach, describe, expect, test, vi } from "vitest";
-import { api, internal } from "./_generated/api";
+import { api } from "./_generated/api";
 import schema from "./schema";
 import { BUILDINGS_FORMAT, cellKeyOf, encodeBuildings, type BuildingFeature } from "./osm";
 import { bboxOf, encodeCells, touchedCells, type AreaGeometry } from "./areaGeo";
@@ -55,10 +55,33 @@ async function storeHouses(t: T, features: BuildingFeature[], fill: AreaGeometry
   });
 }
 
-/** Aktion mit fertig geladenen Gebieten, direkt in der Datenbank (Laden selbst testet areas.test.ts). */
+/**
+ * Gebiete in den gemeinsamen Cache legen (Laden selbst testet areas.test.ts) und wie der Admin
+ * wählen; `unselected` danach wieder abwählen (bleiben als „nicht gewählt“ in der Aktion).
+ */
+async function addAreas(t: T, areas: [string, string, AreaGeometry][], unselected: string[] = []) {
+  await t.run(async (ctx) => {
+    for (const [areaId, name, g] of areas) {
+      await ctx.db.insert("osmAreas", {
+        areaId,
+        unitId: 1,
+        name,
+        geometry: JSON.stringify(g),
+        bbox: bboxOf(g),
+        labelAt: [bboxOf(g)[0], bboxOf(g)[1]],
+        cells: encodeCells(touchedCells(g)),
+        fetchedAt: Date.now(),
+      });
+    }
+  });
+  await t.mutation(api.areas.select, { adminKey: ADMIN, ids: areas.map(([id]) => id), selected: true });
+  if (unselected.length) await t.mutation(api.areas.select, { adminKey: ADMIN, ids: unselected, selected: false });
+}
+
+/** Aktion mit Gebieten. */
 async function setup(t: T, areas: [string, string, AreaGeometry][], unselected: string[] = []) {
-  return await t.run(async (ctx) => {
-    const campaignId = await ctx.db.insert("campaigns", {
+  const campaignId = await t.run(async (ctx) => {
+    return await ctx.db.insert("campaigns", {
       slug: SLUG,
       adminKey: ADMIN,
       name: "Test",
@@ -67,24 +90,9 @@ async function setup(t: T, areas: [string, string, AreaGeometry][], unselected: 
       markCount: 0,
       blockedCount: 0,
     });
-    await ctx.db.insert("areaSets", { campaignId, status: "loading", unselected, failures: 0, updatedAt: Date.now(), run: 1 });
-    return campaignId;
-  }).then(async (campaignId) => {
-    await t.mutation(internal.areas.save, {
-      campaignId,
-      run: 1,
-      whole: false,
-      areas: areas.map(([areaId, name, g]) => ({
-        areaId,
-        name,
-        geometry: JSON.stringify(g),
-        bbox: bboxOf(g),
-        labelAt: [bboxOf(g)[0], bboxOf(g)[1]],
-        cells: encodeCells(touchedCells(g)),
-      })),
-    });
-    return campaignId;
   });
+  await addAreas(t, areas, unselected);
+  return campaignId;
 }
 
 const settle = (t: T) => t.finishAllScheduledFunctions(vi.runAllTimers);
@@ -162,25 +170,10 @@ describe("Statistik je Gebiet", () => {
 
   test("ältere Markierungen ohne Gebiet werden einmalig nachgezogen, ohne doppelt zu zählen", async () => {
     const t = convexTest(schema, modules);
-    // Markierungen von vor den Gebieten (ohne areaRun), direkt in der Datenbank.
-    const campaignId = await t.run(async (ctx) => {
-      const id = await ctx.db.insert("campaigns", {
-        slug: SLUG, adminKey: ADMIN, name: "Alt", placeLabel: "Testort", center: { lat: 50.705, lng: 7.005 }, markCount: 0, blockedCount: 0,
-      });
-      return id;
-    });
+    // Markierungen von vor den Gebieten (ohne areaRun).
+    await setup(t, []);
     for (let i = 0; i < 30; i++) await tap(t, `way/${i}`, [7.0001 + i * 0.0006, 50.705], i % 3 === 0 ? "blocked" : "done");
-    await t.run(async (ctx) => {
-      await ctx.db.insert("areaSets", { campaignId, status: "loading", unselected: [], failures: 0, updatedAt: Date.now(), run: 1 });
-    });
-    await t.mutation(internal.areas.save, {
-      campaignId,
-      run: 1,
-      whole: false,
-      areas: [["w", "West", WEST] as const, ["e", "Ost", EAST] as const].map(([areaId, name, g]) => ({
-        areaId, name, geometry: JSON.stringify(g), bbox: bboxOf(g), labelAt: [0, 0], cells: encodeCells(touchedCells(g)),
-      })),
-    });
+    await addAreas(t, [["w", "West", WEST], ["e", "Ost", EAST]]);
     // Während des Nachziehens wird schon getippt: ein altes Haus wechselt, ein neues kommt dazu.
     await tap(t, "way/1", [7.0001 + 0.0006, 50.705], "none");
     await tap(t, "way/999", [7.0151, 50.705], "done");
@@ -192,22 +185,33 @@ describe("Statistik je Gebiet", () => {
     expect(await row(t, "w")).toMatchObject({ done: count(westX, "done"), blocked: count(westX, "blocked") });
     expect(await row(t, "e")).toMatchObject({ done: count(eastX, "done") + 1, blocked: count(eastX, "blocked") });
     expect((await stats(t))!.areas!.assigning).toBe(false);
-    // Noch einmal laden (z. B. „Erneut versuchen“): Zählung beginnt neu und bleibt richtig.
-    await t.run(async (ctx) => {
-      const set = (await ctx.db.query("areaSets").collect())[0];
-      await ctx.db.patch(set._id, { status: "loading", run: 2 });
-    });
-    await t.mutation(internal.areas.save, {
-      campaignId,
-      run: 2,
-      whole: false,
-      areas: [["w", "West", WEST] as const, ["e", "Ost", EAST] as const].map(([areaId, name, g]) => ({
-        areaId, name, geometry: JSON.stringify(g), bbox: bboxOf(g), labelAt: [0, 0], cells: encodeCells(touchedCells(g)),
-      })),
-    });
+    // Ein weiterer Ortsteil kommt dazu: alles wird neu zugeordnet und bleibt richtig.
+    await addAreas(t, [["f", "Fern", FAR]]);
     await settle(t);
     expect(await row(t, "w")).toMatchObject({ done: count(westX, "done"), blocked: count(westX, "blocked") });
     expect(await row(t, "e")).toMatchObject({ done: count(eastX, "done") + 1, blocked: count(eastX, "blocked") });
+    expect(await row(t, "f")).toMatchObject({ done: 0, blocked: 0 });
+  });
+
+  test("ein später gewählter Ortsteil zählt Markierungen mit, die vorher außerhalb lagen", async () => {
+    const t = convexTest(schema, modules);
+    await storeHouses(t, grid([7.0, 50.7, 7.06, 50.71]), [WEST, FAR]);
+    await setup(t, [["w", "West", WEST]]);
+    await settle(t);
+    await tap(t, "way/1", [7.005, 50.705], "done");
+    await tap(t, "way/2", [7.055, 50.705], "blocked"); // außerhalb aller Gebiete
+    expect((await stats(t))!.areas!.rows).toHaveLength(1);
+    await addAreas(t, [["f", "Fern", FAR]]);
+    await settle(t);
+    expect(await row(t, "w")).toMatchObject({ done: 1, blocked: 0 });
+    expect(await row(t, "f")).toMatchObject({ done: 0, blocked: 1, target: true });
+    expect((await row(t, "f")).houses).toBeGreaterThan(0);
+    // Wieder abgewählt: bleibt mit seinen Markierungen unter „nicht gewählt“, ohne Häuserzahl.
+    await t.mutation(api.areas.select, { adminKey: ADMIN, ids: ["f"], selected: false });
+    await settle(t);
+    expect(await row(t, "f")).toMatchObject({ blocked: 1, target: false, houses: null });
+    await tap(t, "way/3", [7.0551, 50.7051], "done");
+    expect(await row(t, "f")).toMatchObject({ done: 1, blocked: 1 });
   });
 
   test("„vorläufig“, solange Kacheln eines Gebiets fehlen; nachgeführt, wenn das Vorladen fertig ist", async () => {

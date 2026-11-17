@@ -60,17 +60,28 @@ const relBox = (id, name, level, [w, s, e, n]) => ({
   members: [{ type: "way", role: "outer", geometry: [[w, s], [e, s], [e, n], [w, n], [w, s]].map(([lon, lat]) => ({ lat, lon })) }],
 });
 const TOWN = [CENTER.lng - 0.01, CENTER.lat - 0.01, CENTER.lng + 0.01, CENTER.lat + 0.01];
+const BOUNDARIES = [
+  relBox(900, "Bornheim", 8, TOWN),
+  relBox(901, "Roisdorf", 10, [TOWN[0], TOWN[1], AREA_SPLIT, TOWN[3]]),
+  relBox(902, "Hersel", 10, [AREA_SPLIT, TOWN[1], TOWN[2], TOWN[3]]),
+];
+/** Overpass für Grenzen wie echt: „out tags bb“ nach Stufen und Ausschnitt, „rel(id:…)“ mit Geometrie. */
 function fakeAreas(query) {
-  if (query.includes("is_in")) {
-    const [w, s, e, n] = TOWN;
-    return { elements: [{ type: "relation", id: 900, tags: { boundary: "administrative", admin_level: "8", name: "Bornheim" }, bounds: { minlon: w, minlat: s, maxlon: e, maxlat: n } }] };
+  const ids = query.match(/rel\(id:([\d,]+)\)/);
+  if (ids) {
+    const wanted = new Set(ids[1].split(",").map(Number));
+    return { elements: BOUNDARIES.filter((r) => wanted.has(r.id)) };
   }
+  const levels = new Set((query.match(/admin_level~"\^\(([\d|]+)\)\$"/)?.[1] ?? "").split("|"));
+  const [s, w, n, e] = query.match(/\(([-\d.]+),([-\d.]+),([-\d.]+),([-\d.]+)\)/).slice(1).map(Number);
   return {
-    elements: [
-      relBox(900, "Bornheim", 8, TOWN),
-      relBox(901, "Roisdorf", 10, [TOWN[0], TOWN[1], AREA_SPLIT, TOWN[3]]),
-      relBox(902, "Hersel", 10, [AREA_SPLIT, TOWN[1], TOWN[2], TOWN[3]]),
-    ],
+    elements: BOUNDARIES.flatMap(({ members, ...r }) => {
+      const pts = members.flatMap((m) => m.geometry);
+      const lons = pts.map((p) => p.lon), lats = pts.map((p) => p.lat);
+      const b = { minlon: Math.min(...lons), minlat: Math.min(...lats), maxlon: Math.max(...lons), maxlat: Math.max(...lats) };
+      const hit = levels.has(r.tags.admin_level) && b.minlon <= e && b.maxlon >= w && b.minlat <= n && b.maxlat >= s;
+      return hit ? [{ ...r, bounds: b }] : [];
+    }),
   };
 }
 
@@ -83,7 +94,7 @@ const overpass = http.createServer((req, res) => {
   req.on("end", () => {
     const q = new URLSearchParams(body).get("data") ?? "";
     res.setHeader("Content-Type", "application/json");
-    if (q.includes("is_in") || q.includes("boundary=")) return res.end(JSON.stringify(fakeAreas(q)));
+    if (q.includes("out tags bb") || q.includes("rel(id:")) return res.end(JSON.stringify(fakeAreas(q)));
     overpassCalls++;
     setTimeout(() => res.end(JSON.stringify(fakeBuildings(body))), overpassDelayMs);
   });
@@ -91,6 +102,8 @@ const overpass = http.createServer((req, res) => {
 await new Promise((r) => overpass.listen(8787, "127.0.0.1", r));
 
 let browserCalledOverpass = false;
+let browserBoundaryCalls = 0;
+let browserSentReferer = false;
 async function mockOsm(ctx, { styleFails = false } = {}) {
   await ctx.route("https://nominatim.openstreetmap.org/**", (r) =>
     r.fulfill({
@@ -134,9 +147,17 @@ async function mockOsm(ctx, { styleFails = false } = {}) {
             },
           }),
   );
-  // Der Browser darf Overpass nie direkt fragen (CORS, Last) – das macht Convex.
+  // Häuser fragt nie der Browser (CORS, Last) – das macht Convex. Nur die Grenzen der Ortsteile
+  // holt im Modus „Gebiete bearbeiten“ der Browser des Admins selbst (nachgebildet wie in Convex).
   const isOverpass = (url) => /(^|\.)(overpass-api\.de|overpass\.kumi\.systems|overpass\.private\.coffee|maps\.mail\.ru)$/.test(url.hostname);
   await ctx.route(isOverpass, (r) => {
+    const q = new URLSearchParams(r.request().postData() ?? "").get("data") ?? "";
+    if (q.includes("out tags bb") || q.includes("rel(id:")) {
+      browserBoundaryCalls++;
+      // overpass-api.de lehnt Anfragen mit Referer ab (406): Der Browser darf keinen schicken.
+      if (r.request().headers()["referer"]) browserSentReferer = true;
+      return r.fulfill({ json: fakeAreas(q), headers: { "Access-Control-Allow-Origin": "*" } });
+    }
     browserCalledOverpass = true;
     return r.abort();
   });
@@ -180,13 +201,29 @@ try {
   await p.getByText("Diesen Link für dich behalten").waitFor();
   assert.ok(!adminUrl.includes(url.split("/v/")[1]), "Admin- und Bearbeiten-Schlüssel verschieden");
 
-  // Ortsteile festlegen
+  // Ortsteile festlegen: Bearbeiten-Modus, der Ortsteil an der Adresse (Roisdorf) ist gewählt
   await p.getByRole("button", { name: /Ortsteile festlegen/ }).click();
-  const sheet = p.getByTestId("areas-sheet");
-  await sheet.getByLabel("Hersel").waitFor({ timeout: 30_000 });
-  assert.deepEqual(await sheet.getByRole("checkbox").evaluateAll((els) => els.map((e) => e.checked)), [true, true], "neue Aktion: alle gewählt");
+  const editBar = p.getByTestId("area-edit-bar");
+  await editBar.getByText("1 gewählt").waitFor({ timeout: 30_000 });
+  /** Tipp auf die Karte an einem Ort [lng, lat] (im Bearbeiten-Modus: Gebiet an- oder abwählen). */
+  const tapAt = async (page, lng, lat) => {
+    const [x, y] = await page.evaluate(([lng, lat]) => {
+      const m = window.__einwurfMap;
+      const r = m.getCanvasContainer().getBoundingClientRect();
+      const q = m.project([lng, lat]);
+      return [q.x + r.left, q.y + r.top];
+    }, [lng, lat]);
+    await page.mouse.click(x, y);
+    await page.waitForTimeout(700);
+  };
+  const IN_HERSEL = [CENTER.lng + 0.006, CENTER.lat + 0.004];
+  const IN_ROISDORF = [CENTER.lng - 0.006, CENTER.lat + 0.004];
+  await p.waitForTimeout(1500); // Herauszoomen abwarten
+  await tapAt(p, ...IN_HERSEL);
+  await editBar.getByText("2 gewählt").waitFor({ timeout: 10_000 });
   await shot(p, "2a-gebiete");
-  await sheet.getByRole("button", { name: "Fertig" }).click();
+  await editBar.getByRole("button", { name: "Fertig" }).click();
+  await p.evaluate((c) => window.__einwurfMap.jumpTo({ center: [c.lng, c.lat], zoom: 16 }), CENTER);
   await p.waitForTimeout(2500);
 
   // Kartenseite scrollt nicht
@@ -201,7 +238,7 @@ try {
   await p2.goto(url);
   await p2.waitForTimeout(2500);
   // Bearbeiten-Link: keine Gebietsauswahl
-  assert.equal(await p2.getByRole("button", { name: "Gebiete" }).count(), 0, "Gebiete nur im Admin-Link");
+  assert.equal(await p2.getByRole("button", { name: "Gebiete bearbeiten" }).count(), 0, "Gebiete nur im Admin-Link");
 
   const box = await p.getByTestId("map").boundingBox();
   const cx = box.x + box.width / 2;
@@ -308,8 +345,10 @@ try {
   await hd.getByRole("button", { name: "Speichern" }).click();
   await hd.waitFor({ state: "hidden" });
   assert.equal(await noteAt(p2, hx, hy), true, "Notiz in Hersel blau");
-  await p.getByRole("button", { name: "Gebiete" }).click();
-  await sheet.getByLabel("Hersel").uncheck();
+  await p.getByRole("button", { name: "Gebiete bearbeiten" }).click();
+  await p.waitForTimeout(1500);
+  await tapAt(p, ...IN_HERSEL);
+  await editBar.getByText("1 gewählt").waitFor({ timeout: 10_000 });
   await p2.waitForTimeout(1500);
   assert.equal(await statusAt(p2, hx, hy), null, "Haus in abgewähltem Gebiet nicht mehr da");
   assert.equal(await statusAt(p2, cx, cy), "done", "Haus in gewähltem Gebiet bleibt");
@@ -318,13 +357,13 @@ try {
   await p2.waitForTimeout(800);
   assert.deepEqual(await labels(p2), ["Roisdorf"], "Helfer sieht nur gewählte Gebiete");
   assert.equal(await pointsInHersel(p2), 0, "Markierung und Notiz im abgewählten Gebiet nicht zu sehen");
-  await p.evaluate(() => window.__einwurfMap.jumpTo({ zoom: 14 }));
-  await p.waitForTimeout(800);
-  assert.deepEqual(await labels(p), ["Hersel", "Roisdorf"], "Admin sieht alle Gebiete");
+  assert.deepEqual(await labels(p), ["Hersel", "Roisdorf"], "Admin sieht im Bearbeiten-Modus alle Gebiete");
   await shot(p2, "3-gebiete-helfer");
-  await sheet.getByRole("button", { name: "Keine" }).click();
-  await sheet.getByRole("button", { name: "Fertig" }).click();
-  await p.evaluate(() => window.__einwurfMap.jumpTo({ zoom: 16 }));
+  // Auch Roisdorf abwählen: nichts gewählt, wieder der ganze Ort
+  await tapAt(p, ...IN_ROISDORF);
+  await editBar.getByText("keins gewählt").waitFor({ timeout: 10_000 });
+  await editBar.getByRole("button", { name: "Fertig" }).click();
+  await p.evaluate((c) => window.__einwurfMap.jumpTo({ center: [c.lng, c.lat], zoom: 16 }), CENTER);
   await p2.evaluate(() => window.__einwurfMap.jumpTo({ zoom: 16 }));
   await p2.waitForTimeout(1500);
   // Nichts gewählt: wieder der ganze Ort
@@ -798,7 +837,9 @@ try {
   await shot(d, "7-map-desktop");
 
   assert.deepEqual(errors, [], "keine Fehler in der Konsole");
-  assert.equal(browserCalledOverpass, false, "Browser fragt Overpass nicht direkt");
+  assert.equal(browserCalledOverpass, false, "Browser fragt Overpass nicht nach Häusern");
+  assert.ok(browserBoundaryCalls > 0, "Grenzen der Ortsteile holt der Browser des Admins selbst");
+  assert.equal(browserSentReferer, false, "Overpass-Abfragen aus dem Browser ohne Referer");
   assert.ok(overpassCalls > 0, "Convex hat Overpass gefragt");
   console.log("OK");
 } finally {
