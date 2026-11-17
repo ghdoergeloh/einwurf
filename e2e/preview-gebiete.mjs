@@ -63,7 +63,7 @@ async function createAndLoadAreas(query) {
 
 try {
   // Bornheim: Ortsteile wie im Issue
-  const b = await createAndLoadAreas("Bornheim");
+  const b = await createAndLoadAreas("Bornheim, Rhein-Sieg-Kreis");
   for (const n of ["Brenig", "Hersel", "Roisdorf", "Sechtem", "Walberberg", "Widdig"]) {
     assert.ok(b.names.some((x) => x.includes(n)), `Bornheim: Ortsteil ${n} fehlt`);
   }
