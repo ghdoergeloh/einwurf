@@ -135,7 +135,7 @@ async function mockOsm(ctx, { styleFails = false } = {}) {
           }),
   );
   // Der Browser darf Overpass nie direkt fragen (CORS, Last) – das macht Convex.
-  const isOverpass = (url) => /(^|\.)(overpass-api\.de|overpass\.private\.coffee|maps\.mail\.ru)$/.test(url.hostname);
+  const isOverpass = (url) => /(^|\.)(overpass-api\.de|overpass\.kumi\.systems|overpass\.private\.coffee|maps\.mail\.ru)$/.test(url.hostname);
   await ctx.route(isOverpass, (r) => {
     browserCalledOverpass = true;
     return r.abort();

@@ -50,6 +50,9 @@ const MIN_ATTEMPT_MS = 15_000;
 /** Öffentliche Overpass-Server, der Reihe nach. Überschreibbar mit der Convex-Umgebungsvariable OVERPASS_URLS. */
 const DEFAULT_ENDPOINTS = [
   "https://overpass-api.de/api/interpreter",
+  // Aus der Convex-Cloud ist overpass-api.de zeitweise gar nicht erreichbar („error sending request“);
+  // dann kommt dieser sofort dran.
+  "https://overpass.kumi.systems/api/interpreter",
   "https://overpass.private.coffee/api/interpreter",
   "https://maps.mail.ru/osm/tools/overpass/api/interpreter",
 ];
