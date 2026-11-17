@@ -66,8 +66,10 @@ describe("parse", () => {
   });
 
   test("Abfrage der Teilgebiete nur feiner als der Ort", () => {
-    expect(subareaQuery(42, 8)).toContain('admin_level~"^(9|10|11|12)$"');
-    expect(subareaQuery(42, 8)).toContain("rel(42)");
+    const q = subareaQuery(42, 8, [6.9, 50.7, 7.0, 50.8]);
+    expect(q).toContain('admin_level~"^(9|10|11|12)$"](50.7,6.9,50.8,7)');
+    expect(q).toContain("rel(42)");
+    expect(q).not.toContain("map_to_area");
   });
 });
 

@@ -75,7 +75,7 @@ function overpassFor(place: Place) {
   return vi.fn(async (_url: string, init?: RequestInit) => {
     const q = new URLSearchParams(String(init?.body)).get("data") ?? "";
     if (q.includes("is_in")) return Response.json({ elements: place.parents });
-    if (q.includes("map_to_area")) return Response.json({ elements: place.boundaries });
+    if (q.includes("boundary=")) return Response.json({ elements: place.boundaries });
     // Gebäude: ein Haus in jeder Kachel-Mitte des Ausschnitts
     const [s, w, n, e] = q.match(/\(([-\d.]+),([-\d.]+),([-\d.]+),([-\d.]+)\)/)!.slice(1).map(Number);
     const elements = [];
@@ -151,6 +151,7 @@ describe("Gebiete ermitteln", () => {
     const failed = (await t2.query(api.areas.status, { slug: SLUG }))!;
     expect(failed).toMatchObject({ status: "failed" });
     // Die Antwort der Server steht für die Diagnose im Panel.
+    expect(failed.lastError).toMatch(/^Grenzen am Mittelpunkt: /);
     expect(failed.lastError).toContain("https://eins.example/api: HTTP 504");
     expect(failed.lastError).toContain("https://zwei.example/api: HTTP 504");
     expect(await t2.query(api.areas.list, { slug: SLUG })).toEqual([]);

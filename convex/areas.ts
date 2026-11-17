@@ -19,7 +19,7 @@ import {
   touchedCells,
   type AreaGeometry,
 } from "./areaGeo";
-import { askServers, overpassDeadline, overpassDetails, startPrefetch, takeOverpassQuota } from "./buildings";
+import { askServers, overpassDetails, startPrefetch, takeOverpassQuota } from "./buildings";
 import { prefetchArea } from "./osm";
 import { campaignByKey, requireRole } from "./access";
 
@@ -39,8 +39,12 @@ const AREAS_MAX_TOTAL_BYTES = 3_000_000;
 /** Mehr Gebiete nimmt niemand in eine Liste zum Ankreuzen. */
 const MAX_AREAS = 500;
 const FAILURE = "Die Gebiete (OpenStreetMap) sind gerade nicht erreichbar.";
+/** Je Overpass-Server so lange warten; die Abfragen der Grenzen sind größer als die der Häuser. */
+const AREAS_SERVER_TIMEOUT_MS = 120_000;
+/** Gesamtfrist eines Ladevorgangs (eine Convex-Action darf höchstens 10 Minuten laufen). */
+const AREAS_DEADLINE_MS = 7 * 60_000;
 /** So viel der Fehlermeldung wird gespeichert und angezeigt. */
-const MAX_ERROR_LENGTH = 300;
+const MAX_ERROR_LENGTH = 500;
 
 const setOf = (ctx: QueryCtx, campaignId: Id<"campaigns">) =>
   ctx.db.query("areaSets").withIndex("by_campaign", (q) => q.eq("campaignId", campaignId)).unique();
@@ -220,15 +224,23 @@ function wholePlace(campaign: Doc<"campaigns">, name: string | null, geometry: A
  * gesuchte Ort?), dann die Teilgebiete des Ortes. Wählt die feinste lückenlose Unterteilung.
  */
 async function fetchAreas(ctx: ActionCtx, campaign: Doc<"campaigns">) {
-  const ask = <T,>(q: string, parse: (json: never) => T) => askServers(q, parse, { hedge: false, lockedUntil: overpassDeadline(), failure: FAILURE });
+  // Keine Eile (läuft im Hintergrund): Server der Reihe nach, jeder mit viel Zeit.
+  const deadline = Date.now() + AREAS_DEADLINE_MS;
+  const ask = async <T,>(step: string, q: string, parse: (json: never) => T) => {
+    try {
+      return await askServers(q, parse, { hedge: false, lockedUntil: deadline, failure: FAILURE, timeoutMs: AREAS_SERVER_TIMEOUT_MS });
+    } catch (e) {
+      throw Object.assign(new ConvexError(FAILURE), { details: `${step}: ${overpassDetails(e)}` });
+    }
+  };
   await ctx.runMutation(internal.areas.quota, { slug: campaign.slug });
-  const parents = await ask(parentQuery(campaign.center.lat, campaign.center.lng), parseParents);
+  const parents = await ask("Grenzen am Mittelpunkt", parentQuery(campaign.center.lat, campaign.center.lng), parseParents);
   const b = campaign.bbox;
   const parent = chooseParent(parents, b && b.length === 4 ? [b[0], b[1], b[2], b[3]] : null);
   if (!parent) return { whole: true, areas: [wholePlace(campaign, null, null)] };
 
   await ctx.runMutation(internal.areas.quota, { slug: campaign.slug });
-  const boundaries = await ask(subareaQuery(parent.id, parent.level), parseBoundaries);
+  const boundaries = await ask("Teilgebiete", subareaQuery(parent.id, parent.level, parent.bbox), parseBoundaries);
   const place = boundaries.find((x) => x.id === parent.id);
   if (!place) return { whole: true, areas: [wholePlace(campaign, parent.name, null)] };
   const parts = chooseSubdivision(place, boundaries);

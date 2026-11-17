@@ -39,14 +39,17 @@ export function parentQuery(lat: number, lng: number): string {
 const MAX_LEVEL = 12;
 
 /**
- * Schritt 2: Grenze des Ortes und alle feineren Grenzen darin (Verwaltung, ersatzweise boundary=place),
- * mit Geometrie. Nachbarn, die nur die Grenze berühren, kommen mit und werden später aussortiert.
+ * Schritt 2: Grenze des Ortes und alle feineren Grenzen in seiner Ausdehnung (Verwaltung,
+ * ersatzweise boundary=place), mit Geometrie. Bewusst über die Ausdehnung statt über eine
+ * Fläche (map_to_area): Das ist für ausgelastete Server deutlich leichter. Nachbarn, die in die
+ * Ausdehnung ragen, kommen mit und werden später aussortiert (chooseSubdivision).
  */
-export function subareaQuery(relationId: number, level: number): string {
+export function subareaQuery(relationId: number, level: number, [w, s, e, n]: BBox): string {
   const levels = [];
   for (let l = level + 1; l <= MAX_LEVEL; l++) levels.push(l);
-  const admin = levels.length ? `rel(area.pa)[boundary=administrative][admin_level~"^(${levels.join("|")})$"];` : "";
-  return `[out:json][timeout:90];rel(${relationId})->.p;.p out geom;.p map_to_area->.pa;(${admin}rel(area.pa)[boundary=place];);out geom;`;
+  const box = `${s},${w},${n},${e}`;
+  const admin = levels.length ? `rel[boundary=administrative][admin_level~"^(${levels.join("|")})$"](${box});` : "";
+  return `[out:json][timeout:120];rel(${relationId});out geom;(${admin}rel[boundary=place](${box}););out geom;`;
 }
 
 interface OverpassPoint {
