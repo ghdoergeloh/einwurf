@@ -35,15 +35,20 @@ export function StatsSheet({ slug, areas, onShow, onClose }: Props) {
   }, [onClose]);
 
   // Noch vorläufig (z. B. Häuser inzwischen über die Karte geladen): beim Öffnen neu zählen lassen (gebremst).
+  // Fehlt die Statistik noch (Gebiete vor ihr geladen): anlegen lassen.
   const provisional = !!stats?.areas?.rows.some((r) => r.target && !r.complete);
+  const needsSetup = !!stats?.needsSetup;
   useEffect(() => {
-    if (provisional) refresh({ slug }).catch(() => {});
+    if (provisional || needsSetup) refresh({ slug }).catch(() => {});
     // Nur beim Öffnen und wenn es vorläufig wird, nicht bei jedem Tipp.
-  }, [provisional, refresh, slug]);
+  }, [provisional, needsSetup, refresh, slug]);
 
   const targets = stats?.areas?.rows.filter((r) => r.target) ?? [];
   const others = stats?.areas?.rows.filter((r) => !r.target) ?? [];
   const sum = sumProgress(targets);
+  // Markierungen außerhalb aller Gebiete zählen oben mit, hier nicht.
+  const inAreas = (stats?.areas?.rows ?? []).reduce((n, r) => n + r.done + r.blocked, 0);
+  const outside = stats?.areas ? stats.total.done + stats.total.blocked - inAreas : 0;
   const bboxById = new Map(areas.map((a) => [a.id, a.geometry]));
 
   return (
@@ -88,7 +93,14 @@ export function StatsSheet({ slug, areas, onShow, onClose }: Props) {
             </div>
           )}
 
-          {stats && !stats.areas && (
+          {stats?.needsSetup && (
+            <div className="flex items-center gap-3 rounded-2xl bg-paper p-4 text-sm" role="status">
+              <span className="size-4 shrink-0 animate-spin rounded-full border-2 border-ink/20 border-t-ink" />
+              Statistik wird vorbereitet …
+            </div>
+          )}
+
+          {stats && !stats.areas && !stats.needsSetup && (
             <>
               <Totals done={stats.total.done} blocked={stats.total.blocked} />
               <p className="mt-3 text-sm text-muted">
@@ -102,7 +114,7 @@ export function StatsSheet({ slug, areas, onShow, onClose }: Props) {
               <section className="rounded-2xl bg-paper p-4" data-testid="stats-sum" aria-label="Alle Zielgebiete">
                 <div className="flex items-baseline justify-between gap-3">
                   <h3 className="text-sm font-medium">
-                    {stats.areas.noneSelected ? "Ganzer Ort" : targets.length === 1 ? targets[0].name : `Alle ${targets.length} Zielgebiete`}
+                    {stats.areas.noneSelected ? "Alle Gebiete" : targets.length === 1 ? targets[0].name : `Alle ${targets.length} Zielgebiete`}
                   </h3>
                   <Percent p={sum} large />
                 </div>
@@ -111,7 +123,12 @@ export function StatsSheet({ slug, areas, onShow, onClose }: Props) {
               </section>
 
               {stats.areas.noneSelected && (
-                <p className="mt-3 text-xs text-muted">Keine Gebiete gewählt: Gezählt wird der ganze Ort.</p>
+                <p className="mt-3 text-xs text-muted">Keine Gebiete gewählt: Gezählt werden alle Gebiete.</p>
+              )}
+              {outside > 0 && !stats.areas.assigning && (
+                <p className="mt-3 text-xs text-muted">
+                  {outside} {outside === 1 ? "Markierung liegt" : "Markierungen liegen"} außerhalb der Gebiete. Die Zähler oben zählen sie mit, hier nicht.
+                </p>
               )}
               {stats.areas.assigning && (
                 <p className="mt-3 text-xs text-muted" role="status">

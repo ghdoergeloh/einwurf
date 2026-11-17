@@ -7,6 +7,14 @@ describe("Fortschritt je Gebiet", () => {
       houses: 200, done: 50, blocked: 9, open: 141, percent: 29, yellowPercent: 25, provisional: false,
     });
   });
+  test("rechnet in ganzen Zahlen: keine Rundungsfehler (29 von 100 sind 29 %)", () => {
+    expect(progressOf({ houses: 100, done: 29, blocked: 0, complete: true }).percent).toBe(29);
+    for (let of = 1; of <= 1000; of++)
+      for (let n = 0; n <= of; n++) {
+        const want = Math.floor((n * 100) / of);
+        if (progressOf({ houses: of, done: n, blocked: 0, complete: true }).percent !== want) throw new Error(`${n}/${of}`);
+      }
+  });
   test("100 % erst, wenn wirklich alles erreicht ist", () => {
     expect(progressOf({ houses: 1000, done: 999, blocked: 0, complete: true }).percent).toBe(99);
     expect(progressOf({ houses: 1000, done: 990, blocked: 10, complete: true }).percent).toBe(100);
@@ -25,6 +33,12 @@ describe("Fortschritt je Gebiet", () => {
     ]);
     expect(s).toMatchObject({ houses: 400, done: 110, blocked: 10, percent: 30, provisional: true });
     expect(sumProgress([{ houses: null, done: 1, blocked: 0, complete: false }]).houses).toBeNull();
+    // Gebiet noch ohne Häuserzahl: seine Markierungen zählen nicht gegen die Häuser der anderen
+    const partial = sumProgress([
+      { houses: 100, done: 10, blocked: 0, complete: true },
+      { houses: null, done: 90, blocked: 0, complete: false },
+    ]);
+    expect(partial).toMatchObject({ houses: 100, done: 10, percent: 10, provisional: true });
     expect(sumProgress([]).percent).toBeNull();
   });
 });

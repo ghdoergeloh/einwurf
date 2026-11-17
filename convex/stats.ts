@@ -3,8 +3,8 @@ import type { Doc, Id } from "./_generated/dataModel";
 import { internal } from "./_generated/api";
 import { ConvexError, v } from "convex/values";
 import type { Position } from "geojson";
-import { campaignForAdmin, campaignForEdit, campaignForRead } from "./access";
-import { areaAt, decodeCells, decodeGeometry, encodeCells, type AreaGeometry } from "./areaGeo";
+import { campaignForEdit, campaignForRead } from "./access";
+import { areaAt, decodeCells, decodeGeometry, encodeCells, inBox, type AreaGeometry } from "./areaGeo";
 import { centerOf, decodeBuildings } from "./osm";
 import { countDelta, statusOf, type HouseStatus } from "./status";
 
@@ -21,7 +21,8 @@ import { countDelta, statusOf, type HouseStatus } from "./status";
  *   gezählt wurde. Ältere Markierungen ordnet ein Hintergrundlauf einmalig zu. Weil Convex
  *   Mutationen nacheinander ausführt, zählt so jede Markierung genau einmal.
  *
- * Überlappen sich Gebiete, gilt wie bei areaAt das erste nach Namen, für Häuser und Markierungen gleich.
+ * Überlappen sich Gebiete, gilt das erste gewählte nach Namen, sonst das erste nach Namen
+ * (für Häuser und Markierungen gleich). So zählt jedes Haus, das die Karte antippbar zeigt.
  */
 
 /** Markierungen je Schritt beim Nachziehen; Kacheln je Schritt beim Zählen der Häuser. */
@@ -42,8 +43,19 @@ async function statRows(ctx: QueryCtx, campaignId: Id<"campaigns">, run: number)
   return rows.filter((r) => r.run === run).sort(byName);
 }
 
+/** Reihenfolge für die Zuordnung: gewählte Gebiete zuerst, dann die übrigen, je nach Namen. */
+function preferSelected(rows: Doc<"areaStats">[], unselected: string[]) {
+  const off = new Set(unselected);
+  return [...rows.filter((r) => !off.has(r.areaId)), ...rows.filter((r) => off.has(r.areaId))];
+}
+
+/** Ist die Statistik für den aktuellen Stand der Gebiete angelegt? (Fehlt bei Gebieten, die vor ihr geladen wurden.) */
+async function ready(ctx: QueryCtx, campaignId: Id<"campaigns">, set: Doc<"areaSets">) {
+  const job = await jobOf(ctx, campaignId);
+  return !!job && job.run === set.run;
+}
+
 type Located = { id: string; name: string; geometry: AreaGeometry; bbox: number[]; cells?: Set<string> };
-const inBox = ([x, y]: Position, b: number[]) => x >= b[0] && x <= b[2] && y >= b[1] && y <= b[3];
 
 /** Grenzen der Gebiete zu den Zeilen laden, nur für die Zuordnung (nie in einer Query für den Browser). */
 async function withGeometry(ctx: QueryCtx, rows: Doc<"areaStats">[], { cells = false } = {}): Promise<Located[]> {
@@ -157,13 +169,14 @@ export async function trackMark(
   center: [number, number],
 ): Promise<{ area?: string; areaRun?: number }> {
   const set = await setOf(ctx, campaignId);
-  if (!set || set.status !== "done") return {};
+  // Noch keine Statistik für diesen Stand: nichts festlegen, das Nachziehen ordnet später zu.
+  if (!set || set.status !== "done" || !(await ready(ctx, campaignId, set))) return {};
   const counted = !!existing && existing.areaRun === set.run;
   let area: string;
   let rows: Doc<"areaStats">[] | null = null;
   if (counted) area = existing.area ?? "";
   else {
-    rows = await statRows(ctx, campaignId, set.run);
+    rows = preferSelected(await statRows(ctx, campaignId, set.run), set.unselected);
     area = locate(center, await withGeometry(ctx, rows.filter((r) => inBox(center, r.bbox))));
   }
   const d = countDelta(counted ? statusOf(existing) : "none", target);
@@ -193,7 +206,7 @@ export const assignStep = internalMutation({
       .withIndex("by_campaign_osm", (q) => q.eq("campaignId", campaignId))
       .paginate({ cursor: job.marksCursor, numItems: ASSIGN_BATCH });
     const rows = await statRows(ctx, campaignId, run);
-    const areas = await withGeometry(ctx, rows);
+    const areas = await withGeometry(ctx, preferSelected(rows, set.unselected));
     const deltas = new Map<string, { done: number; blocked: number }>();
     for (const m of page.page) {
       if (m.areaRun === run) continue;
@@ -221,8 +234,8 @@ export const countStep = internalMutation({
     const batch = cells.slice(0, COUNT_BATCH);
     const rows = await statRows(ctx, campaignId, set.run);
     const targets = new Set(job.targets ? job.targets.split(" ") : []);
-    // Alle Gebiete für die Zuordnung (erstes nach Namen gewinnt), gezählt nur die Ziele.
-    const areas = await withGeometry(ctx, rows, { cells: true });
+    // Alle Gebiete für die Zuordnung (gewählte zuerst), gezählt nur die Ziele.
+    const areas = await withGeometry(ctx, preferSelected(rows, set.unselected), { cells: true });
     const houses = new Map<string, number>();
     const cached = new Map<string, number>();
     for (const cell of batch) {
@@ -267,10 +280,11 @@ export const byArea = query({
     if (!campaign) return null;
     const total = { done: campaign.markCount ?? 0, blocked: campaign.blockedCount ?? 0 };
     const set = await setOf(ctx, campaign._id);
-    if (!set || set.status !== "done") return { areas: null, total };
+    if (!set || set.status !== "done") return { areas: null, needsSetup: false, total };
     const job = await jobOf(ctx, campaign._id);
     const rows = await statRows(ctx, campaign._id, set.run);
-    if (rows.length === 0) return { areas: null, total };
+    // Gebiete geladen, aber noch keine Statistik (vor ihr geladen): Browser stößt refresh an.
+    if (!job || job.run !== set.run || rows.length === 0) return { areas: null, needsSetup: true, total };
     const off = new Set(set.unselected);
     const noneSelected = rows.every((r) => off.has(r.areaId));
     const list = rows.map((r) => {
@@ -292,22 +306,29 @@ export const byArea = query({
         whole: !!set.whole,
         noneSelected,
         rows: [...list.filter((r) => r.target), ...list.filter((r) => !r.target)],
-        assigning: !job || job.run !== set.run || !job.marksDone,
-        counting: !!job && job.cells !== "",
+        assigning: !job.marksDone,
+        counting: job.cells !== "",
       },
+      needsSetup: false,
       total,
     };
   },
 });
 
-/** Häuser neu zählen (Panel offen, Zahl noch vorläufig). Mit Bearbeiten- oder Admin-Schlüssel, gebremst. */
+/**
+ * Beim Öffnen der Statistik: fehlt sie für die geladenen Gebiete (vor ihr geladen), anlegen;
+ * ist sie vorläufig, Häuser neu zählen (gebremst). Nur mit dem Bearbeiten-Schlüssel (siehe access.ts).
+ */
 export const refresh = mutation({
   args: { slug: v.string() },
   handler: async (ctx, { slug }) => {
-    const campaign = (await campaignForEdit(ctx, slug)) ?? (await campaignForAdmin(ctx, slug));
+    const campaign = await campaignForEdit(ctx, slug);
     if (!campaign) throw new ConvexError("Verteilaktion nicht gefunden");
-    const job = await jobOf(ctx, campaign._id);
-    if (!job || job.cells !== "" || Date.now() - job.countedAt < REFRESH_MIN_MS) return;
+    const set = await setOf(ctx, campaign._id);
+    if (!set || set.status !== "done") return;
+    if (!(await ready(ctx, campaign._id, set))) return await resetAreaStats(ctx, campaign._id);
+    const job = (await jobOf(ctx, campaign._id))!;
+    if (job.cells !== "" || Date.now() - job.countedAt < REFRESH_MIN_MS) return;
     await recountHouses(ctx, campaign._id);
   },
 });

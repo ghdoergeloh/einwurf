@@ -262,10 +262,41 @@ describe("Statistik je Gebiet", () => {
     await t.run(async (ctx) => {
       await ctx.db.insert("campaigns", { slug: SLUG, name: "Alt", placeLabel: "Ort", center: { lat: 50.7, lng: 7 }, markCount: 3, blockedCount: 1 });
     });
-    expect(await stats(t)).toEqual({ areas: null, total: { done: 3, blocked: 1 } });
+    expect(await stats(t)).toEqual({ areas: null, needsSetup: false, total: { done: 3, blocked: 1 } });
   });
 
-  test("Neu zählen per refresh nur mit Bearbeiten- oder Admin-Schlüssel und gebremst", async () => {
+  test("Gebiete schon vor der Statistik geladen: refresh legt sie an, Markierungen werden nicht vorschnell zugeordnet", async () => {
+    const t = convexTest(schema, modules);
+    const campaignId = await setup(t, [["w", "West", WEST]]);
+    // Zustand wie vor diesem Stand: Gebiete fertig, aber keine Statistik.
+    await t.run(async (ctx) => {
+      for (const r of await ctx.db.query("areaStats").collect()) await ctx.db.delete(r._id);
+      for (const j of await ctx.db.query("statsJobs").collect()) await ctx.db.delete(j._id);
+    });
+    await tap(t, "way/1", [7.005, 50.705], "done");
+    const mark = await t.run(async (ctx) => (await ctx.db.query("marks").collect())[0]);
+    expect(mark.areaRun).toBeUndefined();
+    expect(await stats(t)).toMatchObject({ areas: null, needsSetup: true });
+    await t.mutation(api.stats.refresh, { slug: SLUG });
+    await settle(t);
+    expect(await row(t, "w")).toMatchObject({ done: 1 });
+    expect((await stats(t))!.needsSetup).toBe(false);
+    void campaignId;
+  });
+
+  test("Überlappung: Haus und Markierung zählen beim gewählten Gebiet, auch wenn ein nicht gewähltes früher im Alphabet steht", async () => {
+    const t = convexTest(schema, modules);
+    const houses = grid([7.0, 50.7, SPLIT, 50.71]);
+    await storeHouses(t, houses, [WEST]);
+    // „Alt“ (nicht gewählt) deckt dieselbe Fläche wie „West“ (gewählt).
+    await setup(t, [["a", "Alt", WEST], ["w", "West", WEST]], ["a"]);
+    await settle(t);
+    await tap(t, "way/1", [7.005, 50.705], "done");
+    expect(await row(t, "w")).toMatchObject({ houses: houses.length, done: 1 });
+    expect(await row(t, "a")).toMatchObject({ done: 0 });
+  });
+
+  test("Neu zählen per refresh nur mit Bearbeiten-Schlüssel und gebremst", async () => {
     const t = convexTest(schema, modules);
     await setup(t, [["w", "West", WEST]]);
     await settle(t);
@@ -278,5 +309,6 @@ describe("Statistik je Gebiet", () => {
     await settle(t);
     expect((await row(t, "w")).houses).toBe(grid([7.0, 50.7, SPLIT, 50.71]).length);
     await expect(t.mutation(api.stats.refresh, { slug: "Unbekannt1234567890123" })).rejects.toThrow();
+    await expect(t.mutation(api.stats.refresh, { slug: ADMIN })).rejects.toThrow();
   });
 });

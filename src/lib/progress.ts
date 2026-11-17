@@ -24,7 +24,8 @@ interface Counts {
   complete: boolean;
 }
 
-const pct = (n: number, of: number) => Math.min(100, Math.floor((n / of) * 100));
+// In ganzen Zahlen: (29 / 100) * 100 ergäbe 28,999… und damit 28 %.
+const pct = (n: number, of: number) => Math.min(100, Math.floor((n * 100) / of));
 
 export function progressOf({ houses, done, blocked, complete }: Counts): Progress {
   const has = houses !== null && houses > 0;
@@ -39,13 +40,17 @@ export function progressOf({ houses, done, blocked, complete }: Counts): Progres
   };
 }
 
-/** Summe über mehrere Gebiete (Zielgebiete). */
+/**
+ * Summe über mehrere Gebiete (Zielgebiete). Gebiete, deren Häuser noch nicht gezählt sind,
+ * zählen nicht mit (sonst stünden ihre Markierungen gegen die Häuser der anderen); dann ist die Summe vorläufig.
+ */
 export function sumProgress(rows: Counts[]): Progress {
   const counted = rows.filter((r) => r.houses !== null);
+  const used = counted.length ? counted : rows;
   return progressOf({
     houses: counted.length ? counted.reduce((s, r) => s + r.houses!, 0) : null,
-    done: rows.reduce((s, r) => s + r.done, 0),
-    blocked: rows.reduce((s, r) => s + r.blocked, 0),
+    done: used.reduce((s, r) => s + r.done, 0),
+    blocked: used.reduce((s, r) => s + r.blocked, 0),
     complete: rows.length > 0 && rows.every((r) => r.complete),
   });
 }
