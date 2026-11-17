@@ -29,8 +29,6 @@ import { campaignByKey, requireRole } from "./access";
  * Die Auswahl gilt für alle mit dem Link und ist live.
  */
 
-/** Läuft ein Ladevorgang so lange nicht weiter, darf er neu gestartet werden. */
-const AREAS_STALE_MS = 5 * 60_000;
 /** Nach einem Fehler erneut versuchen, mit wachsender Pause; danach „failed“ und Knopf. */
 const AREAS_RETRY_MS = 30_000;
 const AREAS_MAX_FAILURES = 3;
@@ -43,6 +41,11 @@ const FAILURE = "Die Gebiete (OpenStreetMap) sind gerade nicht erreichbar.";
 const AREAS_SERVER_TIMEOUT_MS = 120_000;
 /** Gesamtfrist eines Ladevorgangs (eine Convex-Action darf höchstens 10 Minuten laufen). */
 const AREAS_DEADLINE_MS = 7 * 60_000;
+/**
+ * Läuft ein Ladevorgang so lange nicht weiter, gilt er als hängen geblieben (z. B. abgebrochene
+ * Action) und darf neu gestartet werden. Länger als ein einzelner Versuch dauern darf.
+ */
+export const AREAS_STALE_MS = AREAS_DEADLINE_MS + 2 * 60_000;
 /** So viel der Fehlermeldung wird gespeichert und angezeigt. */
 const MAX_ERROR_LENGTH = 500;
 
