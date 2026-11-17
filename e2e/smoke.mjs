@@ -250,6 +250,32 @@ try {
   const labels = (page) => page.evaluate(() => window.__einwurfMap.queryRenderedFeatures({ layers: ["area-labels"] }).map((f) => f.properties.name).sort());
   const [hx, hy] = await herselAt(p2);
   await expectStatus(p2, hx, hy, "none", "Haus in Hersel geladen");
+  // Markierung und Notiz in Hersel: nach dem Abwählen nicht mehr zu sehen, danach wieder
+  const noteAt = (page, x, y) =>
+    page.evaluate(([x, y]) => {
+      const map = window.__einwurfMap;
+      const r = map.getCanvasContainer().getBoundingClientRect();
+      const [f] = map.queryRenderedFeatures([x - r.left, y - r.top], { layers: ["buildings-fill"] });
+      return f ? Boolean(map.getFeatureState({ source: "buildings", id: f.properties.osmId }).note) : null;
+    }, [x, y]);
+  /** Rausgezoomt gezeigte Punkte (Markierungen, Notizen) östlich der Grenze, also in Hersel. */
+  const pointsInHersel = (page) =>
+    page.evaluate(
+      (split) =>
+        window.__einwurfMap
+          .queryRenderedFeatures({ layers: ["mark-points", "note-points"] })
+          .filter((f) => f.geometry.coordinates[0] > split).length,
+      AREA_SPLIT,
+    );
+  await p2.mouse.click(hx, hy);
+  await expectStatus(p2, hx, hy, "done", "Haus in Hersel markiert");
+  await p2.mouse.click(hx, hy, { button: "right" });
+  const hd = p2.getByRole("dialog");
+  await hd.waitFor();
+  await hd.getByLabel("Text der Notiz").fill("Hersel: Hund im Garten");
+  await hd.getByRole("button", { name: "Speichern" }).click();
+  await hd.waitFor({ state: "hidden" });
+  assert.equal(await noteAt(p2, hx, hy), true, "Notiz in Hersel blau");
   await p.getByRole("button", { name: "Gebiete" }).click();
   await sheet.getByLabel("Hersel").uncheck();
   await p2.waitForTimeout(1500);
@@ -259,6 +285,7 @@ try {
   await p2.evaluate(() => window.__einwurfMap.jumpTo({ zoom: 14 }));
   await p2.waitForTimeout(800);
   assert.deepEqual(await labels(p2), ["Roisdorf"], "Helfer sieht nur gewählte Gebiete");
+  assert.equal(await pointsInHersel(p2), 0, "Markierung und Notiz im abgewählten Gebiet nicht zu sehen");
   await p.evaluate(() => window.__einwurfMap.jumpTo({ zoom: 14 }));
   await p.waitForTimeout(800);
   assert.deepEqual(await labels(p), ["Hersel", "Roisdorf"], "Admin sieht alle Gebiete");
@@ -269,8 +296,21 @@ try {
   await p2.evaluate(() => window.__einwurfMap.jumpTo({ zoom: 16 }));
   await p2.waitForTimeout(1500);
   // Nichts gewählt: wieder der ganze Ort
-  await expectStatus(p2, hx, hy, "none", "Haus in Hersel wieder da");
+  await expectStatus(p2, hx, hy, "done", "Haus in Hersel wieder da, mit seiner Markierung");
+  assert.equal(await noteAt(p2, hx, hy), true, "Notiz wieder zu sehen");
   assert.equal(await p2.evaluate(() => window.__einwurfMap.querySourceFeatures("area-mask").length), 0);
+  // Aufräumen, damit die Zähler der folgenden Schritte stimmen: wieder offen, Notiz weg
+  for (const want of ["blocked", "none"]) {
+    await p2.mouse.click(hx, hy);
+    await expectStatus(p2, hx, hy, want, `Haus in Hersel: ${want}`);
+    await p2.waitForTimeout(400);
+  }
+  await p2.mouse.click(hx, hy, { button: "right" });
+  await hd.waitFor();
+  await hd.getByRole("button", { name: "Notiz löschen" }).click();
+  await hd.waitFor({ state: "hidden" });
+  await p2.waitForTimeout(800);
+  assert.equal(await noteAt(p2, hx, hy), false);
 
   // Häuser der Grundkarte bleiben als hellgraue Platzhalter sichtbar
   assert.deepEqual(

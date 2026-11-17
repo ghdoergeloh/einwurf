@@ -22,7 +22,7 @@ import { nextStatus, statusOf, type HouseStatus, type MarkStatus } from "../../c
 import { addTap, cellsToWatch, settleTaps, type PendingTap } from "../lib/pendingTaps";
 import { cyclePlaceholder, resolvePlaceholderTaps, type PlaceholderTap } from "../lib/placeholderTaps";
 import { BURST_SECONDS, createBurst, drawBurst, type Burst } from "../lib/sparks";
-import { selectionOf, type AreaWithCells, type Selection } from "../../convex/areaGeo";
+import { selectionOf, visibleIn, type AreaWithCells, type Selection } from "../../convex/areaGeo";
 
 // Ab MapLibre 6 braucht jeder Bundler den Pfad zum Worker.
 maplibregl.setWorkerUrl(workerUrl);
@@ -256,10 +256,8 @@ export function BuildingMap({
     /** Färbt markierte Häuser per feature-state und setzt Punkte für Häuser ohne Umriss. */
     function syncMarks() {
       if (!loaded) return;
-      const current = new Map(marksRef.current);
       // Markierungen außerhalb der gewählten Gebiete bleiben gespeichert, werden aber nicht gezeigt.
-      const sel = areasRef.current.selection;
-      if (sel) for (const [id, m] of current) if (!sel.contains(m.center)) current.delete(id);
+      const current = new Map(visibleIn(marksRef.current, areasRef.current.selection));
       for (const [id, p] of pendingTaps) {
         if (p.to === "none") current.delete(id);
         else current.set(id, { osmId: id, center: p.center, status: p.to });
@@ -291,8 +289,7 @@ export function BuildingMap({
     /** Häuser mit Notiz: feature-state „note“ und blaue Punkte (rausgezoomt, auf markierten Häusern, ohne Umriss). */
     function syncNotes(current: Map<string, Mark>) {
       // Wie Markierungen: Notizen außerhalb der gewählten Gebiete bleiben gespeichert, werden aber nicht gezeigt.
-      const sel = areasRef.current.selection;
-      const notes = sel ? new Map([...notesRef.current].filter(([, n]) => sel.contains(n.center))) : notesRef.current;
+      const notes = visibleIn(notesRef.current, areasRef.current.selection);
       for (const id of [...paintedNotes]) {
         if (!notes.has(id)) {
           map.setFeatureState({ source: "buildings", id }, { note: false });
