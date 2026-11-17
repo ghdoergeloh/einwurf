@@ -1,4 +1,5 @@
 import { describe, expect, test } from "vitest";
+import { readFileSync } from "node:fs";
 import type { Position } from "geojson";
 import {
   areaAt,
@@ -66,8 +67,10 @@ describe("parse", () => {
   });
 
   test("Abfrage der Teilgebiete nur feiner als der Ort", () => {
-    expect(subareaQuery(42, 8)).toContain('admin_level~"^(9|10|11|12)$"');
-    expect(subareaQuery(42, 8)).toContain("rel(42)");
+    const q = subareaQuery(42, 8, [6.9, 50.7, 7.0, 50.8]);
+    expect(q).toContain('admin_level~"^(9|10|11|12)$"](50.7,6.9,50.8,7)');
+    expect(q).toContain("rel(42)");
+    expect(q).not.toContain("map_to_area");
   });
 });
 
@@ -238,5 +241,59 @@ describe("nur Einträge in gewählten Gebieten (S8)", () => {
     const beide = selectionOf([{ ...west, selected: true }, { ...ost, selected: true }]);
     expect([...visibleIn(marks, beide).keys()]).toEqual(["way/1", "way/2"]);
     expect([...visibleIn(notes, beide).keys()]).toEqual(["way/2"]);
+  });
+});
+
+describe("gemischte Stufen (wie Bornheim: Ortschaften teils auf Stufe 9, teils auf 10)", () => {
+  const ort = boundary(100, "Ort", 8, box(0, 0, 4, 2));
+  // Stufe 9 deckt drei Viertel ab, Stufe 10 den Rest und zusätzlich einen Teil eines Stufe-9-Gebiets.
+  const stufe9 = [
+    boundary(1, "Hersel", 9, box(0, 0, 1, 2)),
+    boundary(2, "Roisdorf", 9, box(1, 0, 2, 2)),
+    boundary(3, "Hemmerich/Kardorf", 9, box(2, 0, 3, 2)),
+  ];
+  const stufe10 = [
+    boundary(4, "Bornheim", 10, box(3, 0, 4, 1)),
+    boundary(5, "Brenig", 10, box(3, 1, 4, 2)),
+    boundary(6, "Kardorf", 10, box(2, 0, 3, 1)), // liegt in Hemmerich/Kardorf
+  ];
+  // Nachbarort mit eigenem Ortsteil, der nur die Grenze berührt
+  const nachbar = boundary(7, "Nachbar", 9, box(4, 0, 5, 2));
+
+  test("füllt die Lücken der gröberen Stufe mit der feineren, ohne Doppelte", () => {
+    expect(chooseSubdivision(ort, [...stufe10, nachbar, ...stufe9])?.map((b) => b.name).sort()).toEqual(
+      ["Bornheim", "Brenig", "Hemmerich/Kardorf", "Hersel", "Roisdorf"],
+    );
+  });
+
+  test("eine lückenlose einzelne Stufe geht weiter vor", () => {
+    const ganz10 = [...stufe10.slice(0, 2), boundary(8, "West", 10, box(0, 0, 3, 2))];
+    expect(chooseSubdivision(ort, [...stufe9, ...ganz10])?.map((b) => b.name).sort()).toEqual(["Bornheim", "Brenig", "West"]);
+  });
+
+  test("bleibt auch gemischt eine Lücke, gilt der ganze Ort", () => {
+    expect(chooseSubdivision(ort, [stufe9[0], stufe10[0]])).toBeNull();
+  });
+});
+
+describe("echte OSM-Daten (vereinfacht, fixtures/osm)", () => {
+  const load = (name: string) =>
+    parseBoundaries(JSON.parse(readFileSync(new URL(`../fixtures/osm/${name}`, import.meta.url), "utf8")));
+
+  test("Bornheim: Ortschaften teils auf Stufe 9, teils auf 10, ohne Nachbarorte", () => {
+    const all = load("overpass-bornheim.json");
+    const parts = chooseSubdivision(all.find((b) => b.id === 168426)!, all)!;
+    expect(parts.map((p) => p.name).sort((a, b) => a.localeCompare(b, "de"))).toEqual([
+      "Bornheim", "Brenig", "Dersdorf", "Hemmerich/Kardorf", "Hersel", "Merten", "Roisdorf",
+      "Rösberg", "Sechtem", "Uedorf", "Walberberg", "Waldorf", "Widdig",
+    ]);
+  });
+
+  test("Bonn (Großstadt): die 51 Ortsteile auf Stufe 10, nicht die 4 Stadtbezirke", () => {
+    const all = load("overpass-bonn.json");
+    const parts = chooseSubdivision(all.find((b) => b.id === 62508)!, all)!;
+    expect(parts).toHaveLength(51);
+    expect(new Set(parts.map((p) => p.level))).toEqual(new Set([10]));
+    expect(parts.map((p) => p.name)).toEqual(expect.arrayContaining(["Bonn-Zentrum", "Alt-Godesberg", "Beuel-Mitte", "Duisdorf"]));
   });
 });

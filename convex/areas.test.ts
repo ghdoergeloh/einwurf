@@ -6,6 +6,7 @@ import schema from "./schema";
 import { CELL_SIZE, decodeBuildings } from "./osm";
 import { campaignAreas } from "./areaStore";
 import { areaAt } from "./areaGeo";
+import { AREAS_STALE_MS } from "./areas";
 
 const modules = import.meta.glob("./**/*.ts");
 const SLUG = "AbCdEfGhIjKlMnOpQrStUv";
@@ -75,7 +76,7 @@ function overpassFor(place: Place) {
   return vi.fn(async (_url: string, init?: RequestInit) => {
     const q = new URLSearchParams(String(init?.body)).get("data") ?? "";
     if (q.includes("is_in")) return Response.json({ elements: place.parents });
-    if (q.includes("map_to_area")) return Response.json({ elements: place.boundaries });
+    if (q.includes("boundary=")) return Response.json({ elements: place.boundaries });
     // Gebäude: ein Haus in jeder Kachel-Mitte des Ausschnitts
     const [s, w, n, e] = q.match(/\(([-\d.]+),([-\d.]+),([-\d.]+),([-\d.]+)\)/)!.slice(1).map(Number);
     const elements = [];
@@ -151,6 +152,7 @@ describe("Gebiete ermitteln", () => {
     const failed = (await t2.query(api.areas.status, { slug: SLUG }))!;
     expect(failed).toMatchObject({ status: "failed" });
     // Die Antwort der Server steht für die Diagnose im Panel.
+    expect(failed.lastError).toMatch(/^Grenzen am Mittelpunkt: /);
     expect(failed.lastError).toContain("https://eins.example/api: HTTP 504");
     expect(failed.lastError).toContain("https://zwei.example/api: HTTP 504");
     expect(await t2.query(api.areas.list, { slug: SLUG })).toEqual([]);
@@ -159,6 +161,26 @@ describe("Gebiete ermitteln", () => {
     await t2.finishAllScheduledFunctions(vi.runAllTimers);
     expect(await names(t2)).toHaveLength(4);
     expect((await t2.query(api.areas.status, { slug: SLUG }))!.lastError).toBeNull();
+  });
+});
+
+describe("hängender Ladevorgang", () => {
+  test("gilt erst nach Ablauf eines ganzen Versuchs als hängend, dann startet „Erneut versuchen“ neu", async () => {
+    // Ein Lauf, der nie antwortet (Action abgebrochen): Zustand bleibt „loading“.
+    vi.stubGlobal("fetch", vi.fn(() => new Promise<Response>(() => {})));
+    vi.stubEnv("AREAS_ON_CREATE", "on");
+    const t = convexTest(schema, modules);
+    await t.mutation(api.campaigns.create, { slug: SLUG, adminKey: ADMIN, name: "T", placeLabel: "Ort", center: A.center, bbox: A.bbox });
+    const run = async () => (await t.run(async (ctx) => (await ctx.db.query("areaSets").first())!)).run;
+    const before = await run();
+    expect(AREAS_STALE_MS).toBeGreaterThan(7 * 60_000);
+    vi.advanceTimersByTime(6 * 60_000);
+    await t.mutation(api.areas.load, { adminKey: ADMIN });
+    expect(await run()).toBe(before); // läuft womöglich noch: nicht doppelt starten
+    vi.advanceTimersByTime(AREAS_STALE_MS);
+    await t.mutation(api.areas.load, { adminKey: ADMIN });
+    expect(await run()).toBe(before + 1);
+    expect((await t.query(api.areas.status, { slug: SLUG }))!.staleAfterMs).toBe(AREAS_STALE_MS);
   });
 });
 

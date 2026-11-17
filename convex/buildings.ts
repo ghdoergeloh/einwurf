@@ -281,7 +281,12 @@ export const overpassDeadline = () => Date.now() + lockMs();
 export function askServers<T>(
   query: string,
   parse: (json: never) => T,
-  { hedge = true, lockedUntil, failure }: { hedge?: boolean; lockedUntil: number; failure: string },
+  {
+    hedge = true,
+    lockedUntil,
+    failure,
+    timeoutMs = OVERPASS_TIMEOUT_MS,
+  }: { hedge?: boolean; lockedUntil: number; failure: string; /** je Server */ timeoutMs?: number },
 ): Promise<T> {
   const urls = endpoints();
   const problems: string[] = [];
@@ -306,7 +311,7 @@ export function askServers<T>(
       const url = urls[next++];
       const ctrl = new AbortController();
       running.add(ctrl);
-      const timeout = setTimeout(() => running.has(ctrl) && ctrl.abort(), Math.min(OVERPASS_TIMEOUT_MS, left));
+      const timeout = setTimeout(() => running.has(ctrl) && ctrl.abort(), Math.min(timeoutMs, left));
       timers.push(timeout);
       const settle = () => {
         running.delete(ctrl);

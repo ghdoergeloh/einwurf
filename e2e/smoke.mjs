@@ -83,7 +83,7 @@ const overpass = http.createServer((req, res) => {
   req.on("end", () => {
     const q = new URLSearchParams(body).get("data") ?? "";
     res.setHeader("Content-Type", "application/json");
-    if (q.includes("is_in") || q.includes("map_to_area")) return res.end(JSON.stringify(fakeAreas(q)));
+    if (q.includes("is_in") || q.includes("boundary=")) return res.end(JSON.stringify(fakeAreas(q)));
     overpassCalls++;
     setTimeout(() => res.end(JSON.stringify(fakeBuildings(body))), overpassDelayMs);
   });
