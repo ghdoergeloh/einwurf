@@ -228,6 +228,12 @@ describe("nur gewählte Gebiete", () => {
     res = await t.action(api.buildings.load, { slug: SLUG, cells: [ROISDORF, HERSEL] });
     expect(res.map((d) => decodeBuildings(d).length)).toEqual([1, 0]);
 
+    // Nichts gewählt: wieder der ganze Ort, alle Häuser
+    await t.mutation(api.areas.select, { adminKey: ADMIN, ids: ["relation/11", "relation/12", "relation/13", "relation/14"], selected: false });
+    res = await t.action(api.buildings.load, { slug: SLUG, cells: [ROISDORF, HERSEL] });
+    expect(res.map((d) => decodeBuildings(d).length)).toEqual([1, 1]);
+    await t.mutation(api.areas.select, { adminKey: ADMIN, ids: ["relation/11", "relation/13"], selected: true });
+
     // Eine Kachel nur in abgewählten Gebieten: Overpass wird gar nicht gefragt.
     const before = fetchMock.mock.calls.length;
     const far = cellAt(7.0375, 50.7075); // Sechtem, noch nicht im Cache

@@ -21,7 +21,7 @@ import { nextStatus, statusOf, type HouseStatus, type MarkStatus } from "../../c
 import { addTap, cellsToWatch, settleTaps, type PendingTap } from "../lib/pendingTaps";
 import { cyclePlaceholder, resolvePlaceholderTaps, type PlaceholderTap } from "../lib/placeholderTaps";
 import { BURST_SECONDS, createBurst, drawBurst, type Burst } from "../lib/sparks";
-import { selectionOf, type Area, type Selection } from "../../convex/areaGeo";
+import { selectionOf, type AreaWithCells, type Selection } from "../../convex/areaGeo";
 
 // Ab MapLibre 6 braucht jeder Bundler den Pfad zum Worker.
 maplibregl.setWorkerUrl(workerUrl);
@@ -72,7 +72,7 @@ export interface MapControls {
 }
 
 /** Gebiet für die Karte: Grenze, Name, Auswahl und Punkt für die Beschriftung. */
-export type MapArea = Area & { labelAt: number[] };
+export type MapArea = AreaWithCells & { labelAt: number[] };
 
 export type LoadState = "idle" | "zoom" | "loading" | "error" | "mapError";
 
@@ -354,7 +354,7 @@ export function BuildingMap({
           !loadedCells.has(cellKey(c.x, c.y)) &&
           !fetching.has(cellKey(c.x, c.y)) &&
           // Außerhalb der gewählten Gebiete wird nichts geladen.
-          (!sel || sel.touches([c.x * CELL_SIZE, c.y * CELL_SIZE, (c.x + 1) * CELL_SIZE, (c.y + 1) * CELL_SIZE])),
+          (!sel || sel.touches(cellKey(c.x, c.y))),
       );
       if (missing.length === 0) return updateLoadState();
       // Mitte zuerst, falls der Ausschnitt größer ist als ein Abruf.
@@ -439,17 +439,22 @@ export function BuildingMap({
           geometry: { type: "Point", coordinates: a.labelAt },
         })),
       });
-      // Abdunkeln: die ganze Welt mit Löchern für die gewählten Gebiete.
+      // Abdunkeln: die ganze Welt mit Löchern für die gewählten Gebiete, dazu deren eigene
+      // Löcher (Enklaven, die nicht gewählt sind).
+      const chosen = list.filter((a) => a.selected);
       (map.getSource("area-mask") as GeoJSONSource).setData(
         selection
           ? {
               type: "Feature",
               properties: {},
               geometry: {
-                type: "Polygon",
+                type: "MultiPolygon",
                 coordinates: [
-                  [[-180, -85], [180, -85], [180, 85], [-180, 85], [-180, -85]],
-                  ...list.filter((a) => a.selected).flatMap((a) => a.geometry.map((poly) => poly[0])),
+                  [
+                    [[-180, -85], [180, -85], [180, 85], [-180, 85], [-180, -85]],
+                    ...chosen.flatMap((a) => a.geometry.map((poly) => poly[0])),
+                  ],
+                  ...chosen.flatMap((a) => a.geometry.flatMap((poly) => poly.slice(1).map((hole) => [hole]))),
                 ],
               },
             }

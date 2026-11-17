@@ -2,7 +2,6 @@ import { describe, expect, test } from "vitest";
 import type { Position } from "geojson";
 import {
   areaAt,
-  bboxTouchesGeometry,
   chooseParent,
   chooseSubdivision,
   compactGeometry,
@@ -16,6 +15,7 @@ import {
   simplifyRing,
   subareaQuery,
   toAreas,
+  touchedCells,
   type Boundary,
 } from "./areaGeo";
 
@@ -142,24 +142,59 @@ describe("Geometrie", () => {
     expect(pointInGeometry([7, 50.7], g)).toBe(true);
   });
 
-  test("bboxTouchesGeometry", () => {
-    const g = [[box(0, 0, 1, 1)]];
-    expect(bboxTouchesGeometry([0.5, 0.5, 2, 2], g)).toBe(true);
-    expect(bboxTouchesGeometry([-1, -1, 2, 2], g)).toBe(true); // Gebiet ganz im Ausschnitt
-    expect(bboxTouchesGeometry([0.2, 0.2, 0.3, 0.3], g)).toBe(true); // Ausschnitt ganz im Gebiet
-    expect(bboxTouchesGeometry([2, 2, 3, 3], g)).toBe(false);
-  });
 });
 
 describe("Zuordnung", () => {
   test("areaAt und toAreas", () => {
     const list = [
-      { id: "relation/1", name: "West", geometry: JSON.stringify([[box(0, 0, 2, 2)]]) },
-      { id: "relation/2", name: "Ost", geometry: JSON.stringify([[box(2, 0, 4, 2)]]) },
+      { id: "relation/1", name: "West", geometry: JSON.stringify([[box(0, 0, 2, 2)]]), cells: "0:0 1:0" },
+      { id: "relation/2", name: "Ost", geometry: JSON.stringify([[box(2, 0, 4, 2)]]), cells: "" },
     ];
     const areas = toAreas(list, ["relation/2"]);
     expect(areas.map((a) => [a.id, a.selected])).toEqual([["relation/1", true], ["relation/2", false]]);
     expect(areaAt([3, 1], areas)?.name).toBe("Ost");
     expect(areaAt([5, 1], areas)).toBeNull();
+    expect(areas[0].cells).toEqual(["0:0", "1:0"]);
+    expect(areas[1].cells).toEqual([]);
+  });
+});
+
+describe("Review-Befunde", () => {
+  test("C1: boundary=place nur als Ersatz, überlappende Stufen gelten nicht als lückenlos", () => {
+    const ort = boundary(100, "Ort", 8, box(0, 0, 4, 2));
+    const teile = [boundary(1, "West", 10, box(0, 0, 2, 2)), boundary(2, "Ost", 10, box(2, 0, 4, 2))];
+    const places = [
+      boundary(3, "Suburb West", 99, box(0, 0, 2, 2)),
+      boundary(4, "Quarter A", 99, box(0, 0, 1, 2)),
+      boundary(5, "Quarter B", 99, box(1, 0, 2, 2)),
+    ];
+    expect(chooseSubdivision(ort, [...teile, ...places])?.map((b) => b.name)).toEqual(["West", "Ost"]);
+    // Ohne Verwaltungsgrenzen: überlappende place-Grenzen (200 % der Westhälfte) sind keine Teilung
+    expect(chooseSubdivision(ort, places)).toBeNull();
+    // Lückenlose place-Grenzen als Ersatz
+    const ganz = [boundary(6, "Nord", 99, box(0, 1, 4, 2)), boundary(7, "Süd", 99, box(0, 0, 4, 1))];
+    expect(chooseSubdivision(ort, ganz)?.map((b) => b.name)).toEqual(["Nord", "Süd"]);
+  });
+
+  test("C4: Kacheln eines schmalen Streifens werden erkannt", () => {
+    const streifen = [[box(-0.02, 0.001, 0.02, 0.002)]];
+    const cells = touchedCells(streifen);
+    expect(cells).toContain("0:0");
+    expect(cells).toContain("-4:0");
+    expect(cells).not.toContain("0:1");
+  });
+
+  test("C2: Kacheln einer großen Fläche schnell", () => {
+    const ring: Position[] = [];
+    for (let i = 0; i < 4000; i++) {
+      const a = (i / 4000) * 2 * Math.PI;
+      ring.push([7 + 0.2 * Math.cos(a) + 0.002 * Math.sin(a * 131), 50.9 + 0.15 * Math.sin(a)]);
+    }
+    ring.push(ring[0]);
+    const t0 = performance.now();
+    const cells = touchedCells([[ring]]);
+    expect(performance.now() - t0).toBeLessThan(200);
+    expect(cells.length).toBeGreaterThan(3000);
+    expect(cells).toContain(`${Math.floor(7 / 0.005)}:${Math.floor(50.9 / 0.005)}`);
   });
 });

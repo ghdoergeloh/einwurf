@@ -149,7 +149,13 @@ export function CampaignPage({ slug, isNew, adminKey }: Props) {
     [showToast],
   );
 
+  // Admin-Schlüssel unter /v/…: auf den Admin-Link umleiten, damit nie der Admin-Schlüssel
+  // als Link zum Mitmachen im Teilen-Dialog landet.
+  useEffect(() => {
+    if (!adminKey && campaign?.access === "admin") navigate(adminPath(slug), true);
+  }, [adminKey, campaign?.access, slug]);
   if (campaign === null) return <NotFound />;
+  if (!adminKey && campaign?.access === "admin") return null;
 
   const url = `${location.origin}${campaignPath(slug)}`;
   const count = campaign?.markCount ?? 0;

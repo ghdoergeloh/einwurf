@@ -10,11 +10,13 @@ import {
   chooseSubdivision,
   compactGeometry,
   decodeGeometry,
+  encodeCells,
   interiorPoint,
   parentQuery,
   parseBoundaries,
   parseParents,
   subareaQuery,
+  touchedCells,
   type AreaGeometry,
 } from "./areaGeo";
 import { askServers, overpassDeadline, startPrefetch, takeOverpassQuota } from "./buildings";
@@ -48,7 +50,7 @@ export async function startAreas(ctx: MutationCtx, campaignId: Id<"campaigns">) 
   const fields = { status: "loading" as const, failures: 0, updatedAt: Date.now(), run };
   if (existing) await ctx.db.patch(existing._id, fields);
   else await ctx.db.insert("areaSets", { campaignId, unselected: [], ...fields });
-  await ctx.scheduler.runAfter(0, internal.areas.fetch, { campaignId, run });
+  await ctx.scheduler.runAfter(0, internal.areas.download, { campaignId, run });
 }
 
 /**
@@ -69,7 +71,7 @@ export const load = mutation({
 /**
  * Die Gebiete einer Aktion, nach Namen sortiert; null ohne Aktion. Ändert sich nur nach dem
  * Laden, deshalb ohne Auswahl (die steht in `status`, damit ein Häkchen nicht alle Grenzen neu schickt).
- * `geometry` ist JSON, siehe decodeGeometry / toAreas in areaGeo.ts.
+ * `geometry` ist JSON, `cells` die berührten Gebäude-Kacheln; entpacken mit toAreas aus areaGeo.ts.
  */
 export const list = query({
   args: { slug: v.string() },
@@ -78,7 +80,7 @@ export const list = query({
     if (!campaign) return null;
     const rows = await ctx.db.query("areas").withIndex("by_campaign", (q) => q.eq("campaignId", campaign._id)).collect();
     return rows
-      .map((r) => ({ id: r.areaId, name: r.name, geometry: r.geometry, bbox: r.bbox, labelAt: r.labelAt }))
+      .map((r) => ({ id: r.areaId, name: r.name, geometry: r.geometry, bbox: r.bbox, labelAt: r.labelAt, cells: r.cells }))
       .sort((a, b) => a.name.localeCompare(b.name, "de"));
   },
 });
@@ -146,7 +148,14 @@ export const quota = internalMutation({
   handler: async (ctx, { slug }) => await takeOverpassQuota(ctx, `${slug}:gebiete`, "prefetch"),
 });
 
-const areaArg = v.object({ areaId: v.string(), name: v.string(), geometry: v.string(), bbox: v.array(v.number()), labelAt: v.array(v.number()) });
+const areaArg = v.object({
+  areaId: v.string(),
+  name: v.string(),
+  geometry: v.string(),
+  bbox: v.array(v.number()),
+  labelAt: v.array(v.number()),
+  cells: v.string(),
+});
 
 export const save = internalMutation({
   args: { campaignId: v.id("campaigns"), run: v.number(), whole: v.boolean(), areas: v.array(areaArg) },
@@ -182,7 +191,7 @@ export const failed = internalMutation({
       return;
     }
     await ctx.db.patch(set._id, { failures, updatedAt: Date.now() });
-    await ctx.scheduler.runAfter(AREAS_RETRY_MS * failures, internal.areas.fetch, { campaignId, run });
+    await ctx.scheduler.runAfter(AREAS_RETRY_MS * failures, internal.areas.download, { campaignId, run });
   },
 });
 
@@ -218,7 +227,7 @@ async function fetchAreas(ctx: ActionCtx, campaign: Doc<"campaigns">) {
   return { whole: false, areas: parts.slice(0, MAX_AREAS).map((p) => ({ areaId: `relation/${p.id}`, name: p.name, geometry: p.geometry })) };
 }
 
-export const fetch = internalAction({
+export const download = internalAction({
   args: { campaignId: v.id("campaigns"), run: v.number() },
   handler: async (ctx, { campaignId, run }) => {
     const info = await ctx.runQuery(internal.areas.forFetch, { campaignId });
@@ -229,7 +238,7 @@ export const fetch = internalAction({
       const rows = areas.map((a) => {
         const geometry = compactGeometry(a.geometry, maxBytes);
         const g = decodeGeometry(geometry);
-        return { areaId: a.areaId, name: a.name, geometry, bbox: bboxOf(g), labelAt: interiorPoint(g) };
+        return { areaId: a.areaId, name: a.name, geometry, bbox: bboxOf(g), labelAt: interiorPoint(g), cells: encodeCells(touchedCells(g)) };
       });
       await ctx.runMutation(internal.areas.save, { campaignId, run, whole, areas: rows });
     } catch (e) {

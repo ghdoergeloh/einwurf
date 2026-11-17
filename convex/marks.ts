@@ -1,4 +1,5 @@
-import { mutation, query, type QueryCtx } from "./_generated/server";
+import { mutation, query } from "./_generated/server";
+import { campaignForEdit } from "./access";
 import { ConvexError, v } from "convex/values";
 import { markCellOf } from "./cells";
 import { countDelta, statusOf, type HouseStatus } from "./status";
@@ -11,13 +12,6 @@ import {
   assertSlug,
 } from "./validation";
 
-async function campaignBySlug(ctx: QueryCtx, slug: string) {
-  return await ctx.db
-    .query("campaigns")
-    .withIndex("by_slug", (q) => q.eq("slug", slug))
-    .unique();
-}
-
 /**
  * Markierte Häuser einer Rasterzelle, live über die Convex-Subscription.
  * Der Browser abonniert nur die sichtbaren Zellen, damit ein Tipp nicht allen
@@ -28,7 +22,7 @@ export const inCell = query({
   handler: async (ctx, { slug, cell }) => {
     if (!SLUG_PATTERN.test(slug)) return [];
     assertCell(cell);
-    const campaign = await campaignBySlug(ctx, slug);
+    const campaign = await campaignForEdit(ctx, slug);
     if (!campaign) return [];
     const marks = await ctx.db
       .query("marks")
@@ -61,7 +55,7 @@ export const set = mutation({
     assertLatLng(center[1], center[0]);
     const target: HouseStatus | undefined = status ?? (marked === undefined ? undefined : marked ? "done" : "none");
     if (!target) throw new ConvexError("Zustand fehlt");
-    const campaign = await campaignBySlug(ctx, slug);
+    const campaign = await campaignForEdit(ctx, slug);
     if (!campaign) throw new ConvexError("Verteilaktion nicht gefunden");
 
     const existing = await ctx.db

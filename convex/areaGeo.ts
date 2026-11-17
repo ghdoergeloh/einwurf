@@ -5,11 +5,11 @@
  * Schnittstelle für andere Teile (z. B. Statistik je Gebiet):
  *   - `Area` = { id, name, geometry, selected }
  *   - `areaAt(punkt, gebiete)` ordnet einen Punkt [lng, lat] (Haus, Markierung) einem Gebiet zu.
- *   - Serverseitig liefert `campaignAreas(ctx, campaignId)` aus convex/areas.ts die Gebiete,
+ *   - Serverseitig liefert `campaignAreas(ctx, campaignId)` aus convex/areaStore.ts die Gebiete,
  *     im Browser `toAreas(api.areas.list, api.areas.status)`.
  */
 import type { Position } from "geojson";
-import { joinRings, type BBox } from "./osm";
+import { CELL_SIZE, cellKey, joinRings, type BBox } from "./osm";
 
 /** MultiPolygon-Koordinaten [lng, lat]: Polygone aus Außenring und Löchern. */
 export type AreaGeometry = Position[][][];
@@ -161,25 +161,63 @@ export function chooseParent(candidates: ParentCandidate[], bbox: BBox | null): 
 export const MIN_COVERAGE = 0.9;
 
 /**
- * Wählt die Unterteilung des Ortes: die feinste Stufe, deren Gebiete (mindestens zwei) zusammen
- * den Ort lückenlos abdecken. Gebiete der Nachbarorte, die nur die Grenze berühren, fallen weg.
+ * Wählt die Unterteilung des Ortes: die feinste Verwaltungsstufe, deren Gebiete (mindestens zwei)
+ * den Ort lückenlos und ohne nennenswerte Überlappung abdecken; erst danach boundary=place als
+ * Ersatz. Gebiete der Nachbarorte, die nur die Grenze berühren, fallen weg.
  * null = keine Unterteilung, der ganze Ort ist ein Gebiet.
  */
 export function chooseSubdivision(parent: Boundary, candidates: Boundary[]): Boundary[] | null {
-  const total = geometryArea(parent.geometry);
-  if (total <= 0) return null;
+  const samples = samplePoints(parent.geometry);
+  if (samples.length === 0) return null;
   const byLevel = new Map<number, Boundary[]>();
   for (const c of candidates) {
     if (c.id === parent.id || c.level <= parent.level) continue;
     if (!pointInGeometry(interiorPoint(c.geometry), parent.geometry)) continue;
     byLevel.set(c.level, [...(byLevel.get(c.level) ?? []), c]);
   }
-  for (const level of [...byLevel.keys()].sort((a, b) => b - a)) {
+  // Verwaltungsstufen von fein nach grob, boundary=place zuletzt.
+  const order = [...byLevel.keys()].sort((a, b) => (a === PLACE_LEVEL ? 1 : b === PLACE_LEVEL ? -1 : b - a));
+  for (const level of order) {
     const list = byLevel.get(level)!;
-    const covered = list.reduce((s, b) => s + geometryArea(b.geometry), 0) / total;
-    if (list.length >= 2 && covered >= MIN_COVERAGE) return list;
+    if (list.length < 2) continue;
+    const { covered, overlap } = coverage(samples, list);
+    if (covered >= MIN_COVERAGE && overlap <= MAX_OVERLAP) return list;
   }
   return null;
+}
+
+/** Höchstens so viel des Ortes darf in mehr als einem Gebiet einer Stufe liegen (doppelte oder verschachtelte Grenzen). */
+export const MAX_OVERLAP = 0.1;
+/** Stichproben je Richtung über den Ort. */
+const SAMPLE_GRID = 48;
+
+/** Gleichmäßig verteilte Punkte im Gebiet (Raster über die Ausdehnung). */
+function samplePoints(g: AreaGeometry): Position[] {
+  const [w, s, e, n] = bboxOf(g);
+  const out: Position[] = [];
+  for (let i = 0; i < SAMPLE_GRID; i++)
+    for (let j = 0; j < SAMPLE_GRID; j++) {
+      const pt = [w + ((i + 0.5) / SAMPLE_GRID) * (e - w), s + ((j + 0.5) / SAMPLE_GRID) * (n - s)];
+      if (pointInGeometry(pt, g)) out.push(pt);
+    }
+  return out;
+}
+
+/** Anteil der Stichproben in mindestens einem Gebiet und in mehr als einem. */
+function coverage(samples: Position[], list: Boundary[]): { covered: number; overlap: number } {
+  const boxes = list.map((b) => ({ g: b.geometry, b: bboxOf(b.geometry) }));
+  let covered = 0;
+  let overlap = 0;
+  for (const pt of samples) {
+    let hits = 0;
+    for (const { g, b } of boxes) {
+      if (pt[0] < b[0] || pt[0] > b[2] || pt[1] < b[1] || pt[1] > b[3]) continue;
+      if (pointInGeometry(pt, g) && ++hits > 1) break;
+    }
+    if (hits >= 1) covered++;
+    if (hits > 1) overlap++;
+  }
+  return { covered: covered / samples.length, overlap: overlap / samples.length };
 }
 
 // ---------------------------------------------------------------------------
@@ -335,30 +373,34 @@ export function areaAt<A extends { geometry: AreaGeometry }>(pt: Position, areas
   return null;
 }
 
+/** Gebiet mit den Gebäude-Kacheln, die es berührt (für Laden und Vorladen). */
+export type AreaWithCells = Area & { cells: string[] };
+
+/** Kacheln wie gespeichert (durch Leerzeichen getrennt; Convex-Arrays fassen höchstens 8192 Einträge). */
+export const encodeCells = (cells: string[]) => cells.join(" ");
+export const decodeCells = (text: string) => (text ? text.split(" ") : []);
+
 /** Fügt Gebietsliste und Auswahl (api.areas.list und api.areas.status) zu `Area` zusammen. */
 export function toAreas(
-  list: { id: string; name: string; geometry: string }[],
+  list: { id: string; name: string; geometry: string; cells: string }[],
   unselected: string[],
-): Area[] {
+): AreaWithCells[] {
   const off = new Set(unselected);
-  return list.map((a) => ({ id: a.id, name: a.name, geometry: decodeGeometry(a.geometry), selected: !off.has(a.id) }));
-}
-
-/** Schneidet der Ausschnitt das Gebiet? (Ecken und Mitte im Gebiet oder Ecke des Gebiets im Ausschnitt.) */
-export function bboxTouchesGeometry(b: BBox, g: AreaGeometry, gb: BBox = bboxOf(g)): boolean {
-  const [w, s, e, n] = b;
-  if (gb[0] > e || gb[2] < w || gb[1] > n || gb[3] < s) return false;
-  for (const fx of [0, 0.5, 1])
-    for (const fy of [0, 0.5, 1]) if (pointInGeometry([w + (e - w) * fx, s + (n - s) * fy], g)) return true;
-  return g.some((poly) => poly[0].some(([x, y]) => x >= w && x <= e && y >= s && y <= n));
+  return list.map((a) => ({
+    id: a.id,
+    name: a.name,
+    geometry: decodeGeometry(a.geometry),
+    selected: !off.has(a.id),
+    cells: decodeCells(a.cells),
+  }));
 }
 
 /** Gewählte Gebiete als Filter für Kacheln und Häuser. */
 export interface Selection {
   /** Umschließender Ausschnitt aller gewählten Gebiete. */
   bbox: BBox;
-  /** Berührt der Ausschnitt ein gewähltes Gebiet? */
-  touches: (b: BBox) => boolean;
+  /** Berührt die Gebäude-Kachel "x:y" ein gewähltes Gebiet? (siehe touchedCells) */
+  touches: (cell: string) => boolean;
   /** Liegt der Punkt [lng, lat] in einem gewählten Gebiet? */
   contains: (pt: Position) => boolean;
 }
@@ -367,8 +409,12 @@ export interface Selection {
  * Filter für die gewählten Gebiete; null heißt „keine Einschränkung“: Gebiete noch nicht geladen
  * oder nichts gewählt. Dann gilt wie bisher der ganze Ort.
  */
-export function selectionOf(areas: { geometry: AreaGeometry; selected: boolean }[] | null): Selection | null {
-  const chosen = (areas ?? []).filter((a) => a.selected).map((a) => ({ g: a.geometry, b: bboxOf(a.geometry) }));
+export function selectionOf(
+  areas: { geometry: AreaGeometry; selected: boolean; cells: string[] }[] | null,
+): Selection | null {
+  const picked = (areas ?? []).filter((a) => a.selected);
+  const cells = new Set(picked.flatMap((a) => a.cells));
+  const chosen = picked.map((a) => ({ g: a.geometry, b: bboxOf(a.geometry) }));
   if (chosen.length === 0) return null;
   const bbox: BBox = [
     Math.min(...chosen.map((c) => c.b[0])),
@@ -379,7 +425,64 @@ export function selectionOf(areas: { geometry: AreaGeometry; selected: boolean }
   const inBox = ([x, y]: Position, b: BBox) => x >= b[0] && x <= b[2] && y >= b[1] && y <= b[3];
   return {
     bbox,
-    touches: (b) => chosen.some((c) => bboxTouchesGeometry(b, c.g, c.b)),
+    touches: (cell) => cells.has(cell),
     contains: (pt) => chosen.some((c) => inBox(pt, c.b) && pointInGeometry(pt, c.g)),
   };
+}
+
+/**
+ * Alle Gebäude-Kacheln ("x:y", CELL_SIZE), die das Gebiet berühren: Kacheln, deren Mitte darin
+ * liegt, und alle Kacheln, durch die eine Grenze läuft (auch schmale Streifen). Wird einmal beim
+ * Laden der Gebiete berechnet und gespeichert, damit Auswahl und Vorladen schnell bleiben.
+ */
+export function touchedCells(g: AreaGeometry): string[] {
+  const out = new Set<string>();
+  const rings = g.flat();
+  const cx = (x: number) => Math.floor(x / CELL_SIZE);
+  // Grenzen: jede Kachel, die eine Kante schneidet (Rasterdurchlauf nach Amanatides/Woo).
+  for (const ring of rings)
+    for (let i = 0; i + 1 < ring.length; i++) {
+      const [x0, y0] = ring[i];
+      const [x1, y1] = ring[i + 1];
+      let x = cx(x0);
+      let y = cx(y0);
+      const xEnd = cx(x1);
+      const yEnd = cx(y1);
+      out.add(cellKey(x, y));
+      const dx = x1 - x0;
+      const dy = y1 - y0;
+      const stepX = Math.sign(dx);
+      const stepY = Math.sign(dy);
+      const tDeltaX = dx ? Math.abs(CELL_SIZE / dx) : Infinity;
+      const tDeltaY = dy ? Math.abs(CELL_SIZE / dy) : Infinity;
+      let tMaxX = dx ? ((stepX > 0 ? (x + 1) * CELL_SIZE - x0 : x0 - x * CELL_SIZE) / Math.abs(dx)) : Infinity;
+      let tMaxY = dy ? ((stepY > 0 ? (y + 1) * CELL_SIZE - y0 : y0 - y * CELL_SIZE) / Math.abs(dy)) : Infinity;
+      let guard = Math.abs(xEnd - x) + Math.abs(yEnd - y) + 2;
+      while ((x !== xEnd || y !== yEnd) && guard-- > 0) {
+        if (tMaxX < tMaxY) {
+          x += stepX;
+          tMaxX += tDeltaX;
+        } else {
+          y += stepY;
+          tMaxY += tDeltaY;
+        }
+        out.add(cellKey(x, y));
+      }
+    }
+  // Innen: Kacheln, deren Mitte im Gebiet liegt (Scanlinie je Kachelreihe, Löcher gerade/ungerade).
+  const [, south, , north] = bboxOf(g);
+  for (let y = cx(south); y <= cx(north); y++) {
+    const yc = (y + 0.5) * CELL_SIZE;
+    const xs: number[] = [];
+    for (const ring of rings)
+      for (let i = 0, j = ring.length - 1; i < ring.length; j = i++) {
+        const [xi, yi] = ring[i];
+        const [xj, yj] = ring[j];
+        if (yi > yc !== yj > yc) xs.push(((xj - xi) * (yc - yi)) / (yj - yi) + xi);
+      }
+    xs.sort((a, b) => a - b);
+    for (let k = 0; k + 1 < xs.length; k += 2)
+      for (let x = Math.ceil(xs[k] / CELL_SIZE - 0.5); (x + 0.5) * CELL_SIZE <= xs[k + 1]; x++) out.add(cellKey(x, y));
+  }
+  return [...out];
 }

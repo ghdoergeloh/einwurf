@@ -19,8 +19,9 @@ import {
   type BuildingFeature,
 } from "./osm";
 import { SLUG_PATTERN } from "./validation";
-import { campaignAreas } from "./areaStore";
-import { decodeGeometry, selectionOf, type Selection } from "./areaGeo";
+import { areaRows } from "./areaStore";
+import { campaignForEdit } from "./access";
+import { decodeCells, decodeGeometry, selectionOf, type Selection } from "./areaGeo";
 
 /**
  * Häuser aus OpenStreetMap, serverseitig über Overpass geladen und je Kachel für alle
@@ -73,27 +74,18 @@ const NEIGHBOUR_RING = 2;
 const WAIT_POLL_MS = 1_000;
 
 /**
- * Grenzen der gewählten Gebiete einer Aktion (JSON, siehe areaGeo.ts); [] = keine Einschränkung
+ * Gewählte Gebiete einer Aktion (Grenze als JSON, berührte Kacheln); [] = keine Einschränkung
  * (nichts gewählt oder noch keine Gebiete), null = keine Aktion.
  */
 export const selectedAreas = internalQuery({
   args: { slug: v.string() },
-  handler: async (ctx, { slug }): Promise<string[] | null> => {
-    const campaign = await ctx.db.query("campaigns").withIndex("by_slug", (q) => q.eq("slug", slug)).unique();
+  handler: async (ctx, { slug }): Promise<{ geometry: string; cells: string }[] | null> => {
+    const campaign = await campaignForEdit(ctx, slug);
     if (!campaign) return null;
-    const set = await ctx.db.query("areaSets").withIndex("by_campaign", (q) => q.eq("campaignId", campaign._id)).unique();
-    if (!set || set.status !== "done") return [];
-    const off = new Set(set.unselected);
-    const rows = await ctx.db.query("areas").withIndex("by_campaign", (q) => q.eq("campaignId", campaign._id)).collect();
-    return rows.filter((r) => !off.has(r.areaId)).map((r) => r.geometry);
+    const rows = await areaRows(ctx, campaign._id);
+    return (rows ?? []).filter((r) => r.selected).map(({ row }) => ({ geometry: row.geometry, cells: row.cells }));
   },
 });
-
-/** Ausschnitt einer Kachel "x:y". */
-function cellBBox(cell: string): [number, number, number, number] {
-  const { x, y } = parseCellKey(cell)!;
-  return [x * CELL_SIZE, y * CELL_SIZE, (x + 1) * CELL_SIZE, (y + 1) * CELL_SIZE];
-}
 
 /** Nur Häuser, deren Mittelpunkt in einem gewählten Gebiet liegt. */
 function filterBuildings(data: string, selection: Selection): string {
@@ -436,7 +428,7 @@ async function loadCells(
         .map((h) => h.cell),
     );
     extra = candidates
-      .filter((c) => !fresh.has(c) && (!within || within.touches(cellBBox(c))))
+      .filter((c) => !fresh.has(c) && (!within || within.touches(c)))
       .slice(0, MAX_FETCH_CELLS - missing.length);
   }
   const { toFetch, waitFor, lockIds, until } = await ctx.runMutation(internal.buildings.reserve, { slug: rateKey, cells: missing, kind, extra });
@@ -481,9 +473,9 @@ export const load = action({
     const areas = SLUG_PATTERN.test(slug) ? await ctx.runQuery(internal.buildings.selectedAreas, { slug }) : null;
     if (!areas) throw new ConvexError("Verteilaktion nicht gefunden");
     // Gewählte Gebiete: Kacheln außerhalb gar nicht laden, Häuser außerhalb nicht ausliefern.
-    const selection = selectionOf(areas.map((a) => ({ geometry: decodeGeometry(a), selected: true })));
+    const selection = selectionOf(areas.map((a) => ({ geometry: decodeGeometry(a.geometry), selected: true, cells: decodeCells(a.cells) })));
     if (!selection) return (await loadCells(ctx, slug, cells)).data;
-    const inside = cells.filter((c) => selection.touches(cellBBox(c)));
+    const inside = cells.filter((c) => selection.touches(c));
     const loaded = inside.length ? (await loadCells(ctx, slug, inside, "map", { within: selection })).data : [];
     const byCell = new Map(inside.map((c, i) => [c, loaded[i]]));
     return cells.map((c) => (byCell.has(c) ? filterBuildings(byCell.get(c)!, selection) : "[]"));
@@ -532,7 +524,7 @@ const prefetchRateKey = (slug: string) => `${slug}:vorladen`;
  * Wird von campaigns.create und vom Knopf im Teilen-Dialog aufgerufen.
  */
 export async function startPrefetch(ctx: MutationCtx, slug: string, { replan = false }: { replan?: boolean } = {}) {
-  const campaign = await ctx.db.query("campaigns").withIndex("by_slug", (q) => q.eq("slug", slug)).unique();
+  const campaign = await campaignForEdit(ctx, slug);
   if (!campaign) throw new ConvexError("Verteilaktion nicht gefunden");
   const now = Date.now();
   const existing = await ctx.db.query("prefetchJobs").withIndex("by_slug", (q) => q.eq("slug", slug)).unique();
@@ -540,11 +532,16 @@ export async function startPrefetch(ctx: MutationCtx, slug: string, { replan = f
   if (!replan && existing && existing.status === "running" && now - existing.updatedAt < PREFETCH_STALE_MS) return existing._id;
 
   // Gibt es gewählte Gebiete, nur Kacheln, die sie berühren; sonst der ganze Ort.
-  const selection = selectionOf(await campaignAreas(ctx, campaign._id));
+  // Nur die gespeicherten Kachel-Listen, keine Geometrie: Das hält die Mutation schnell.
+  const chosen = (await areaRows(ctx, campaign._id))?.filter((r) => r.selected) ?? [];
+  const wanted = new Set(chosen.flatMap(({ row }) => decodeCells(row.cells)));
   const center: [number, number] = [campaign.center.lng, campaign.center.lat];
-  const batches = selection
-    ? planPrefetch(selection.bbox, selection.contains(center) ? center : selectionCenter(selection), undefined, selection.touches)
-    : planPrefetch(prefetchArea(campaign), center);
+  const batches =
+    wanted.size > 0
+      ? planPrefetch(unionBBox(chosen.map(({ row }) => row.bbox)), startIn(wanted, center), undefined, (b) =>
+          wanted.has(cellKeyOf([b[0] + CELL_SIZE / 2, b[1] + CELL_SIZE / 2])),
+        )
+      : planPrefetch(prefetchArea(campaign), center);
   const job = {
     slug,
     // Nichts zu laden (z. B. alter, verdrehter Ausschnitt): gleich fertig statt ewig „läuft“.
@@ -568,10 +565,27 @@ export async function startPrefetch(ctx: MutationCtx, slug: string, { replan = f
   return jobId;
 }
 
-/** Startpunkt des Vorladens, wenn die Mitte der Aktion in keinem gewählten Gebiet liegt. */
-function selectionCenter(selection: Selection): [number, number] {
-  const [w, s, e, n] = selection.bbox;
-  return [(w + e) / 2, (s + n) / 2];
+function unionBBox(boxes: number[][]): [number, number, number, number] {
+  return [
+    Math.min(...boxes.map((b) => b[0])),
+    Math.min(...boxes.map((b) => b[1])),
+    Math.max(...boxes.map((b) => b[2])),
+    Math.max(...boxes.map((b) => b[3])),
+  ];
+}
+
+/** Startpunkt des Vorladens: die Mitte der Aktion, liegt sie in keiner gewählten Kachel, die nächste solche. */
+function startIn(cells: Set<string>, center: [number, number]): [number, number] {
+  if (cells.has(cellKeyOf(center))) return center;
+  let best: [number, number] = center;
+  let dist = Infinity;
+  for (const key of cells) {
+    const { x, y } = parseCellKey(key)!;
+    const p: [number, number] = [(x + 0.5) * CELL_SIZE, (y + 0.5) * CELL_SIZE];
+    const d = Math.hypot(p[0] - center[0], p[1] - center[1]);
+    if (d < dist) [best, dist] = [p, d];
+  }
+  return best;
 }
 
 /** Knopf „Gebiet vorladen“ im Teilen-Dialog. */

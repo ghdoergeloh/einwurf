@@ -34,6 +34,12 @@ export function AreaSheet({ adminKey, status, areas, onShow, onClose }: Props) {
     }
   });
   const load = useMutation(api.areas.load);
+  // Ob das Laden hängt, hängt an der Zeit: regelmäßig neu prüfen (wie beim Vorladen).
+  const [now, setNow] = useState(() => Date.now());
+  useEffect(() => {
+    const id = setInterval(() => setNow(Date.now()), 15_000);
+    return () => clearInterval(id);
+  }, []);
 
   useEffect(() => {
     const prev = document.activeElement as HTMLElement | null;
@@ -54,7 +60,7 @@ export function AreaSheet({ adminKey, status, areas, onShow, onClose }: Props) {
   };
 
   // Hängt das Laden schon lange, darf man es neu anstoßen (wie beim Vorladen).
-  const stale = status.status === "loading" && Date.now() - status.updatedAt > status.staleAfterMs + 60_000;
+  const stale = status.status === "loading" && now - status.updatedAt > status.staleAfterMs + 60_000;
   const failed = status.status === "failed" || stale;
   const chosen = areas.filter((a) => a.selected).length;
 

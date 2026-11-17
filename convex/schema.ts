@@ -52,6 +52,8 @@ export default defineSchema({
     bbox: v.array(v.number()),
     /** Punkt im Gebiet für die Beschriftung [lng, lat]. */
     labelAt: v.array(v.number()),
+    /** Gebäude-Kacheln, die das Gebiet berühren, durch Leerzeichen getrennt (areaGeo.touchedCells). */
+    cells: v.string(),
   }).index("by_campaign", ["campaignId"]),
 
   /** Ladezustand und Auswahl der Gebiete je Aktion. */
