@@ -6,6 +6,7 @@ import schema from "./schema";
 import { CELL_SIZE, decodeBuildings } from "./osm";
 import { campaignAreas } from "./areaStore";
 import { areaAt, boundaryTileOf, touchedCells } from "./areaGeo";
+import { computeTiles, type Ask } from "./areaLoad";
 import { markCellOf } from "./cells";
 
 const modules = import.meta.glob("./**/*.ts");
@@ -230,6 +231,63 @@ describe("Angebot an Ortsteilen je Grenz-Kachel", () => {
     const t = await create();
     const err = await t.action(api.areas.loadTiles, { adminKey: ADMIN, tiles: [TILE_WEST] }).catch((e: Error) => e);
     expect(String(err)).toContain("gross.example: Antwort zu groß (40 MB)");
+  });
+});
+
+describe("Laden im Browser des Admins (storeLoaded)", () => {
+  /** Wie der Browser: dieselbe Logik, Overpass hier nachgebildet, Ergebnis über storeLoaded. */
+  async function loadLikeBrowser(t: ReturnType<typeof convexTest>, tiles: string[], relations = REGION) {
+    const fetchMock = fakeOverpass(relations);
+    const ask: Ask = async (_step, query, parse) => {
+      const res = await fetchMock("https://browser.example", { method: "POST", body: new URLSearchParams({ data: query }).toString() });
+      return parse((await res.json()) as never);
+    };
+    const result = await computeTiles(tiles, ask, (unitIds) => t.query(api.areas.unitsInCache, { adminKey: ADMIN, unitIds }));
+    const units = result.units.map((u) => ({ unitId: u.unitId, areas: u.areas.map(({ areaId, name, geometry }) => ({ areaId, name, geometry })) }));
+    await t.mutation(api.areas.storeLoaded, { adminKey: ADMIN, units, tiles: result.tiles });
+    return fetchMock;
+  }
+
+  test("ergibt dasselbe Angebot wie das Laden über Convex und wählt den Ortsteil an der Adresse", async () => {
+    vi.stubGlobal("fetch", vi.fn(async () => new Response("darf nicht gefragt werden", { status: 500 })));
+    const t = await create();
+    await loadLikeBrowser(t, [TILE_WEST, TILE_EAST]);
+    expect(await nearbyNames(t, [TILE_WEST])).toEqual(["Alfter-Ort", "Brenig", "Hersel", "Roisdorf", "Sechtem", "Witterschlick"]);
+    expect(await nearbyNames(t, [TILE_EAST])).toEqual(["Alfter-Ort", "Bad Godesberg", "Beuel", "Witterschlick"]);
+    expect(await selected(t)).toEqual(["Roisdorf"]);
+    // Bekannte Gemeinden lädt der Browser nicht noch einmal
+    const again = await loadLikeBrowser(t, [TILE_EAST]);
+    const queries = again.mock.calls.map((c) => new URLSearchParams(String((c[1] as RequestInit).body)).get("data")!);
+    expect(queries).toHaveLength(1); // nur die Gemeinden
+    expect(queries.filter((q) => q.includes("rel(id:"))).toHaveLength(0);
+  });
+
+  test("überschreibt nichts, was frisch im Cache steht", async () => {
+    vi.stubGlobal("fetch", fakeOverpass());
+    const t = await create();
+    await t.action(api.areas.loadTiles, { adminKey: ADMIN, tiles: [TILE_WEST] });
+    const before = await nearbyNames(t, [TILE_WEST]);
+    await t.mutation(api.areas.storeLoaded, {
+      adminKey: ADMIN,
+      units: [{ unitId: 100, areas: [{ areaId: "relation/11", name: "Gefälscht", geometry: JSON.stringify([[box(7.0, 50.7, 7.04, 50.72)]]) }] }],
+      tiles: [{ tile: TILE_WEST, unitIds: [100] }],
+    });
+    expect(await nearbyNames(t, [TILE_WEST])).toEqual(before);
+  });
+
+  test("prüft, was der Browser schickt, und berechnet Ausdehnung und Kacheln selbst", async () => {
+    const t = await create();
+    const store = (geometry: string, areaId = "relation/5") =>
+      t.mutation(api.areas.storeLoaded, { adminKey: ADMIN, units: [{ unitId: 5, areas: [{ areaId, name: "Teil", geometry }] }], tiles: [] });
+    await expect(store("kein json")).rejects.toThrow(/Ungültige Grenze/);
+    await expect(store(JSON.stringify([[[[7, 50], [7.01, 50]]]]))).rejects.toThrow(/Ungültige Grenze/); // Ring zu kurz
+    await expect(store(JSON.stringify([[box(7, 50, 7.01, 95)]]))).rejects.toThrow(/Ungültige Grenze/); // Breite > 90
+    await expect(store(JSON.stringify([[box(7, 50, 9, 50.5)]]))).rejects.toThrow(/zu groß/); // 2° breit
+    await expect(store(JSON.stringify([[box(7, 50, 7.01, 50.01)]]), "way/5")).rejects.toThrow(/Ungültiges Gebiet/);
+    await store(JSON.stringify([[box(7.0, 50.7, 7.02, 50.71)]]));
+    const row = await t.run(async (ctx) => (await ctx.db.query("osmAreas").first())!);
+    expect(row.bbox).toEqual([7.0, 50.7, 7.02, 50.71]);
+    expect(row.cells.split(" ").length).toBeGreaterThan(4);
   });
 });
 

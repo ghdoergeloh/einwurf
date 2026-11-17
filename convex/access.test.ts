@@ -172,6 +172,16 @@ const ADMIN_ONLY: Record<string, { kind: "mutation" | "action" | "query"; call: 
   "areas:select": { kind: "mutation", call: (t, key) => t.mutation(api.areas.select, { adminKey: key, ids: ["relation/1"], selected: true }) },
   "areas:loadTiles": { kind: "action", call: (t, key) => t.action(api.areas.loadTiles, { adminKey: key, tiles: ["140:1014"] }) },
   "areas:nearby": { kind: "query", call: (t, key) => t.query(api.areas.nearby, { adminKey: key, tiles: ["140:1014"] }) },
+  "areas:unitsInCache": { kind: "query", call: (t, key) => t.query(api.areas.unitsInCache, { adminKey: key, unitIds: [9] }) },
+  "areas:storeLoaded": {
+    kind: "mutation",
+    call: (t, key) =>
+      t.mutation(api.areas.storeLoaded, {
+        adminKey: key,
+        units: [{ unitId: 77, areas: [{ areaId: "relation/77", name: "X", geometry: "[[[[7,50],[7.01,50],[7.01,50.01],[7,50],[7,50]]]]" }] }],
+        tiles: [{ tile: "140:1000", unitIds: [77] }],
+      }),
+  },
   "campaigns:setPlace": {
     kind: "mutation",
     call: (t, key) => t.mutation(api.campaigns.setPlace, { adminKey: key, placeLabel: "Woanders", center: { lat: 51, lng: 7 } }),

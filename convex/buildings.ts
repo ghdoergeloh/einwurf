@@ -20,6 +20,7 @@ import {
 } from "./osm";
 import { SLUG_PATTERN } from "./validation";
 import { areaRows } from "./areaStore";
+import { DEFAULT_OVERPASS_ENDPOINTS } from "./areaLoad";
 import { decodeCells, decodeGeometry, selectionOf, type Selection } from "./areaGeo";
 import { campaignByKey, hasRole, requireRole } from "./access";
 
@@ -47,15 +48,6 @@ const OVERPASS_TIMEOUT_MS = 60_000;
 const OVERPASS_HEDGE_MS = 35_000;
 /** Ein weiterer Server lohnt nur, wenn bis zur Gesamtfrist noch so viel Zeit bleibt. */
 const MIN_ATTEMPT_MS = 15_000;
-/** Öffentliche Overpass-Server, der Reihe nach. Überschreibbar mit der Convex-Umgebungsvariable OVERPASS_URLS. */
-const DEFAULT_ENDPOINTS = [
-  "https://overpass-api.de/api/interpreter",
-  // Aus der Convex-Cloud ist overpass-api.de zeitweise gar nicht erreichbar („error sending request“);
-  // dann kommt dieser sofort dran.
-  "https://overpass.kumi.systems/api/interpreter",
-  "https://overpass.private.coffee/api/interpreter",
-  "https://maps.mail.ru/osm/tools/overpass/api/interpreter",
-];
 /** Größere Antworten verwirft der Abruf, statt sie zu parsen (Arbeitsspeicher der Action). */
 const MAX_RESPONSE_CHARS = 40_000_000;
 const hostOf = (url: string) => {
@@ -230,9 +222,10 @@ export const cleanup = internalMutation({
   },
 });
 
+/** Overpass-Server der Reihe nach: DEFAULT_OVERPASS_ENDPOINTS (areaLoad.ts), überschreibbar mit der Convex-Umgebungsvariable OVERPASS_URLS. */
 function endpoints(): string[] {
   const fromEnv = process.env.OVERPASS_URLS?.split(",").map((s) => s.trim()).filter(Boolean);
-  return fromEnv?.length ? fromEnv : DEFAULT_ENDPOINTS;
+  return fromEnv?.length ? fromEnv : DEFAULT_OVERPASS_ENDPOINTS;
 }
 
 /** Ein Server, eine Abfrage. Wirft bei Fehler, Überlastung oder Laufzeitfehler von Overpass. */

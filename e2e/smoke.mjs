@@ -102,6 +102,7 @@ const overpass = http.createServer((req, res) => {
 await new Promise((r) => overpass.listen(8787, "127.0.0.1", r));
 
 let browserCalledOverpass = false;
+let browserBoundaryCalls = 0;
 async function mockOsm(ctx, { styleFails = false } = {}) {
   await ctx.route("https://nominatim.openstreetmap.org/**", (r) =>
     r.fulfill({
@@ -145,9 +146,15 @@ async function mockOsm(ctx, { styleFails = false } = {}) {
             },
           }),
   );
-  // Der Browser darf Overpass nie direkt fragen (CORS, Last) – das macht Convex.
+  // Häuser fragt nie der Browser (CORS, Last) – das macht Convex. Nur die Grenzen der Ortsteile
+  // holt im Modus „Gebiete bearbeiten“ der Browser des Admins selbst (nachgebildet wie in Convex).
   const isOverpass = (url) => /(^|\.)(overpass-api\.de|overpass\.kumi\.systems|overpass\.private\.coffee|maps\.mail\.ru)$/.test(url.hostname);
   await ctx.route(isOverpass, (r) => {
+    const q = new URLSearchParams(r.request().postData() ?? "").get("data") ?? "";
+    if (q.includes("out tags bb") || q.includes("rel(id:")) {
+      browserBoundaryCalls++;
+      return r.fulfill({ json: fakeAreas(q), headers: { "Access-Control-Allow-Origin": "*" } });
+    }
     browserCalledOverpass = true;
     return r.abort();
   });
@@ -778,7 +785,7 @@ try {
   await shot(d, "7-map-desktop");
 
   assert.deepEqual(errors, [], "keine Fehler in der Konsole");
-  assert.equal(browserCalledOverpass, false, "Browser fragt Overpass nicht direkt");
+  assert.equal(browserCalledOverpass, false, "Browser fragt Overpass nicht nach Häusern");
   assert.ok(overpassCalls > 0, "Convex hat Overpass gefragt");
   console.log("OK");
 } finally {

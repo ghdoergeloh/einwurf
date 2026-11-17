@@ -4,30 +4,15 @@ import { internal } from "./_generated/api";
 import { ConvexError, v } from "convex/values";
 import {
   BOUNDARY_TILE_PATTERN,
-  MAX_CANDIDATES,
   MAX_TILES_PER_LOAD,
   MAX_TILES_PER_VIEW,
-  areasOfUnit,
-  bboxOf,
-  boundaryTileBBox,
   boundaryTileOf,
-  candidateQuery,
-  chooseUnits,
-  compactGeometry,
   decodeGeometry,
-  encodeCells,
-  geometryQuery,
-  interiorPoint,
-  parseBoundaries,
-  parseCandidates,
   pointInGeometry,
-  preselect,
-  touchedCells,
-  unitQuery,
-  type ParentCandidate,
+  type AreaGeometry,
 } from "./areaGeo";
+import { MAX_AREA_BYTES, areaRow, computeTiles, type Ask } from "./areaLoad";
 import { askServers, overpassDetails, startPrefetch, takeOverpassQuota } from "./buildings";
-import type { BBox } from "./osm";
 import { campaignByKey, requireRole } from "./access";
 import { isSelected } from "./areaStore";
 
@@ -48,8 +33,6 @@ const FAILURE = "Die Ortsteile (OpenStreetMap) sind gerade nicht erreichbar.";
 const AREAS_SERVER_TIMEOUT_MS = 120_000;
 /** Gesamtfrist eines Ladevorgangs (eine Convex-Action darf höchstens 10 Minuten laufen). */
 const AREAS_DEADLINE_MS = 5 * 60_000;
-/** Ein Ortsteil belegt als Text höchstens so viel (gröber vereinfacht, wenn nötig). */
-const MAX_AREA_BYTES = 200_000;
 /** Beim Anlegen: so oft versuchen, den Ortsteil an der Adresse zu laden. */
 const INITIAL_ATTEMPTS = 3;
 const INITIAL_RETRY_MS = 30_000;
@@ -249,25 +232,15 @@ export const storeTiles = internalMutation({
   },
 });
 
-const intersects = (a: BBox, b: BBox) => a[0] <= b[2] && a[2] >= b[0] && a[1] <= b[3] && a[3] >= b[1];
-const union = (boxes: BBox[]): BBox => [
-  Math.min(...boxes.map((b) => b[0])),
-  Math.min(...boxes.map((b) => b[1])),
-  Math.max(...boxes.map((b) => b[2])),
-  Math.max(...boxes.map((b) => b[3])),
-];
-
 /**
- * Lädt fehlende Grenz-Kacheln in den Cache: (1) die Gemeinden, die sie schneiden, (2) für neue
- * Gemeinden die Liste feinerer Grenzen in ihrer Ausdehnung, (3) die Grenzen der Gemeinden und
- * ihrer Kandidaten. Je Gemeinde werden die Ortsteile gewählt (areaGeo.areasOfUnit).
- * Höchstens drei Overpass-Abrufe, alle ohne Geometrie bis auf den letzten.
+ * Lädt fehlende Grenz-Kacheln über Convex in den Cache (beim Anlegen und als Ersatz, wenn der
+ * Browser Overpass nicht erreicht). Logik in areaLoad.computeTiles.
  */
 async function loadBoundaryTiles(ctx: ActionCtx, rateKey: string, tiles: string[]) {
   const missing = await ctx.runQuery(internal.areas.tileStatus, { tiles });
   if (missing.length === 0) return;
   const deadline = Date.now() + AREAS_DEADLINE_MS;
-  const ask = async <T,>(step: string, q: string, parse: (json: never) => T) => {
+  const ask: Ask = async (step, q, parse) => {
     await ctx.runMutation(internal.areas.quota, { slug: rateKey });
     try {
       return await askServers(q, parse, { lockedUntil: deadline, failure: FAILURE, timeoutMs: AREAS_SERVER_TIMEOUT_MS });
@@ -275,58 +248,123 @@ async function loadBoundaryTiles(ctx: ActionCtx, rateKey: string, tiles: string[
       throw new ConvexError(`${FAILURE} ${step}: ${overpassDetails(e)}`.slice(0, 600));
     }
   };
-
-  const tileBoxes = missing.map(boundaryTileBBox);
-  const units = chooseUnits(await ask("Gemeinden", unitQuery(union(tileBoxes)), parseCandidates));
-  const known = new Set(await ctx.runQuery(internal.areas.knownUnits, { unitIds: units.map((u) => u.id) }));
-  const fresh = units.filter((u) => !known.has(u.id));
-  /** Gemeinden mit Ortsteilen im Cache (bekannt oder jetzt geladen); nur sie kommen in die Kacheln. */
-  const stored = new Set<number>(known);
-
-  if (fresh.length > 0) {
-    const candidates = await ask(
-      "Ortsteile (Liste)",
-      candidateQuery(Math.min(...fresh.map((u) => u.level)), union(fresh.map((u) => u.bbox))),
-      parseCandidates,
-    );
-    // Je Gemeinde höchstens MAX_CANDIDATES Grenzen (auch eine sehr große Gemeinde).
-    const perUnit = new Map<number, ParentCandidate[]>(fresh.map((u) => [u.id, preselect(u, candidates).slice(0, MAX_CANDIDATES - 1)]));
-    // In Abrufen von höchstens MAX_CANDIDATES Grenzen, nie eine Gemeinde nur zum Teil.
-    let todo = [...fresh];
-    while (todo.length > 0) {
-      const ids = new Set<number>();
-      const batch: ParentCandidate[] = [];
-      for (const unit of todo) {
-        const own = [unit.id, ...perUnit.get(unit.id)!.map((c) => c.id)].filter((id) => !ids.has(id));
-        if (batch.length > 0 && ids.size + own.length > MAX_CANDIDATES) continue;
-        own.forEach((id) => ids.add(id));
-        batch.push(unit);
-      }
-      todo = todo.filter((u) => !batch.includes(u));
-      const boundaries = await ask("Ortsteile (Grenzen)", geometryQuery([...ids]), parseBoundaries);
-      for (const unit of batch) {
-        const own = boundaries.find((b) => b.id === unit.id);
-        // Ohne eigene Grenze kein Angebot; die Gemeinde kommt dann auch nicht in die Kachel.
-        if (!own) continue;
-        const mine = new Set(perUnit.get(unit.id)!.map((c) => c.id));
-        const parts = areasOfUnit(own, boundaries.filter((b) => mine.has(b.id)));
-        const rows = parts.map((p) => {
-          const geometry = compactGeometry(p.geometry, MAX_AREA_BYTES);
-          const g = decodeGeometry(geometry);
-          return { areaId: `relation/${p.id}`, name: p.name, geometry, bbox: bboxOf(g), labelAt: interiorPoint(g), cells: encodeCells(touchedCells(g)) };
-        });
-        await ctx.runMutation(internal.areas.storeUnit, { unitId: unit.id, areas: rows });
-        stored.add(unit.id);
-      }
-    }
-  }
-  await ctx.runMutation(internal.areas.storeTiles, {
-    tiles: missing.map((tile, i) => ({
-      tile,
-      unitIds: units.filter((u) => stored.has(u.id) && intersects(u.bbox, tileBoxes[i])).map((u) => u.id),
-    })),
-  });
+  const result = await computeTiles(missing, ask, (unitIds) => ctx.runQuery(internal.areas.knownUnits, { unitIds }));
+  for (const unit of result.units) await ctx.runMutation(internal.areas.storeUnit, unit);
+  await ctx.runMutation(internal.areas.storeTiles, { tiles: result.tiles });
 }
+
+// ---------------------------------------------------------------------------
+// Laden im Browser des Admins: Aus der Convex-Cloud sind die öffentlichen Overpass-Server oft
+// nicht erreichbar, aus einem normalen Browser schon. Der Browser rechnet mit derselben Logik
+// (areaLoad.computeTiles) und speichert hier; Convex prüft und berechnet die abgeleiteten Felder.
+// ---------------------------------------------------------------------------
+
+/** Welche dieser Gemeinden hat schon (frische) Ortsteile im Cache? Nur mit dem Admin-Schlüssel. */
+export const unitsInCache = query({
+  args: { adminKey: v.string(), unitIds: v.array(v.number()) },
+  handler: async (ctx, { adminKey, unitIds }) => {
+    await requireRole(ctx, adminKey, "admin");
+    if (unitIds.length > MAX_UNITS_PER_STORE) throw new ConvexError("Zu viele Gemeinden");
+    const now = Date.now();
+    const known: number[] = [];
+    for (const unitId of unitIds) {
+      const a = await ctx.db.query("osmAreas").withIndex("by_unit", (q) => q.eq("unitId", unitId)).first();
+      if (a && now - a.fetchedAt < TILE_TTL_MS) known.push(unitId);
+    }
+    return known;
+  },
+});
+
+/** Höchstens so viele Gemeinden, Gebiete und Punkte nimmt `storeLoaded` an (gegen Missbrauch). */
+const MAX_UNITS_PER_STORE = 40;
+const MAX_AREAS_PER_UNIT = 600;
+const MAX_POINTS_PER_AREA = 50_000;
+/** Ein Ortsteil (auch eine kreisfreie Stadt als Ganzes) ist kleiner als 1° × 1°. */
+const MAX_AREA_SPAN = 1;
+const AREA_ID_PATTERN = /^relation\/\d{1,12}$/;
+
+/** Prüft eine Grenze aus dem Browser und berechnet die abgeleiteten Felder neu. */
+function checkedArea(a: { areaId: string; name: string; geometry: string }) {
+  if (!AREA_ID_PATTERN.test(a.areaId)) throw new ConvexError("Ungültiges Gebiet");
+  const name = a.name.trim().replace(/\s+/g, " ");
+  if (!name || name.length > 200) throw new ConvexError("Ungültiger Name");
+  if (a.geometry.length > MAX_AREA_BYTES) throw new ConvexError("Gebiet zu groß");
+  let g: unknown;
+  try {
+    g = JSON.parse(a.geometry);
+  } catch {
+    throw new ConvexError("Ungültige Grenze");
+  }
+  let points = 0;
+  const ok =
+    Array.isArray(g) &&
+    g.length > 0 &&
+    g.every(
+      (poly) =>
+        Array.isArray(poly) &&
+        poly.length > 0 &&
+        poly.every(
+          (ring) =>
+            Array.isArray(ring) &&
+            ring.length >= 4 &&
+            (points += ring.length) <= MAX_POINTS_PER_AREA &&
+            ring.every(
+              (pt) =>
+                Array.isArray(pt) && pt.length === 2 && Number.isFinite(pt[0]) && Number.isFinite(pt[1]) && Math.abs(pt[0]) <= 180 && Math.abs(pt[1]) <= 90,
+            ),
+        ),
+    );
+  if (!ok) throw new ConvexError("Ungültige Grenze");
+  const geometry = g as AreaGeometry;
+  const row = areaRow(a.areaId, name, geometry);
+  const [w, s, e, n] = row.bbox;
+  if (e - w > MAX_AREA_SPAN || n - s > MAX_AREA_SPAN) throw new ConvexError("Gebiet zu groß");
+  return row;
+}
+
+/**
+ * Speichert im Browser geladene Ortsteile und Kacheln im gemeinsamen Cache. Nur mit dem
+ * Admin-Schlüssel. Überschreibt nichts, was frisch im Cache steht (so kann ein Admin die Grenzen
+ * anderer Aktionen nicht ändern). Holt danach das Vorwählen an der Adresse nach.
+ */
+export const storeLoaded = mutation({
+  args: {
+    adminKey: v.string(),
+    units: v.array(v.object({ unitId: v.number(), areas: v.array(v.object({ areaId: v.string(), name: v.string(), geometry: v.string() })) })),
+    tiles: v.array(v.object({ tile: v.string(), unitIds: v.array(v.number()) })),
+  },
+  handler: async (ctx, { adminKey, units, tiles }) => {
+    const { campaign } = await requireRole(ctx, adminKey, "admin");
+    if (units.length > MAX_UNITS_PER_STORE) throw new ConvexError("Zu viele Gemeinden");
+    assertTiles(tiles.map((t) => t.tile), MAX_TILES_PER_LOAD);
+    const now = Date.now();
+    const freshUnit = async (unitId: number) => {
+      const a = await ctx.db.query("osmAreas").withIndex("by_unit", (q) => q.eq("unitId", unitId)).first();
+      return !!a && now - a.fetchedAt < TILE_TTL_MS;
+    };
+    for (const unit of units) {
+      if (!Number.isInteger(unit.unitId) || unit.unitId <= 0) throw new ConvexError("Ungültige Gemeinde");
+      if (unit.areas.length === 0 || unit.areas.length > MAX_AREAS_PER_UNIT) throw new ConvexError("Ungültige Gemeinde");
+      if (await freshUnit(unit.unitId)) continue;
+      const rows = unit.areas.map(checkedArea);
+      for (const old of await ctx.db.query("osmAreas").withIndex("by_unit", (q) => q.eq("unitId", unit.unitId)).collect()) await ctx.db.delete(old._id);
+      for (const r of rows) await ctx.db.insert("osmAreas", { unitId: unit.unitId, fetchedAt: now, ...r });
+    }
+    for (const { tile, unitIds } of tiles) {
+      if (unitIds.length > MAX_UNITS_PER_STORE) throw new ConvexError("Zu viele Gemeinden");
+      const row = await ctx.db.query("boundaryTiles").withIndex("by_tile", (q) => q.eq("tile", tile)).unique();
+      if (row && now - row.fetchedAt < TILE_TTL_MS) continue;
+      // Nur Gemeinden, deren Ortsteile jetzt im Cache stehen.
+      const present: number[] = [];
+      for (const id of unitIds) if (await freshUnit(id)) present.push(id);
+      if (row) await ctx.db.patch(row._id, { unitIds: present, fetchedAt: now });
+      else await ctx.db.insert("boundaryTiles", { tile, unitIds: present, fetchedAt: now });
+    }
+    // Vorwählen an der Adresse nachholen (wie nach loadTiles), solange die Aktion keine Gebiete hat.
+    const point = [campaign.center.lng, campaign.center.lat];
+    if (tiles.some((t) => t.tile === boundaryTileOf(point[0], point[1]))) await selectAtPoint(ctx, campaign._id, point);
+  },
+});
 
 /**
  * Lädt das Angebot an Ortsteilen für diese Grenz-Kacheln (Modus „Gebiete bearbeiten“). Nur mit
@@ -364,21 +402,24 @@ export const initialInfo = internalQuery({
 });
 
 /** Wählt den Ortsteil, in dem der Punkt liegt, falls die Aktion noch keine Gebiete hat. */
+async function selectAtPoint(ctx: MutationCtx, campaignId: Id<"campaigns">, point: number[]) {
+  if (await ctx.db.query("areas").withIndex("by_campaign", (q) => q.eq("campaignId", campaignId)).first()) return;
+  const tile = await ctx.db.query("boundaryTiles").withIndex("by_tile", (q) => q.eq("tile", boundaryTileOf(point[0], point[1]))).unique();
+  for (const unitId of tile?.unitIds ?? [])
+    for (const a of await ctx.db.query("osmAreas").withIndex("by_unit", (q) => q.eq("unitId", unitId)).collect()) {
+      if (pointInGeometry(point, decodeGeometry(a.geometry))) {
+        await selectArea(ctx, campaignId, a.areaId, true);
+        const campaign = await ctx.db.get(campaignId);
+        if (campaign) await replanPrefetch(ctx, campaign.slug);
+        return;
+      }
+    }
+}
+
+/** Wählt den Ortsteil, in dem der Punkt liegt, falls die Aktion noch keine Gebiete hat. */
 export const selectAt = internalMutation({
   args: { campaignId: v.id("campaigns"), point: v.array(v.number()) },
-  handler: async (ctx, { campaignId, point }) => {
-    if (await ctx.db.query("areas").withIndex("by_campaign", (q) => q.eq("campaignId", campaignId)).first()) return;
-    const tile = await ctx.db.query("boundaryTiles").withIndex("by_tile", (q) => q.eq("tile", boundaryTileOf(point[0], point[1]))).unique();
-    for (const unitId of tile?.unitIds ?? [])
-      for (const a of await ctx.db.query("osmAreas").withIndex("by_unit", (q) => q.eq("unitId", unitId)).collect()) {
-        if (pointInGeometry(point, decodeGeometry(a.geometry))) {
-          await selectArea(ctx, campaignId, a.areaId, true);
-          const campaign = await ctx.db.get(campaignId);
-          if (campaign) await replanPrefetch(ctx, campaign.slug);
-          return;
-        }
-      }
-  },
+  handler: async (ctx, { campaignId, point }) => await selectAtPoint(ctx, campaignId, point),
 });
 
 export const initial = internalAction({
