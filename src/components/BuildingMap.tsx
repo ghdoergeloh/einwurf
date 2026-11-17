@@ -290,7 +290,9 @@ export function BuildingMap({
 
     /** Häuser mit Notiz: feature-state „note“ und blaue Punkte (rausgezoomt, auf markierten Häusern, ohne Umriss). */
     function syncNotes(current: Map<string, Mark>) {
-      const notes = notesRef.current;
+      // Wie Markierungen: Notizen außerhalb der gewählten Gebiete bleiben gespeichert, werden aber nicht gezeigt.
+      const sel = areasRef.current.selection;
+      const notes = sel ? new Map([...notesRef.current].filter(([, n]) => sel.contains(n.center))) : notesRef.current;
       for (const id of [...paintedNotes]) {
         if (!notes.has(id)) {
           map.setFeatureState({ source: "buildings", id }, { note: false });
