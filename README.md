@@ -72,7 +72,7 @@ Gegen eine Vercel-Preview (eigenes Convex-Preview-Backend, echte Häuser von Ove
 pnpm e2e:preview https://<preview>.vercel.app [ordner-für-screenshots]
 ```
 
-Liegt die Preview hinter Vercel Deployment Protection, das Secret aus *Settings → Deployment Protection → Protection Bypass for Automation* als `VERCEL_AUTOMATION_BYPASS_SECRET` setzen; der Test schickt es nur an die Preview.
+Liegt die Preview hinter Vercel Deployment Protection, braucht der Test den Header `x-vercel-protection-bypass` (Secret aus *Settings → Deployment Protection → Protection Bypass for Automation*), z. B. von einem Proxy gesetzt.
 
 In Previews (`VITE_VERCEL_ENV=preview`) stellt die Seite dafür die Karte als `window.__einwurfMap` bereit, in Produktion nicht.
 
