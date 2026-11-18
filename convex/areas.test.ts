@@ -454,7 +454,7 @@ describe("Admin-Link", () => {
         // @ts-expect-error adminKey ist im Schema Pflicht
         await ctx.db.insert("campaigns", { slug: SLUG, name: "X", placeLabel: "X", center: ROISDORF_POINT });
       }),
-    ).rejects.toThrow();
+    ).rejects.toThrow(/adminKey/);
   });
 });
 
