@@ -35,7 +35,7 @@ const overpassOk = () =>
 
 async function setup() {
   const t = convexTest(schema, modules);
-  await t.mutation(api.campaigns.create, {
+  await t.mutation(api.campaigns.create, { adminKey: "AdminKey00000000000011",
     slug: SLUG, name: "Test", placeLabel: "Bornheim", center: { lat: 50.76, lng: 6.99 },
   });
   return t;

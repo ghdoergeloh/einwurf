@@ -14,7 +14,7 @@ const base = { name: "Test", placeLabel: "Bornheim", center: { lat: 50.76, lng: 
 
 async function setup() {
   const t = convexTest(schema, modules);
-  await t.mutation(api.campaigns.create, { ...base, slug: SLUG, viewKey: VIEW });
+  await t.mutation(api.campaigns.create, { adminKey: "AdminKey00000000000001", ...base, slug: SLUG, viewKey: VIEW });
   await t.mutation(api.marks.set, { slug: SLUG, osmId: "way/1", status: "done", center: HOUSE });
   await t.mutation(api.notes.set, { slug: SLUG, osmId: "way/1", center: HOUSE, text: "Kasten 3 leer" });
   return t;
@@ -76,7 +76,7 @@ describe("Ansehen-Schlüssel", () => {
 
   test("ältere Aktion bekommt den Schlüssel einmal, danach bleibt er", async () => {
     const t = convexTest(schema, modules);
-    await t.mutation(api.campaigns.create, { ...base, slug: SLUG });
+    await t.mutation(api.campaigns.create, { adminKey: "AdminKey00000000000002", ...base, slug: SLUG });
     expect(await t.query(api.campaigns.get, { slug: SLUG })).toMatchObject({ viewKey: null });
     expect(await t.mutation(api.campaigns.ensureViewKey, { slug: SLUG, viewKey: VIEW })).toBe(VIEW);
     // Ein zweites Gerät gleichzeitig: Der erste Schlüssel gilt.
@@ -89,12 +89,12 @@ describe("Ansehen-Schlüssel", () => {
     const t = await setup();
     const other = "ZyXwVuTsRqPoNmLkJiHgFe";
     // Ansehen-Schlüssel gleich dem eigenen oder einem fremden Schlüssel
-    await expect(t.mutation(api.campaigns.create, { ...base, slug: other, viewKey: other })).rejects.toThrow(/existiert bereits/);
-    await expect(t.mutation(api.campaigns.create, { ...base, slug: other, viewKey: SLUG })).rejects.toThrow(/existiert bereits/);
-    await expect(t.mutation(api.campaigns.create, { ...base, slug: other, viewKey: VIEW })).rejects.toThrow(/existiert bereits/);
-    await expect(t.mutation(api.campaigns.create, { ...base, slug: VIEW })).rejects.toThrow(/existiert bereits/);
-    await expect(t.mutation(api.campaigns.create, { ...base, slug: other, viewKey: "kurz" })).rejects.toThrow(/Ungültiger Link/);
-    await t.mutation(api.campaigns.create, { ...base, slug: other });
+    await expect(t.mutation(api.campaigns.create, { adminKey: "AdminKey00000000000003", ...base, slug: other, viewKey: other })).rejects.toThrow(/existiert bereits/);
+    await expect(t.mutation(api.campaigns.create, { adminKey: "AdminKey00000000000004", ...base, slug: other, viewKey: SLUG })).rejects.toThrow(/existiert bereits/);
+    await expect(t.mutation(api.campaigns.create, { adminKey: "AdminKey00000000000005", ...base, slug: other, viewKey: VIEW })).rejects.toThrow(/existiert bereits/);
+    await expect(t.mutation(api.campaigns.create, { adminKey: "AdminKey00000000000006", ...base, slug: VIEW })).rejects.toThrow(/existiert bereits/);
+    await expect(t.mutation(api.campaigns.create, { adminKey: "AdminKey00000000000007", ...base, slug: other, viewKey: "kurz" })).rejects.toThrow(/Ungültiger Link/);
+    await t.mutation(api.campaigns.create, { adminKey: "AdminKey00000000000008", ...base, slug: other });
     await expect(t.mutation(api.campaigns.ensureViewKey, { slug: other, viewKey: VIEW })).rejects.toThrow(/existiert bereits/);
     await expect(t.mutation(api.campaigns.ensureViewKey, { slug: other, viewKey: SLUG })).rejects.toThrow(/existiert bereits/);
     await expect(t.mutation(api.campaigns.ensureViewKey, { slug: other, viewKey: other })).rejects.toThrow(/existiert bereits/);
@@ -149,8 +149,8 @@ describe("Admin-Schlüssel", () => {
   test("neue Schlüssel dürfen keinen Admin-Schlüssel treffen", async () => {
     const t = await setupWithAdmin();
     const other = "ZyXwVuTsRqPoNmLkJiHgFe";
-    await expect(t.mutation(api.campaigns.create, { ...base, slug: ADMIN })).rejects.toThrow();
-    await expect(t.mutation(api.campaigns.create, { ...base, slug: other, viewKey: ADMIN })).rejects.toThrow();
+    await expect(t.mutation(api.campaigns.create, { adminKey: "AdminKey00000000000009", ...base, slug: ADMIN })).rejects.toThrow();
+    await expect(t.mutation(api.campaigns.create, { adminKey: "AdminKey00000000000010", ...base, slug: other, viewKey: ADMIN })).rejects.toThrow();
   });
 });
 
