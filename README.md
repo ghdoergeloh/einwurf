@@ -38,6 +38,8 @@ Ein Tipp auf den Zähler oben öffnet die **Statistik**, für alle mit einem Lin
 
 **Ältere Aktionen** (vor dem Admin-Link angelegt) bekommen ihren Admin-Schlüssel durch eine einmalige Migration: im Convex-Dashboard unter *Functions* `migrations:addAdminKeys` ohne Argumente ausführen (mehrfaches Ausführen schadet nicht). Bis dahin gilt für sie der ganze Ort; danach wählt der Organisator im Admin-Link wie oben die Ortsteile.
 
+**Feineres Raster für Markierungen.** Ältere Markierungen und Notizen liegen noch in Zellen von 0,01°. Sie bleiben sichtbar, kosten aber mehr Database I/O, bis sie umgezogen sind: einmal im Convex-Dashboard unter *Functions* `migrations:fineCells` ohne Argumente ausführen (läuft im Hintergrund in Schritten, ändert nur das Feld `cell`, mehrfaches Ausführen schadet nicht).
+
 ## Bedienung der Karte
 
 | Geste | Wirkung |
@@ -57,7 +59,7 @@ Ein Tipp färbt das Haus sofort, dazu sprühen kurz „Pixel-Funken“ (`src/lib
 
 Solange die Häuser eines neuen Gebiets noch von Overpass kommen, zeigt die Karte die Häuser der Grundkarte hellgrau als Platzhalter. Ein Tipp auf ein hellgraues Haus färbt es sofort vorläufig (gestrichelter Rand) und schaltet weiter wie bei jedem Haus; übernommen wird, sobald das Haus geladen ist (von „offen“ aus: hat jemand anderes es inzwischen markiert, gilt dessen Stand). Gibt es dort kein Haus zum Markieren oder kommt es nach 3 Minuten nicht, erscheint ein Hinweis (`src/lib/placeholderTaps.ts`). Unterhalb von Zoomstufe 15 sind alle Häuser hellgrau (Übersicht, nicht antippbar). Vereinzelt bleibt ein Haus grau (etwa ein Gebäudeteil, den die Grundkarte zeigt, Overpass aber nicht als Gebäude liefert). Häuser werden erst ab Zoomstufe 15 geladen, kachelweise und mit etwas Vorrat über den Rand hinaus. Nach einem Fehler wartet die Karte zunehmend länger (5 s bis 60 s), bevor sie es erneut versucht.
 
-Convex speichert je markiertem Haus nur die OSM-ID und den Mittelpunkt, einsortiert in Zellen von 0,01° (`convex/cells.ts`). Jedes Handy abonniert nur die sichtbaren Zellen. Ein Tipp schickt deshalb nur die Zelle mit dem Haus an die Helfer, die sie gerade sehen, nicht die ganze Aktion. Eingefärbt (gelb oder dunkelgelb) wird der Umriss, den das Handy ohnehin von Overpass hat. Rausgezoomt, oder solange der Umriss fehlt, zeigt die Karte Punkte in derselben Farbe. Ab einem Ausschnitt von mehr als 100 Zellen (etwa ab Zoomstufe 12) zeigt sie keine Markierungen mehr. Ohne Netz zeigt die Karte „Offline“, Convex holt das Speichern nach.
+Convex speichert je markiertem Haus nur die OSM-ID und den Mittelpunkt, einsortiert in Zellen von 0,005° (`convex/cells.ts`, in Bornheim etwa 350 m × 550 m). Jedes Handy abonniert nur die sichtbaren Zellen. Ein Tipp schickt deshalb nur die Zelle mit dem Haus an die Helfer, die sie gerade sehen, nicht die ganze Aktion. Die Zähler (Flyer, nicht möglich, Notizen) stehen in einer eigenen Tabelle (`convex/counters.ts`) statt am Datensatz der Aktion; sonst müsste nach jedem Tipp jedes Handy alle seine Zellen neu lesen, und das kostet Database I/O (im kostenlosen Convex-Tarif 1 GB im Monat). Eingefärbt (gelb oder dunkelgelb) wird der Umriss, den das Handy ohnehin von Overpass hat. Rausgezoomt, oder solange der Umriss fehlt, zeigt die Karte Punkte in derselben Farbe. Ab einem Ausschnitt von mehr als 160 Zellen (etwa ab Zoomstufe 13) zeigt sie keine Markierungen mehr. Ohne Netz zeigt die Karte „Offline“, Convex holt das Speichern nach.
 
 ## Links und Rechte
 

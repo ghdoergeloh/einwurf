@@ -40,7 +40,7 @@ const HOUSE_NUMBER_MIN_ZOOM = 17;
 /** Mehr Kacheln auf einmal laden wir nicht (schont den öffentlichen Overpass-Server). */
 const MAX_CELLS_PER_REQUEST = 24;
 /** Mehr Markierungs-Zellen abonnieren wir nicht; weiter rausgezoomt gibt es keine Punkte. */
-const MAX_MARK_CELLS = 100;
+const MAX_MARK_CELLS = 160;
 /** Wartezeit nach einem Overpass-Fehler, verdoppelt sich bis zum Maximum. */
 const BACKOFF_START_MS = 5_000;
 const BACKOFF_MAX_MS = 60_000;

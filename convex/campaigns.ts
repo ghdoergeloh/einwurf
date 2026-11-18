@@ -2,6 +2,7 @@ import { mutation, query } from "./_generated/server";
 import { startPrefetch } from "./buildings";
 import { startInitialAreas } from "./areas";
 import { campaignByKey, requireRole, keyTaken } from "./access";
+import { countsOf } from "./counters";
 import { ConvexError, v } from "convex/values";
 import {
   MAX_CAMPAIGNS_PER_MINUTE,
@@ -68,8 +69,6 @@ export const create = mutation({
       placeLabel: cleanText(args.placeLabel, MAX_PLACE_LENGTH, "Ort"),
       center: args.center,
       bbox: args.bbox,
-      markCount: 0,
-      blockedCount: 0,
     });
     // Häuser des Ortes im Hintergrund vorladen, damit die Helfer nicht warten.
     // (In Unit-Tests aus, siehe vite.config.ts; dort wird es gezielt geprüft.)
@@ -92,13 +91,14 @@ export const get = query({
     const found = await campaignByKey(ctx, slug);
     if (!found) return null;
     const { campaign, role } = found;
+    const counts = await countsOf(ctx, campaign);
     const shared = {
       name: campaign.name,
       placeLabel: campaign.placeLabel,
       center: campaign.center,
       bbox: campaign.bbox ?? null,
-      markCount: campaign.markCount ?? 0,
-      blockedCount: campaign.blockedCount ?? 0,
+      markCount: counts.done,
+      blockedCount: counts.blocked,
       createdAt: campaign._creationTime,
     };
     if (role === "view") return { role, ...shared };

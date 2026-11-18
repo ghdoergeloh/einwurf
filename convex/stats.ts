@@ -7,6 +7,7 @@ import { campaignByKey, requireRole } from "./access";
 import { areaAt, decodeCells, decodeGeometry, encodeCells, inBox, type AreaGeometry } from "./areaGeo";
 import { centerOf, decodeBuildings } from "./osm";
 import { isSelected } from "./areaStore";
+import { countsOf } from "./counters";
 import { countDelta, statusOf, type HouseStatus } from "./status";
 
 /**
@@ -17,7 +18,7 @@ import { countDelta, statusOf, type HouseStatus } from "./status";
  *   antippbar zeigt, zugeordnet über den Mittelpunkt), im Hintergrund in kleinen Schritten.
  *   Neu gezählt wird bei geänderter Auswahl, wenn das Vorladen fertig ist, und auf Wunsch
  *   (refresh, gebremst).
- * - Markierungen: beim Setzen mitgezählt (wie markCount/blockedCount an der Aktion). Jede
+ * - Markierungen: beim Setzen mitgezählt (wie die Zähler der Aktion, counters.ts). Jede
  *   Markierung merkt sich ihr Gebiet und die Laufnummer der Statistik (`areaRun`), zu der sie
  *   gezählt wurde. Kommt ein Gebiet dazu oder fällt eins weg, beginnt ein neuer Lauf, und ein
  *   Hintergrundlauf ordnet alle Markierungen neu zu. Weil Convex Mutationen nacheinander
@@ -27,11 +28,18 @@ import { countDelta, statusOf, type HouseStatus } from "./status";
  * (für Häuser und Markierungen gleich). So zählt jedes Haus, das die Karte antippbar zeigt.
  */
 
-/** Markierungen je Schritt beim Nachziehen; Kacheln je Schritt beim Zählen der Häuser. */
-const ASSIGN_BATCH = 400;
-const COUNT_BATCH = 20;
-/** Neu zählen auf Wunsch höchstens so oft. */
-const REFRESH_MIN_MS = 60_000;
+/**
+ * Markierungen je Schritt beim Nachziehen; Kacheln je Schritt beim Zählen der Häuser. Jeder
+ * Schritt liest alle Grenzen der Aktion; größere Schritte sparen Database I/O.
+ */
+const ASSIGN_BATCH = 1000;
+const COUNT_BATCH = 60;
+/**
+ * Neu zählen auf Wunsch (Statistik öffnen) nur, solange die Zahl vorläufig ist, und höchstens
+ * so oft. Eine vollständige Zählung liest jede Kachel des Gebäude-Caches einmal; früher lief sie
+ * bei jedem Öffnen und kostete den größten Teil des Database-I/O-Kontingents.
+ */
+const REFRESH_MIN_MS = 15 * 60_000;
 
 /** Gebiete der Aktion (gewählte und abgewählte). */
 const areaDocs = (ctx: QueryCtx, campaignId: Id<"campaigns">) =>
@@ -315,7 +323,8 @@ export const byArea = query({
   handler: async (ctx, { slug }) => {
     const campaign = (await campaignByKey(ctx, slug))?.campaign;
     if (!campaign) return null;
-    const total = { done: campaign.markCount ?? 0, blocked: campaign.blockedCount ?? 0 };
+    const { done, blocked } = await countsOf(ctx, campaign);
+    const total = { done, blocked };
     const job = await current(ctx, campaign._id);
     const rows = job ? await statRows(ctx, campaign._id, job.run) : [];
     if (!job || rows.length === 0) {
@@ -363,6 +372,9 @@ export const refresh = mutation({
     if (await syncAreaStats(ctx, campaign._id)) return;
     const job = await current(ctx, campaign._id);
     if (!job || job.cells !== "" || Date.now() - job.countedAt < REFRESH_MIN_MS) return;
-    await recountHouses(ctx, campaign._id);
+    const rows = await statRows(ctx, campaign._id, job.run);
+    const off = unselectedOf(rows);
+    const preliminary = rows.some((r) => !off.has(r.areaId) && (r.houses === undefined || r.cellsCounted < r.cellsTotal));
+    if (preliminary) await recountHouses(ctx, campaign._id);
   },
 });

@@ -1,7 +1,7 @@
 // @vitest-environment edge-runtime
 import { convexTest } from "convex-test";
 import { describe, expect, test, vi } from "vitest";
-import { api } from "./_generated/api";
+import { api, internal } from "./_generated/api";
 import schema from "./schema";
 import { markCellOf, markCellsIn } from "./cells";
 import { MAX_CAMPAIGNS_PER_MINUTE, MAX_MARKS_PER_CAMPAIGN } from "./validation";
@@ -163,8 +163,8 @@ describe("marks", () => {
     const t = await setup();
     await t.mutation(api.marks.set, { slug: SLUG, osmId: "way/1", marked: true, center: HOUSE });
     await t.run(async (ctx) => {
-      const c = await ctx.db.query("campaigns").first();
-      await ctx.db.patch(c!._id, { markCount: MAX_MARKS_PER_CAMPAIGN });
+      const counts = await ctx.db.query("campaignCounts").first();
+      await ctx.db.patch(counts!._id, { done: MAX_MARKS_PER_CAMPAIGN });
     });
     await expect(
       t.mutation(api.marks.set, { slug: SLUG, osmId: "way/2", marked: true, center: HOUSE }),
@@ -184,6 +184,46 @@ describe("marks", () => {
     ).rejects.toThrow(/zu viele Markierungen/);
   });
 
+  test("ein Tipp ändert den Datensatz der Aktion nicht (sonst liefen alle Queries aller Geräte neu)", async () => {
+    const t = await setup();
+    const before = await t.run(async (ctx) => await ctx.db.query("campaigns").first());
+    await t.mutation(api.marks.set, { slug: SLUG, osmId: "way/1", status: "done", center: HOUSE });
+    await t.mutation(api.marks.set, { slug: SLUG, osmId: "way/2", status: "blocked", center: HOUSE });
+    expect(await t.run(async (ctx) => await ctx.db.query("campaigns").first())).toEqual(before);
+    expect(await t.query(api.campaigns.get, { slug: SLUG })).toMatchObject({ markCount: 1, blockedCount: 1 });
+  });
+
+  test("Markierungen im alten Raster (0,01°) bleiben sichtbar, ziehen beim Ändern und per Migration um", async () => {
+    const t = await setup();
+    const far = [7.0081, 50.0081]; // dieselbe alte Zelle, andere neue Zelle
+    await t.run(async (ctx) => {
+      const c = (await ctx.db.query("campaigns").first())!;
+      await ctx.db.insert("marks", { campaignId: c._id, osmId: "way/1", center: HOUSE, cell: "700:5000", status: "done" });
+      await ctx.db.insert("marks", { campaignId: c._id, osmId: "way/2", center: far, cell: "700:5000", status: "done" });
+      await ctx.db.insert("notes", { campaignId: c._id, osmId: "way/1", center: HOUSE, cell: "700:5000", text: "alt", updatedAt: 1 });
+    });
+    const ids = async (cell: string) => (await t.query(api.marks.inCell, { slug: SLUG, cell })).map((m) => m.osmId).sort();
+    expect(await ids(CELL)).toEqual(["way/1"]);
+    expect(await ids(markCellOf(far[0], far[1]))).toEqual(["way/2"]);
+    // Neue Markierung in der neuen Zelle; eine ältere Seite fragt noch die alte Zelle ab und sieht alles.
+    await t.mutation(api.marks.set, { slug: SLUG, osmId: "way/3", status: "done", center: HOUSE });
+    expect(await ids("700:5000")).toEqual(["way/1", "way/2", "way/3"]);
+    // Ändern zieht um.
+    await t.mutation(api.marks.set, { slug: SLUG, osmId: "way/1", status: "blocked", center: HOUSE });
+    const cellOf = (osmId: string) => t.run(async (ctx) => (await ctx.db.query("marks").collect()).find((m) => m.osmId === osmId)!.cell);
+    expect(await cellOf("way/1")).toBe(CELL);
+    // Die Migration zieht den Rest um, Notizen auch; nichts geht verloren.
+    vi.useFakeTimers();
+    await t.mutation(internal.migrations.fineCells, {});
+    await t.finishAllScheduledFunctions(vi.runAllTimers);
+    vi.useRealTimers();
+    expect(await cellOf("way/2")).toBe(markCellOf(far[0], far[1]));
+    expect(await t.run(async (ctx) => (await ctx.db.query("notes").first())!.cell)).toBe(CELL);
+    expect(await ids(CELL)).toEqual(["way/1", "way/3"]);
+    expect(await ids(markCellOf(far[0], far[1]))).toEqual(["way/2"]);
+    expect((await t.query(api.notes.inCell, { slug: SLUG, cell: CELL })).map((n) => n.text)).toEqual(["alt"]);
+  });
+
   test("ungültige Zelle oder unbekannte Aktion", async () => {
     const t = await setup();
     await expect(t.query(api.marks.inCell, { slug: SLUG, cell: "x" })).rejects.toThrow();
@@ -194,8 +234,10 @@ describe("marks", () => {
 describe("cells", () => {
   test("Zellen eines Ausschnitts enthalten die Zelle jedes Punkts darin", () => {
     const cells = markCellsIn([6.985, 50.755, 7.012, 50.771]);
-    expect(cells).toHaveLength(4 * 3);
-    expect(cells).toContain(markCellOf(6.99, 50.76));
-    expect(markCellOf(-0.001, -0.001)).toBe("-1:-1");
+    expect(cells.length).toBeGreaterThanOrEqual(6 * 4);
+    expect(cells.length).toBeLessThanOrEqual(7 * 5);
+    for (const [lng, lat] of [[6.99, 50.76], [6.9851, 50.7551], [7.0119, 50.7709]]) expect(cells).toContain(markCellOf(lng, lat));
+    expect(markCellOf(-0.001, -0.001)).toBe("f-1:-1");
+    expect(markCellOf(7.0001, 50.0001)).toBe("f1400:10000");
   });
 });

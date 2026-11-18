@@ -396,14 +396,22 @@ describe("Statistik je Gebiet", () => {
     const t = convexTest(schema, modules);
     await setup(t, [["w", "West", WEST]]);
     await settle(t);
-    await storeHouses(t, grid([7.0, 50.7, SPLIT, 50.71]));
+    await storeHouses(t, grid([7.0, 50.7, SPLIT, 50.71]), [WEST]);
     await t.mutation(api.stats.refresh, { slug: SLUG }); // gebremst: gerade erst gezählt
     await settle(t);
     expect((await row(t, "w")).houses).toBe(0);
-    vi.advanceTimersByTime(61_000);
+    vi.advanceTimersByTime(15 * 60_000 + 1000);
     await t.mutation(api.stats.refresh, { slug: SLUG });
     await settle(t);
     expect((await row(t, "w")).houses).toBe(grid([7.0, 50.7, SPLIT, 50.71]).length);
+    // Vollständig gezählt: Öffnen zählt nicht mehr neu (spart Database I/O).
+    expect((await row(t, "w")).complete).toBe(true);
+    const countedAt = async () => (await t.run(async (ctx) => await ctx.db.query("statsJobs").first()))!.countedAt;
+    const before = await countedAt();
+    vi.advanceTimersByTime(60 * 60_000);
+    await t.mutation(api.stats.refresh, { slug: SLUG });
+    await settle(t);
+    expect(await countedAt()).toBe(before);
     await expect(t.mutation(api.stats.refresh, { slug: "Unbekannt1234567890123" })).rejects.toThrow();
     // Der Admin-Schlüssel umfasst die Rechte des Bearbeiten-Schlüssels (access.ts).
     await t.mutation(api.stats.refresh, { slug: ADMIN });

@@ -20,7 +20,7 @@ export default defineSchema({
     center: v.object({ lat: v.number(), lng: v.number() }),
     /** [west, süd, ost, nord] des gesuchten Ortes, für den Startausschnitt. */
     bbox: v.optional(v.array(v.number())),
-    /** Anzahl Häuser mit Flyer („done“), wird bei jeder Änderung mitgeführt. */
+    /** Veraltet: Zähler stehen jetzt in campaignCounts (siehe counters.ts); gilt nur, bis dort eine Zeile ist. */
     markCount: v.optional(v.number()),
     /** Anzahl Häuser, bei denen Einwerfen nicht möglich war („blocked“). */
     blockedCount: v.optional(v.number()),
@@ -30,6 +30,14 @@ export default defineSchema({
     .index("by_slug", ["slug"])
     .index("by_viewKey", ["viewKey"])
     .index("by_adminKey", ["adminKey"]),
+
+  /** Zähler einer Aktion, getrennt vom Datensatz der Aktion (siehe counters.ts). */
+  campaignCounts: defineTable({
+    campaignId: v.id("campaigns"),
+    done: v.number(),
+    blocked: v.number(),
+    notes: v.number(),
+  }).index("by_campaign", ["campaignId"]),
 
   marks: defineTable({
     campaignId: v.id("campaigns"),
