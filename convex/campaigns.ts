@@ -24,8 +24,7 @@ function assertBBox(bbox: number[]) {
 /**
  * Legt eine Verteilaktion an. Die geheimen Schlüssel erzeugt der Browser mit
  * crypto.getRandomValues (Zufall in Convex-Mutationen ist deterministisch).
- * `viewKey` fehlt nur bei noch geöffneten alten Seiten. `adminKey` ist Pflicht: Eine Aktion
- * ohne ihn bekäme nachträglich keinen mehr (die Migration dafür gibt es nicht mehr).
+ * `viewKey` fehlt nur bei noch geöffneten alten Seiten. `adminKey` ist Pflicht (Schema).
  */
 export const create = mutation({
   args: {

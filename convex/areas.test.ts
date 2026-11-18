@@ -446,6 +446,16 @@ describe("Admin-Link", () => {
     await expect(t.mutation(api.campaigns.create, { ...base, slug: "NeuerSchluessel1234567" })).rejects.toThrow();
     expect(await t.query(api.campaigns.get, { slug: "NeuerSchluessel1234567" })).toBeNull();
   });
+
+  test("das Schema verlangt den Admin-Schlüssel an jeder Aktion", async () => {
+    const t = convexTest(schema, modules);
+    await expect(
+      t.run(async (ctx) => {
+        // @ts-expect-error adminKey ist im Schema Pflicht
+        await ctx.db.insert("campaigns", { slug: SLUG, name: "X", placeLabel: "X", center: ROISDORF_POINT });
+      }),
+    ).rejects.toThrow(/adminKey/);
+  });
 });
 
 describe("nur gewählte Gebiete", () => {

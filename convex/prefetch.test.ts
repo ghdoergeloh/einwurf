@@ -110,7 +110,7 @@ describe("Vorladen", () => {
     await t.run(async (ctx) => {
       // Alter Datensatz mit verdrehtem Ausschnitt (neue werden beim Anlegen abgelehnt)
       await ctx.db.insert("campaigns", {
-        slug: SLUG, name: "x", placeLabel: "y", center: { lat: 50, lng: 7 }, bbox: [7.1, 50.1, 7.0, 50.0],
+        slug: SLUG, adminKey: "AdminKey00000000000001", name: "x", placeLabel: "y", center: { lat: 50, lng: 7 }, bbox: [7.1, 50.1, 7.0, 50.0],
       });
     });
     await t.mutation(api.buildings.prefetch, { slug: SLUG });
