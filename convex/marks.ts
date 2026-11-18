@@ -1,8 +1,10 @@
 import { mutation, query } from "./_generated/server";
 import { campaignByKey, requireRole } from "./access";
 import { trackMark } from "./stats";
+import { addCounts, countsOf } from "./counters";
 import { ConvexError, v } from "convex/values";
 import { markCellOf } from "./cells";
+import { marksInCell } from "./cellRows";
 import { countDelta, statusOf, type HouseStatus } from "./status";
 import {
   MAX_MARKS_PER_CAMPAIGN,
@@ -25,10 +27,7 @@ export const inCell = query({
     assertCell(cell);
     const campaign = (await campaignByKey(ctx, slug))?.campaign;
     if (!campaign) return [];
-    const marks = await ctx.db
-      .query("marks")
-      .withIndex("by_campaign_cell", (q) => q.eq("campaignId", campaign._id).eq("cell", cell))
-      .collect();
+    const marks = await marksInCell(ctx, campaign._id, cell);
     return marks.map((m) => ({ osmId: m.osmId, center: m.center, status: m.status ?? ("done" as const) }));
   },
 });
@@ -70,9 +69,11 @@ export const set = mutation({
     if (target === "none") {
       await ctx.db.delete(existing!._id);
     } else if (existing) {
-      await ctx.db.patch(existing._id, { status: target, ...area });
+      // Ältere Markierung im alten Raster: dabei in die neue Zelle umziehen.
+      await ctx.db.patch(existing._id, { status: target, cell: markCellOf(existing.center[0], existing.center[1]), ...area });
     } else {
-      const total = (campaign.markCount ?? 0) + (campaign.blockedCount ?? 0);
+      const counts = await countsOf(ctx, campaign);
+      const total = counts.done + counts.blocked;
       if (total >= MAX_MARKS_PER_CAMPAIGN) throw new ConvexError("Diese Aktion hat schon zu viele Markierungen");
       await ctx.db.insert("marks", {
         campaignId: campaign._id,
@@ -84,9 +85,6 @@ export const set = mutation({
       });
     }
     const d = countDelta(from, target);
-    await ctx.db.patch(campaign._id, {
-      markCount: Math.max(0, (campaign.markCount ?? 0) + d.done),
-      blockedCount: Math.max(0, (campaign.blockedCount ?? 0) + d.blocked),
-    });
+    await addCounts(ctx, campaign, d);
   },
 });

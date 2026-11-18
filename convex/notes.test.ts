@@ -80,8 +80,8 @@ describe("notes", () => {
     const t = await setup();
     await t.mutation(api.notes.set, { slug: SLUG, osmId: "way/1", center: HOUSE, text: "a" });
     await t.run(async (ctx) => {
-      const c = (await ctx.db.query("campaigns").first())!;
-      await ctx.db.patch(c._id, { noteCount: MAX_NOTES_PER_CAMPAIGN });
+      const counts = (await ctx.db.query("campaignCounts").first())!;
+      await ctx.db.patch(counts._id, { notes: MAX_NOTES_PER_CAMPAIGN });
     });
     await expect(t.mutation(api.notes.set, { slug: SLUG, osmId: "way/2", center: HOUSE, text: "b" })).rejects.toThrow(
       /zu viele Notizen/,
@@ -95,7 +95,7 @@ describe("notes", () => {
 
   test("Zähler zählt neue Notizen, nicht Änderungen", async () => {
     const t = await setup();
-    const count = () => t.run(async (ctx) => (await ctx.db.query("campaigns").first())!.noteCount ?? 0);
+    const count = () => t.run(async (ctx) => (await ctx.db.query("campaignCounts").first())?.notes ?? 0);
     await t.mutation(api.notes.set, { slug: SLUG, osmId: "way/1", center: HOUSE, text: "a" });
     await t.mutation(api.notes.set, { slug: SLUG, osmId: "way/1", center: HOUSE, text: "b" });
     await t.mutation(api.notes.set, { slug: SLUG, osmId: "way/2", center: HOUSE, text: "c" });

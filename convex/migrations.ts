@@ -3,6 +3,7 @@ import { internal } from "./_generated/api";
 import { v } from "convex/values";
 import { keyTaken } from "./access";
 import { assertSlug } from "./validation";
+import { isLegacyCell, markCellOf } from "./cells";
 
 /**
  * Einmalige Migration: Ältere Aktionen bekommen einen Admin-Schlüssel.
@@ -67,3 +68,27 @@ export function randomKey(length = 22): string {
   }
   return out.join("");
 }
+
+/**
+ * Einmalige Migration: Markierungen und Notizen ins feinere Raster (cells.ts) umziehen.
+ * Im Convex-Dashboard unter *Functions → migrations:fineCells* ohne Argumente starten; läuft im
+ * Hintergrund in Schritten weiter. Bis dahin liefern marks.inCell und notes.inCell trotzdem
+ * alles (sie lesen auch das alte Raster), nur teurer. Mehrfaches Starten schadet nicht.
+ * Ändert nur das Feld `cell`, sonst nichts.
+ */
+export const fineCells = internalMutation({
+  args: {
+    table: v.optional(v.union(v.literal("marks"), v.literal("notes"))),
+    cursor: v.optional(v.union(v.string(), v.null())),
+  },
+  handler: async (ctx, { table = "marks", cursor = null }) => {
+    const page = await ctx.db.query(table).paginate({ cursor, numItems: CELL_BATCH });
+    for (const row of page.page) {
+      if (isLegacyCell(row.cell)) await ctx.db.patch(row._id, { cell: markCellOf(row.center[0], row.center[1]) });
+    }
+    if (!page.isDone) await ctx.scheduler.runAfter(0, internal.migrations.fineCells, { table, cursor: page.continueCursor });
+    else if (table === "marks") await ctx.scheduler.runAfter(0, internal.migrations.fineCells, { table: "notes", cursor: null });
+  },
+});
+
+const CELL_BATCH = 500;

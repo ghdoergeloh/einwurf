@@ -7,6 +7,7 @@ import { campaignByKey, requireRole } from "./access";
 import { areaAt, decodeCells, decodeGeometry, encodeCells, inBox, type AreaGeometry } from "./areaGeo";
 import { centerOf, decodeBuildings } from "./osm";
 import { isSelected } from "./areaStore";
+import { countsOf } from "./counters";
 import { countDelta, statusOf, type HouseStatus } from "./status";
 
 /**
@@ -17,7 +18,7 @@ import { countDelta, statusOf, type HouseStatus } from "./status";
  *   antippbar zeigt, zugeordnet über den Mittelpunkt), im Hintergrund in kleinen Schritten.
  *   Neu gezählt wird bei geänderter Auswahl, wenn das Vorladen fertig ist, und auf Wunsch
  *   (refresh, gebremst).
- * - Markierungen: beim Setzen mitgezählt (wie markCount/blockedCount an der Aktion). Jede
+ * - Markierungen: beim Setzen mitgezählt (wie die Zähler der Aktion, counters.ts). Jede
  *   Markierung merkt sich ihr Gebiet und die Laufnummer der Statistik (`areaRun`), zu der sie
  *   gezählt wurde. Kommt ein Gebiet dazu oder fällt eins weg, beginnt ein neuer Lauf, und ein
  *   Hintergrundlauf ordnet alle Markierungen neu zu. Weil Convex Mutationen nacheinander
@@ -315,7 +316,8 @@ export const byArea = query({
   handler: async (ctx, { slug }) => {
     const campaign = (await campaignByKey(ctx, slug))?.campaign;
     if (!campaign) return null;
-    const total = { done: campaign.markCount ?? 0, blocked: campaign.blockedCount ?? 0 };
+    const { done, blocked } = await countsOf(ctx, campaign);
+    const total = { done, blocked };
     const job = await current(ctx, campaign._id);
     const rows = job ? await statRows(ctx, campaign._id, job.run) : [];
     if (!job || rows.length === 0) {
