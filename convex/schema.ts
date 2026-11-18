@@ -12,9 +12,9 @@ export default defineSchema({
     viewKey: v.optional(v.string()),
     /**
      * Geheimer Admin-Schlüssel (Gebietsauswahl, siehe #2 und access.ts). Wird über den
-     * Bearbeiten- und den Ansehen-Link nie herausgegeben.
+     * Bearbeiten- und den Ansehen-Link nie herausgegeben. Pflicht für jede Aktion.
      */
-    adminKey: v.optional(v.string()),
+    adminKey: v.string(),
     name: v.string(),
     placeLabel: v.string(),
     center: v.object({ lat: v.number(), lng: v.number() }),

@@ -306,7 +306,7 @@ describe("Statistik je Gebiet", () => {
   test("ohne Gebiete: nur die Summen", async () => {
     const t = convexTest(schema, modules);
     await t.run(async (ctx) => {
-      await ctx.db.insert("campaigns", { slug: SLUG, name: "Alt", placeLabel: "Ort", center: { lat: 50.7, lng: 7 }, markCount: 3, blockedCount: 1 });
+      await ctx.db.insert("campaigns", { slug: SLUG, adminKey: ADMIN, name: "Alt", placeLabel: "Ort", center: { lat: 50.7, lng: 7 }, markCount: 3, blockedCount: 1 });
     });
     expect(await stats(t)).toEqual({ areas: null, needsSetup: false, total: { done: 3, blocked: 1 } });
   });
