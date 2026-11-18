@@ -24,13 +24,14 @@ function assertBBox(bbox: number[]) {
 /**
  * Legt eine Verteilaktion an. Die geheimen Schlüssel erzeugt der Browser mit
  * crypto.getRandomValues (Zufall in Convex-Mutationen ist deterministisch).
- * `viewKey` und `adminKey` fehlen nur bei noch geöffneten alten Seiten.
+ * `viewKey` fehlt nur bei noch geöffneten alten Seiten. `adminKey` ist Pflicht: Eine Aktion
+ * ohne ihn bekäme nachträglich keinen mehr (die Migration dafür gibt es nicht mehr).
  */
 export const create = mutation({
   args: {
     slug: v.string(),
     viewKey: v.optional(v.string()),
-    adminKey: v.optional(v.string()),
+    adminKey: v.string(),
     name: v.string(),
     placeLabel: v.string(),
     center: v.object({ lat: v.number(), lng: v.number() }),
@@ -47,11 +48,9 @@ export const create = mutation({
         throw new ConvexError("Link existiert bereits");
       }
     }
-    if (args.adminKey !== undefined) {
-      assertSlug(args.adminKey);
-      if (args.adminKey === args.slug || args.adminKey === args.viewKey || (await keyTaken(ctx, args.adminKey))) {
-        throw new ConvexError("Link existiert bereits");
-      }
+    assertSlug(args.adminKey);
+    if (args.adminKey === args.slug || args.adminKey === args.viewKey || (await keyTaken(ctx, args.adminKey))) {
+      throw new ConvexError("Link existiert bereits");
     }
 
     // Einfache Bremse gegen Skripte, die massenhaft Aktionen anlegen.

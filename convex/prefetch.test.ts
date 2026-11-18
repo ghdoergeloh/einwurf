@@ -25,7 +25,7 @@ afterEach(() => {
 });
 
 async function create(t: ReturnType<typeof convexTest>, area: typeof SMALL) {
-  await t.mutation(api.campaigns.create, { slug: SLUG, name: "Test", placeLabel: "Roisdorf", ...area });
+  await t.mutation(api.campaigns.create, { adminKey: "AdminKey00000000000012", slug: SLUG, name: "Test", placeLabel: "Roisdorf", ...area });
 }
 const cachedCells = (t: ReturnType<typeof convexTest>) =>
   t.run(async (ctx) => (await ctx.db.query("buildingCells").collect()).length);

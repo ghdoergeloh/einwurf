@@ -439,6 +439,13 @@ describe("Admin-Link", () => {
     await expect(t.mutation(api.campaigns.create, { ...base, slug: "NeuerSchluessel1234567", adminKey: "NeuerSchluessel1234567" })).rejects.toThrow();
   });
 
+  test("ohne Admin-Schlüssel wird keine Aktion angelegt (sie bekäme nie einen)", async () => {
+    const t = await create();
+    const base = { name: "X", placeLabel: "X", center: ROISDORF_POINT };
+    // @ts-expect-error adminKey ist Pflicht; so ruft nur eine sehr alte Seite auf
+    await expect(t.mutation(api.campaigns.create, { ...base, slug: "NeuerSchluessel1234567" })).rejects.toThrow();
+    expect(await t.query(api.campaigns.get, { slug: "NeuerSchluessel1234567" })).toBeNull();
+  });
 });
 
 describe("nur gewählte Gebiete", () => {

@@ -14,8 +14,8 @@ const CELL = markCellOf(HOUSE[0], HOUSE[1]);
 
 async function setup() {
   const t = convexTest(schema, modules);
-  for (const slug of [SLUG, OTHER]) {
-    await t.mutation(api.campaigns.create, { slug, name: "Aktion", placeLabel: "Bornheim", center: { lat: 50, lng: 7 } });
+  for (const [slug, adminKey] of [[SLUG, "AdminKey00000000000013"], [OTHER, "AdminKey00000000000099"]]) {
+    await t.mutation(api.campaigns.create, { adminKey, slug, name: "Aktion", placeLabel: "Bornheim", center: { lat: 50, lng: 7 } });
   }
   return t;
 }

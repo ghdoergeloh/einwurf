@@ -13,7 +13,7 @@ const CELL = markCellOf(HOUSE[0], HOUSE[1]);
 
 async function setup() {
   const t = convexTest(schema, modules);
-  await t.mutation(api.campaigns.create, {
+  await t.mutation(api.campaigns.create, { adminKey: "AdminKey00000000000014",
     slug: SLUG,
     name: "  Einladungen   Bornheim ",
     placeLabel: "Bornheim, NRW",
@@ -41,22 +41,22 @@ describe("campaigns", () => {
   test("Schlüssel muss 22 Zeichen base62 sein und eindeutig", async () => {
     const t = await setup();
     const base = { name: "x", placeLabel: "y", center: { lat: 1, lng: 1 } };
-    await expect(t.mutation(api.campaigns.create, { ...base, slug: "abc" })).rejects.toThrow();
-    await expect(t.mutation(api.campaigns.create, { ...base, slug: SLUG })).rejects.toThrow();
+    await expect(t.mutation(api.campaigns.create, { adminKey: "AdminKey00000000000015", ...base, slug: "abc" })).rejects.toThrow();
+    await expect(t.mutation(api.campaigns.create, { adminKey: "AdminKey00000000000016", ...base, slug: SLUG })).rejects.toThrow();
   });
 
   test("verdrehter Ausschnitt wird abgelehnt", async () => {
     const t = convexTest(schema, modules);
     const base = { slug: SLUG, name: "x", placeLabel: "y", center: { lat: 50, lng: 7 } };
-    await expect(t.mutation(api.campaigns.create, { ...base, bbox: [7.1, 50, 7.0, 50.1] })).rejects.toThrow(/Ausschnitt/);
-    await expect(t.mutation(api.campaigns.create, { ...base, bbox: [7.0, 50.1, 7.1, 50] })).rejects.toThrow(/Ausschnitt/);
+    await expect(t.mutation(api.campaigns.create, { adminKey: "AdminKey00000000000017", ...base, bbox: [7.1, 50, 7.0, 50.1] })).rejects.toThrow(/Ausschnitt/);
+    await expect(t.mutation(api.campaigns.create, { adminKey: "AdminKey00000000000018", ...base, bbox: [7.0, 50.1, 7.1, 50] })).rejects.toThrow(/Ausschnitt/);
   });
 
   test("leerer oder zu langer Name wird abgelehnt", async () => {
     const t = convexTest(schema, modules);
     const base = { slug: SLUG, placeLabel: "y", center: { lat: 1, lng: 1 } };
-    await expect(t.mutation(api.campaigns.create, { ...base, name: "   " })).rejects.toThrow();
-    await expect(t.mutation(api.campaigns.create, { ...base, name: "x".repeat(81) })).rejects.toThrow();
+    await expect(t.mutation(api.campaigns.create, { adminKey: "AdminKey00000000000019", ...base, name: "   " })).rejects.toThrow();
+    await expect(t.mutation(api.campaigns.create, { adminKey: "AdminKey00000000000020", ...base, name: "x".repeat(81) })).rejects.toThrow();
   });
 
   test("zu viele neue Aktionen pro Minute werden gebremst, danach geht es wieder", async () => {
@@ -65,13 +65,13 @@ describe("campaigns", () => {
       const t = convexTest(schema, modules);
       const base = { name: "x", placeLabel: "y", center: { lat: 1, lng: 1 } };
       for (let i = 0; i < MAX_CAMPAIGNS_PER_MINUTE; i++) {
-        await t.mutation(api.campaigns.create, { ...base, slug: slugOf(i) });
+        await t.mutation(api.campaigns.create, { adminKey: slugOf(500 + i), ...base, slug: slugOf(i) });
       }
       await expect(
-        t.mutation(api.campaigns.create, { ...base, slug: slugOf(999) }),
+        t.mutation(api.campaigns.create, { adminKey: "AdminKey00000000000022", ...base, slug: slugOf(999) }),
       ).rejects.toThrow(/sehr viele Aktionen/);
       vi.advanceTimersByTime(61_000);
-      await expect(t.mutation(api.campaigns.create, { ...base, slug: slugOf(999) })).resolves.toBeTruthy();
+      await expect(t.mutation(api.campaigns.create, { adminKey: "AdminKey00000000000023", ...base, slug: slugOf(999) })).resolves.toBeTruthy();
     } finally {
       vi.useRealTimers();
     }
@@ -141,7 +141,7 @@ describe("marks", () => {
   test("Markierungen gehören nur zu ihrer Aktion", async () => {
     const t = await setup();
     const other = "ZyXwVuTsRqPoNmLkJiHgFe";
-    await t.mutation(api.campaigns.create, {
+    await t.mutation(api.campaigns.create, { adminKey: "AdminKey00000000000024",
       slug: other, name: "Andere", placeLabel: "Bonn", center: { lat: 50.7, lng: 7.1 },
     });
     await t.mutation(api.marks.set, { slug: other, osmId: "way/1", marked: true, center: HOUSE });
