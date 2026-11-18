@@ -439,18 +439,6 @@ describe("Admin-Link", () => {
     await expect(t.mutation(api.campaigns.create, { ...base, slug: "NeuerSchluessel1234567", adminKey: "NeuerSchluessel1234567" })).rejects.toThrow();
   });
 
-  test("Migration: ältere Aktionen bekommen einen eigenen Admin-Schlüssel", async () => {
-    vi.useRealTimers();
-    const t = convexTest(schema, modules);
-    await t.mutation(api.campaigns.create, { slug: SLUG, name: "Alt", placeLabel: "Ort", center: ROISDORF_POINT });
-    await t.mutation(api.campaigns.create, { slug: "ZweiteAktion1234567890", name: "Alt 2", placeLabel: "Ort", center: ROISDORF_POINT });
-    expect(await t.action(internal.migrations.addAdminKeys, {})).toBe(2);
-    expect(await t.action(internal.migrations.addAdminKeys, {})).toBe(0);
-    const keys = await t.run(async (ctx) => (await ctx.db.query("campaigns").collect()).map((c) => c.adminKey));
-    expect(keys.every((k) => /^[A-Za-z0-9]{22}$/.test(k!))).toBe(true);
-    expect(new Set(keys).size).toBe(2);
-    expect(await t.query(api.campaigns.get, { slug: keys[0]! })).toMatchObject({ role: "admin", slug: SLUG });
-  });
 });
 
 describe("nur gewählte Gebiete", () => {

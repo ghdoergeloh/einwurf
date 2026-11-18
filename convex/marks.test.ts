@@ -1,7 +1,7 @@
 // @vitest-environment edge-runtime
 import { convexTest } from "convex-test";
 import { describe, expect, test, vi } from "vitest";
-import { api, internal } from "./_generated/api";
+import { api } from "./_generated/api";
 import schema from "./schema";
 import { markCellOf, markCellsIn } from "./cells";
 import { MAX_CAMPAIGNS_PER_MINUTE, MAX_MARKS_PER_CAMPAIGN } from "./validation";
@@ -193,55 +193,6 @@ describe("marks", () => {
     expect(await t.query(api.campaigns.get, { slug: SLUG })).toMatchObject({ markCount: 1, blockedCount: 1 });
   });
 
-  test("Markierungen im alten Raster (0,01°) bleiben sichtbar, ziehen beim Ändern und per Migration um", async () => {
-    const t = await setup();
-    const far = [7.0081, 50.0081]; // dieselbe alte Zelle, andere neue Zelle
-    await t.run(async (ctx) => {
-      const c = (await ctx.db.query("campaigns").first())!;
-      await ctx.db.insert("marks", { campaignId: c._id, osmId: "way/1", center: HOUSE, cell: "700:5000", status: "done" });
-      await ctx.db.insert("marks", { campaignId: c._id, osmId: "way/2", center: far, cell: "700:5000", status: "done" });
-      await ctx.db.insert("notes", { campaignId: c._id, osmId: "way/1", center: HOUSE, cell: "700:5000", text: "alt", updatedAt: 1 });
-    });
-    const ids = async (cell: string) => (await t.query(api.marks.inCell, { slug: SLUG, cell })).map((m) => m.osmId).sort();
-    expect(await ids(CELL)).toEqual(["way/1"]);
-    expect(await ids(markCellOf(far[0], far[1]))).toEqual(["way/2"]);
-    // Neue Markierung in der neuen Zelle; eine ältere Seite fragt noch die alte Zelle ab und sieht alles.
-    await t.mutation(api.marks.set, { slug: SLUG, osmId: "way/3", status: "done", center: HOUSE });
-    expect(await ids("700:5000")).toEqual(["way/1", "way/2", "way/3"]);
-    // Notizen genauso: alte Notiz in der neuen Zelle sichtbar, eine neue auch für alte Seiten.
-    const notes = async (cell: string) => (await t.query(api.notes.inCell, { slug: SLUG, cell })).map((n) => n.osmId).sort();
-    expect(await notes(CELL)).toEqual(["way/1"]);
-    await t.mutation(api.notes.set, { slug: SLUG, osmId: "way/2", center: far, text: "neu" });
-    expect(await notes("700:5000")).toEqual(["way/1", "way/2"]);
-    expect(await notes(markCellOf(far[0], far[1]))).toEqual(["way/2"]);
-    // Ändern zieht um.
-    await t.mutation(api.marks.set, { slug: SLUG, osmId: "way/1", status: "blocked", center: HOUSE });
-    const cellOf = (osmId: string) => t.run(async (ctx) => (await ctx.db.query("marks").collect()).find((m) => m.osmId === osmId)!.cell);
-    expect(await cellOf("way/1")).toBe(CELL);
-    // Die Migration zieht den Rest um, Notizen auch; nichts geht verloren.
-    vi.useFakeTimers();
-    await t.mutation(internal.migrations.fineCells, {});
-    await t.finishAllScheduledFunctions(vi.runAllTimers);
-    vi.useRealTimers();
-    expect(await cellOf("way/2")).toBe(markCellOf(far[0], far[1]));
-    expect(await t.run(async (ctx) => (await ctx.db.query("notes").collect()).map((n) => n.cell))).toEqual([CELL, markCellOf(far[0], far[1])]);
-    expect(await ids(CELL)).toEqual(["way/1", "way/3"]);
-    expect(await ids(markCellOf(far[0], far[1]))).toEqual(["way/2"]);
-    expect((await t.query(api.notes.inCell, { slug: SLUG, cell: CELL })).map((n) => n.text)).toEqual(["alt"]);
-    expect(await t.query(api.marks.inCell, { slug: SLUG, cell: "700:5000" })).toHaveLength(3);
-  });
-
-  test("ältere Notiz zieht beim Ändern in die neue Zelle um", async () => {
-    const t = await setup();
-    await t.run(async (ctx) => {
-      const c = (await ctx.db.query("campaigns").first())!;
-      await ctx.db.insert("notes", { campaignId: c._id, osmId: "way/1", center: HOUSE, cell: "700:5000", text: "alt", updatedAt: 1 });
-    });
-    await t.mutation(api.notes.set, { slug: SLUG, osmId: "way/1", center: HOUSE, text: "geändert" });
-    expect(await t.run(async (ctx) => (await ctx.db.query("notes").first())!.cell)).toBe(CELL);
-    expect((await t.query(api.notes.inCell, { slug: SLUG, cell: CELL })).map((n) => n.text)).toEqual(["geändert"]);
-  });
-
   test("ältere Aktion mit Zählern am Datensatz: Zähler und Obergrenzen gelten weiter", async () => {
     const t = await setup();
     await t.run(async (ctx) => {
@@ -266,6 +217,8 @@ describe("marks", () => {
   test("ungültige Zelle oder unbekannte Aktion", async () => {
     const t = await setup();
     await expect(t.query(api.marks.inCell, { slug: SLUG, cell: "x" })).rejects.toThrow();
+    // Zellen im früheren Raster von 0,01° (ohne „f“) gibt es nicht mehr.
+    await expect(t.query(api.marks.inCell, { slug: SLUG, cell: "700:5000" })).rejects.toThrow();
     expect(await t.query(api.marks.inCell, { slug: "nope", cell: CELL })).toEqual([]);
   });
 });

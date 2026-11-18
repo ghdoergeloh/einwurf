@@ -4,7 +4,6 @@ import { trackMark } from "./stats";
 import { addCounts, countsOf } from "./counters";
 import { ConvexError, v } from "convex/values";
 import { markCellOf } from "./cells";
-import { marksInCell } from "./cellRows";
 import { countDelta, statusOf, type HouseStatus } from "./status";
 import {
   MAX_MARKS_PER_CAMPAIGN,
@@ -27,7 +26,10 @@ export const inCell = query({
     assertCell(cell);
     const campaign = (await campaignByKey(ctx, slug))?.campaign;
     if (!campaign) return [];
-    const marks = await marksInCell(ctx, campaign._id, cell);
+    const marks = await ctx.db
+      .query("marks")
+      .withIndex("by_campaign_cell", (q) => q.eq("campaignId", campaign._id).eq("cell", cell))
+      .collect();
     return marks.map((m) => ({ osmId: m.osmId, center: m.center, status: m.status ?? ("done" as const) }));
   },
 });
@@ -69,8 +71,7 @@ export const set = mutation({
     if (target === "none") {
       await ctx.db.delete(existing!._id);
     } else if (existing) {
-      // Ältere Markierung im alten Raster: dabei in die neue Zelle umziehen.
-      await ctx.db.patch(existing._id, { status: target, cell: markCellOf(existing.center[0], existing.center[1]), ...area });
+      await ctx.db.patch(existing._id, { status: target, ...area });
     } else {
       const counts = await countsOf(ctx, campaign);
       const total = counts.done + counts.blocked;

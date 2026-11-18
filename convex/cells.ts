@@ -5,36 +5,13 @@
  * (Database I/O), aber auch nicht zu klein (zu viele Abos je Bildschirm).
  * Wird von Backend und Frontend genutzt.
  *
- * Schlüssel: „f<x>:<y>“. Ältere Einträge haben noch Zellen von 0,01° ohne „f“ (LEGACY);
- * marks.inCell und notes.inCell lesen beide, bis migrations:fineCells gelaufen ist.
+ * Schlüssel: „f<x>:<y>“ (das „f“ unterscheidet sie vom früheren Raster von 0,01°).
  */
 export const MARK_CELL_DEG = 0.005;
-export const LEGACY_CELL_DEG = 0.01;
-/** Neue Zellen mit „f“, ältere ohne (noch von älteren Seiten abonniert). */
-export const MARK_CELL_PATTERN = /^f?-?\d{1,5}:-?\d{1,5}$/;
-const RATIO = Math.round(LEGACY_CELL_DEG / MARK_CELL_DEG);
+export const MARK_CELL_PATTERN = /^f-?\d{1,5}:-?\d{1,5}$/;
 
 export function markCellOf(lng: number, lat: number): string {
   return `f${Math.floor(lng / MARK_CELL_DEG)}:${Math.floor(lat / MARK_CELL_DEG)}`;
-}
-
-/** Ist das eine Zelle im alten Raster (0,01°)? */
-export const isLegacyCell = (cell: string) => !cell.startsWith("f");
-
-const parse = (cell: string) => cell.replace(/^f/, "").split(":").map(Number) as [number, number];
-
-/** Alte Zelle (0,01°), in der eine neue liegt. */
-export function legacyParentOf(cell: string): string {
-  const [x, y] = parse(cell);
-  return `${Math.floor(x / RATIO)}:${Math.floor(y / RATIO)}`;
-}
-
-/** Neue Zellen, die eine alte überdecken. */
-export function fineChildrenOf(legacy: string): string[] {
-  const [x, y] = parse(legacy);
-  const out: string[] = [];
-  for (let i = 0; i < RATIO; i++) for (let j = 0; j < RATIO; j++) out.push(`f${x * RATIO + i}:${y * RATIO + j}`);
-  return out;
 }
 
 /** Alle Zellen, die einen Ausschnitt [west, süd, ost, nord] überdecken. */

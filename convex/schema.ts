@@ -81,21 +81,6 @@ export default defineSchema({
     .index("by_campaign_area", ["campaignId", "areaId"]),
 
   /**
-   * Veraltet: Ladezustand aus einem Vorabstand von PR #7, nur noch in Preview-Datenbanken.
-   * Wird nicht mehr benutzt; nach dem Merge entfernen (Produktion hatte die Tabelle nie).
-   */
-  areaSets: defineTable({
-    campaignId: v.id("campaigns"),
-    status: v.union(v.literal("loading"), v.literal("done"), v.literal("failed")),
-    whole: v.optional(v.boolean()),
-    unselected: v.array(v.string()),
-    failures: v.number(),
-    lastError: v.optional(v.string()),
-    updatedAt: v.number(),
-    run: v.number(),
-  }),
-
-  /**
    * Cache der Ortsteile aus OSM (convex/areas.ts). Ohne campaignId gemeinsam für alle Aktionen
    * (von Convex selbst bei Overpass geladen); mit campaignId nur für diese Aktion (vom Browser
    * ihres Admins geladen und geschickt, deshalb nicht für andere vertrauenswürdig).

@@ -4,7 +4,6 @@ import { addCounts, countsOf } from "./counters";
 import { ConvexError, v } from "convex/values";
 import type { Id } from "./_generated/dataModel";
 import { markCellOf } from "./cells";
-import { notesInCell } from "./cellRows";
 import { MAX_NOTES_PER_CAMPAIGN, SLUG_PATTERN, assertCell, assertCenter, assertOsmId, assertSlug, cleanNote } from "./validation";
 
 /**
@@ -37,7 +36,10 @@ export const inCell = query({
     assertCell(cell);
     const campaign = (await campaignByKey(ctx, slug))?.campaign;
     if (!campaign) return [];
-    const notes = await notesInCell(ctx, campaign._id, cell);
+    const notes = await ctx.db
+      .query("notes")
+      .withIndex("by_campaign_cell", (q) => q.eq("campaignId", campaign._id).eq("cell", cell))
+      .collect();
     return notes.map((n) => ({ osmId: n.osmId, center: n.center, text: n.text, updatedAt: n.updatedAt }));
   },
 });
@@ -59,8 +61,6 @@ export const set = mutation({
       await ctx.db.patch(existing._id, {
         text: clean,
         updatedAt: Math.max(Date.now(), existing.updatedAt + 1),
-        // Ältere Notiz im alten Raster: dabei in die neue Zelle umziehen.
-        cell: markCellOf(existing.center[0], existing.center[1]),
       });
       return;
     }
