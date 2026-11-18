@@ -28,18 +28,11 @@ import { countDelta, statusOf, type HouseStatus } from "./status";
  * (für Häuser und Markierungen gleich). So zählt jedes Haus, das die Karte antippbar zeigt.
  */
 
-/**
- * Markierungen je Schritt beim Nachziehen; Kacheln je Schritt beim Zählen der Häuser. Jeder
- * Schritt liest alle Grenzen der Aktion; größere Schritte sparen Database I/O.
- */
-const ASSIGN_BATCH = 1000;
-const COUNT_BATCH = 60;
-/**
- * Neu zählen auf Wunsch (Statistik öffnen) nur, solange die Zahl vorläufig ist, und höchstens
- * so oft. Eine vollständige Zählung liest jede Kachel des Gebäude-Caches einmal; früher lief sie
- * bei jedem Öffnen und kostete den größten Teil des Database-I/O-Kontingents.
- */
-const REFRESH_MIN_MS = 15 * 60_000;
+/** Markierungen je Schritt beim Nachziehen; Kacheln je Schritt beim Zählen der Häuser. */
+const ASSIGN_BATCH = 400;
+const COUNT_BATCH = 20;
+/** Neu zählen auf Wunsch höchstens so oft. */
+const REFRESH_MIN_MS = 60_000;
 
 /** Gebiete der Aktion (gewählte und abgewählte). */
 const areaDocs = (ctx: QueryCtx, campaignId: Id<"campaigns">) =>
@@ -372,9 +365,6 @@ export const refresh = mutation({
     if (await syncAreaStats(ctx, campaign._id)) return;
     const job = await current(ctx, campaign._id);
     if (!job || job.cells !== "" || Date.now() - job.countedAt < REFRESH_MIN_MS) return;
-    const rows = await statRows(ctx, campaign._id, job.run);
-    const off = unselectedOf(rows);
-    const preliminary = rows.some((r) => !off.has(r.areaId) && (r.houses === undefined || r.cellsCounted < r.cellsTotal));
-    if (preliminary) await recountHouses(ctx, campaign._id);
+    await recountHouses(ctx, campaign._id);
   },
 });

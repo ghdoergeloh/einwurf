@@ -4,7 +4,7 @@ import { trackMark } from "./stats";
 import { addCounts, countsOf } from "./counters";
 import { ConvexError, v } from "convex/values";
 import { markCellOf } from "./cells";
-import { rowsInCell } from "./cellRows";
+import { marksInCell } from "./cellRows";
 import { countDelta, statusOf, type HouseStatus } from "./status";
 import {
   MAX_MARKS_PER_CAMPAIGN,
@@ -27,7 +27,7 @@ export const inCell = query({
     assertCell(cell);
     const campaign = (await campaignByKey(ctx, slug))?.campaign;
     if (!campaign) return [];
-    const marks = await rowsInCell(ctx, "marks", campaign._id, cell);
+    const marks = await marksInCell(ctx, campaign._id, cell);
     return marks.map((m) => ({ osmId: m.osmId, center: m.center, status: m.status ?? ("done" as const) }));
   },
 });

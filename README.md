@@ -38,7 +38,7 @@ Ein Tipp auf den Zähler oben öffnet die **Statistik**, für alle mit einem Lin
 
 **Ältere Aktionen** (vor dem Admin-Link angelegt) bekommen ihren Admin-Schlüssel durch eine einmalige Migration: im Convex-Dashboard unter *Functions* `migrations:addAdminKeys` ohne Argumente ausführen (mehrfaches Ausführen schadet nicht). Bis dahin gilt für sie der ganze Ort; danach wählt der Organisator im Admin-Link wie oben die Ortsteile.
 
-**Feineres Raster für Markierungen.** Ältere Markierungen und Notizen liegen noch in Zellen von 0,01°. Sie bleiben sichtbar, kosten aber mehr Database I/O, bis sie umgezogen sind: einmal im Convex-Dashboard unter *Functions* `migrations:fineCells` ohne Argumente ausführen (läuft im Hintergrund in Schritten, ändert nur das Feld `cell`, mehrfaches Ausführen schadet nicht).
+**Feineres Raster für Markierungen.** Ältere Markierungen und Notizen liegen noch in Zellen von 0,01°. Sie bleiben sichtbar, kosten aber mehr Database I/O, bis sie umgezogen sind: **direkt nach dem Deploy** einmal im Convex-Dashboard unter *Functions* `migrations:fineCells` ohne Argumente ausführen (läuft im Hintergrund in Schritten, ändert nur das Feld `cell`, mehrfaches Ausführen schadet nicht). Bis dahin liest jede neue Zelle ihre ganze alte Zelle mit, das kostet kurz mehr als vorher. Danach gibt es keinen Weg zurück auf eine ältere Version: Sie fände die umgezogenen Markierungen nicht (gespeichert bleiben sie). Fehler also vorwärts beheben.
 
 ## Bedienung der Karte
 
